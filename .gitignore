@@ -1,0 +1,25 @@
+# macOS noise
+.DS_Store
+._*
+
+# Editor backup / swap files
+*~
+*.swp
+*.swo
+.#*
+\#*\#
+
+# Backup files the script writes (timestamped <orig>.bak.<YYYYMMDD-HHMMSS>)
+*.bak.*
+
+# Python bytecode (none expected here, but defensive)
+*.pyc
+__pycache__/
+
+# State / local config that should never be committed
+.argo_opencode.server.log
+.argo_opencode.sh
+
+# IDE / editor metadata
+.idea/
+.vscode/

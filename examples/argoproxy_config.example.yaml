@@ -1,0 +1,31 @@
+# Example argo-proxy configuration written by argo_opencode.sh on the
+# compute node side (~/.config/argoproxy/config.yaml).
+#
+# The script's writer owns four keys: config_version, user, host, port.
+# All other keys are preserved from any existing file (the YAML merge logic
+# in write_argoproxy_config). A FRESH install gets just the six keys below;
+# a merged install will additionally have whatever was already in the file
+# (argo_url, argo_embedding_url, max_payload_size, etc.).
+
+config_version: "3"
+user: "<your-anl-username>"
+host: 127.0.0.1
+port: 64742
+verbose: true
+argo_base_url: "https://apps.inside.anl.gov/argoapi"
+
+# --- Optional keys you (or argo-proxy's installer) may add manually ----
+# These are NOT written by the script. They are preserved if present.
+#
+# Per-endpoint overrides (overrides argo_base_url for specific endpoints):
+# argo_url:           https://apps-dev.inside.anl.gov/argoapi/api/v1/resource/chat/
+# argo_stream_url:    https://apps-dev.inside.anl.gov/argoapi/api/v1/resource/streamchat/
+# argo_embedding_url: https://apps.inside.anl.gov/argoapi/api/v1/resource/embed/
+#
+# Operational tuning:
+# concurrent_downloads:     10
+# connection_test_timeout:  5
+# image_timeout:            30
+# max_payload_size:         20
+# enable_payload_control:   false
+# resolve_overrides:        {}
