@@ -11,9 +11,12 @@
 #   argo_opencode.sh stop            # tear down the local tunnel
 #   argo_opencode.sh -h | --help
 #
-# Distribution: hosted at https://web.cels.anl.gov/~aattia/argo_opencode.sh
-# Users:
-#   curl -fsSL https://web.cels.anl.gov/~aattia/argo_opencode.sh -o argo_opencode.sh
+# Distribution: https://github.com/a-attia/argo-opencode
+# Users (latest):
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh -o argo_opencode.sh
+#   bash argo_opencode.sh
+# Users (pinned to a release tag, recommended for stability):
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/argo_opencode.sh -o argo_opencode.sh
 #   bash argo_opencode.sh
 #
 # Author: Ahmed Attia (attia@anl.gov)
@@ -2614,7 +2617,11 @@ you over SSH on the chosen compute node.
 
 QUICK START
 -----------
-  curl -fsSL https://web.cels.anl.gov/~aattia/${script_name} -o ${script_name}
+  # Latest from main:
+  curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/${script_name} -o ${script_name}
+  # ...or pin to a release tag (recommended once you have a setup that works):
+  curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/${script_name} -o ${script_name}
+
   bash ${script_name}                # runs 'client' by default
   # ...in another terminal once it says "Tunnel is live":
   opencode
@@ -2875,7 +2882,7 @@ REFERENCES
   argo-proxy source: https://github.com/Oaklight/argo-proxy
   OpenCode:          https://opencode.ai/
   ANL AI4Dev notes:  https://web.cels.anl.gov/~jacob/ai4dev.html
-  This script:       https://web.cels.anl.gov/~aattia/${script_name}
+  This script:       https://github.com/a-attia/argo-opencode
   Maintainer:        Ahmed Attia (attia@anl.gov)
 
 SECURITY NOTE

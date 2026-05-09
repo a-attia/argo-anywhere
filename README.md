@@ -18,13 +18,21 @@ run `client`.**
 
 ## Quick start
 
+Pinned to a release (recommended for stability):
+
 ```sh
-# Download (or curl from a release tag once tagged):
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh \
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/argo_opencode.sh \
      -o argo_opencode.sh
 bash argo_opencode.sh                # runs 'client' by default
 # ...in another terminal once it says "Tunnel is live":
 opencode
+```
+
+Or live from `main` (gets you the latest fixes, may move under your feet):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh \
+     -o argo_opencode.sh
 ```
 
 The first run prompts for your ANL (Argonne) username and asks you to pick
