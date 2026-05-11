@@ -295,6 +295,51 @@ Maintenance rules:
   raw URL. Each row's `curl -fsSL …/<name>.sh -o <name>.sh` works
   independently.
 
+### Single-instance constraint (one tunnel + one argo-proxy per user per node)
+
+The script is built around the assumption that each user runs **one**
+argo-proxy per compute node and **one** SSH tunnel per local port.
+Concrete pinch points:
+
+- `SCREEN_SESSION="agovproxy"` is a single global constant. argo-proxy
+  is always started inside the screen/tmux session named `agovproxy` —
+  no per-port suffix.
+- `~/.config/argoproxy/config.yaml` is the single argo-proxy config
+  file on the node. Its `port:` line is mutated on each invocation.
+- `local_tunnel_status` checks only "is something on this port?";
+  it can't tell which destination the tunnel targets.
+
+Implications:
+
+- A user who runs `client` twice with **different ports on the same
+  node** would silently destroy the first run's argo-proxy (the second
+  run's bootstrap kills the existing screen session that happens to
+  share the name). The detect-and-warn check in `mode_server`
+  (introduced in audit fix G1) catches this and asks before killing.
+- A user who runs `client` twice with **same port to different nodes**
+  would silently reuse the first tunnel (which targets the first
+  node) for traffic intended for the second. The detect-and-warn check
+  in `ensure_or_reuse_tunnel` (also G1) catches this and refuses.
+- `status` / `stop` / `clean` operate on a single `PROXY_PORT` value.
+  No "show me ALL my tunnels" view exists.
+
+If we ever lift this constraint (multi-instance support), the touchpoints
+to consider:
+- per-port screen session names (`agovproxy-${PROXY_PORT}`)
+- per-instance argo-proxy config files (e.g. `~/.config/argoproxy/<port>.yaml`)
+  OR a single multi-instance argo-proxy that the user runs once with
+  multiple `serve` invocations on different ports (not currently
+  supported by argo-proxy upstream).
+- `local_tunnel_status` to also verify the destination matches.
+- `status` / `stop` / `clean` redesigned around "show all" instead of
+  "show one".
+
+Don't take this on lightly — argo-shim chose a different lane (Python,
+deterministic per-user-port naming, single-purpose) and we explicitly
+chose ours (bash, single-port-default, multi-client-per-tunnel). The
+detect-and-warn checks let users discover the limitation gracefully
+without us having to expand the surface area.
+
 ### `clean` subcommand risk tiers
 
 Three risk tiers:

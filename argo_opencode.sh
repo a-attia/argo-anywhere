@@ -129,8 +129,19 @@ ANL_NODES=(
   compute-01.cels.anl.gov
   compute-02.cels.anl.gov
   compute-03.cels.anl.gov
-  # compute-04.cels.anl.gov   # <-- example: uncomment / add more here
-  # compute-05.cels.anl.gov
+  compute-04.cels.anl.gov
+  # compute-05.cels.anl.gov  # <-- frequently down
+  compute-06.cels.anl.gov
+  # compute-07.cels.anl.gov  # <-- frequently down
+  compute-08.cels.anl.gov
+  # compute-09.cels.anl.gov  # <-- frequently down
+  compute-10.cels.anl.gov
+  # compute-11.cels.anl.gov  # <-- frequently down
+  compute-12.cels.anl.gov
+  compute-13.cels.anl.gov
+  # compute-14.cels.anl.gov  # <-- frequently down
+  compute-15.cels.anl.gov
+  # compute-xx.cels.anl.gov   # <-- example: uncomment / add more here
 )
 
 ANL_JUMP="logins.cels.anl.gov"
@@ -1228,6 +1239,14 @@ pick_node() {
         working+=("$node")
       else
         warn "  unreachable: ${node}"
+        # Bail early if the SSH attempt tracker has locked: the rest of
+        # the probe loop would silently mark every remaining node as
+        # "unreachable" without actually trying ssh (because
+        # ssh_attempt_pre returns 1 once locked). Better to fail fast
+        # with the recovery message already shown by the tracker.
+        if [ "${_SSH_LOCKED:-0}" = 1 ]; then
+          die "SSH attempt tracker has locked further attempts mid-probe; cannot continue. See above for recovery."
+        fi
       fi
     done
     [ "${#working[@]}" -gt 0 ] || die "No ANL_NODES are reachable. Check the list or your access."
@@ -1309,6 +1328,13 @@ EOF
         ok "  reachable: ${choice}"
         picked="$choice"; break
       else
+        # Bail out if the SSH attempt tracker has locked. Without this,
+        # the user could keep typing forever -- ssh_reachable returns
+        # failure immediately (without trying ssh) once locked, so the
+        # "pick again" loop would never make progress.
+        if [ "${_SSH_LOCKED:-0}" = 1 ]; then
+          die "SSH attempt tracker has locked further attempts; cannot continue. See above for recovery."
+        fi
         warn "Could not reach '${choice}' $(jump_descr) as ${user}; pick again."
         continue
       fi
@@ -1995,6 +2021,34 @@ ensure_or_reuse_tunnel() {
   # 1) Local-side classification first. If we have a healthy local
   #    listener, decide whether to reuse it before doing any SSH work.
   local lstatus; lstatus="$(local_tunnel_status "$PROXY_PORT")"
+
+  # Sanity check before reuse: we can't directly read what node a running
+  # ssh tunnel targets, but we have the cached node from the last run.
+  # If the user is asking for a DIFFERENT node from the cached one AND
+  # we found a healthy tunnel on the requested port, it's almost certainly
+  # the previous run's tunnel pointed at the cached node, not the
+  # currently-requested one. Reusing it would silently send the user's
+  # traffic to the wrong destination. Detect and warn.
+  local cached_node_for_check=""
+  [ -f "$NODE_CACHE" ] && cached_node_for_check="$(cat "$NODE_CACHE" 2>/dev/null)"
+  case "$lstatus" in
+    ours-healthy-fg|ours-healthy-mux)
+      if [ -n "$cached_node_for_check" ] && [ "$cached_node_for_check" != "$node" ]; then
+        warn "An existing tunnel is bound to localhost:${PROXY_PORT}, but it was opened"
+        warn "  by a previous run targeting '${cached_node_for_check}', not the node you"
+        warn "  just picked ('${node}'). Reusing it would silently send traffic to the"
+        warn "  WRONG node. The script supports ONE tunnel per local port; you can't"
+        warn "  have two tunnels on the same port to different nodes."
+        warn ""
+        warn "Options:"
+        warn "  * Stop the existing tunnel ('$(basename "$0") stop') and re-run."
+        warn "  * Pick a different port ('--port N') for this run."
+        warn "  * Re-run targeting '${cached_node_for_check}' (the existing tunnel's destination)."
+        die "Refusing to silently reuse a tunnel pointed at a different node."
+      fi
+      ;;
+  esac
+
   case "$lstatus" in
     ours-healthy-fg)
       # A foreground ssh -N -L we (or a previous invocation by the same
@@ -2574,12 +2628,6 @@ mode_server() {
       esac
     fi
   fi
-  # Propagate resolved values to the upcoming re-exec (and to any other
-  # child processes mode_server might spawn). This is what lets the
-  # re-exec'd 'bash $0 server' see them as already-set in env, so its
-  # own standalone-detection branch is a no-op.
-  export ARGO_OPENCODE_USER ARGO_OPENCODE_PORT
-
   # If we haven't already, re-invoke ourselves with stdout+stderr piped through
   # tee so the bootstrap log captures everything. Avoids process substitution
   # (>(...)) so this stays robust on minimal shells.
@@ -2600,10 +2648,20 @@ mode_server() {
   # has more work to do after the bootstrap finishes). The signal is
   # the _MODE_SERVER_INPROC global, which the in-process caller sets
   # before invoking us.
+  #
+  # We pass ARGO_OPENCODE_USER/PORT to the subprocess via env on the
+  # bash command line (NOT via a shell-level export). This narrows the
+  # scope: only the tee'd subprocess sees them, not the rest of the
+  # parent shell's lifetime. Important when mode_server is called
+  # in-process from _client_common_setup -- a top-level export would
+  # leak the resolved identity into anything else that ran in this
+  # shell after mode_server returns.
   if [ -z "${ARGO_OPENCODE_LOGGING:-}" ]; then
-    export ARGO_OPENCODE_LOGGING=1
     mkdir -p "$(dirname "${HOME}/${REMOTE_LOG}")"
-    bash "$0" server 2>&1 | tee -a "${HOME}/${REMOTE_LOG}"
+    ARGO_OPENCODE_LOGGING=1 \
+      ARGO_OPENCODE_USER="$ARGO_OPENCODE_USER" \
+      ARGO_OPENCODE_PORT="$ARGO_OPENCODE_PORT" \
+      bash "$0" server 2>&1 | tee -a "${HOME}/${REMOTE_LOG}"
     local rc="${PIPESTATUS[0]}"
     if [ "${_MODE_SERVER_INPROC:-0}" = 1 ]; then
       # In-process call: return so the caller can continue. Failure
@@ -2754,10 +2812,50 @@ mode_server() {
 
   # We reach this point only when nothing is listening on PROXY_PORT (the
   # earlier "is something already serving?" branch returned). If a screen
-  # or tmux session by our name still exists, it's empty (the argo-proxy
-  # process inside it died, e.g. from a previous 'stop'). Cleaning it up
-  # before starting a fresh one is correct, but the wording matters: this
-  # is housekeeping, not 'killing something useful.'
+  # or tmux session by our name still exists, it's USUALLY empty (the
+  # argo-proxy process inside it died, e.g. from a previous 'stop') --
+  # but in one important case it's NOT empty: a previous client/server
+  # invocation that used a DIFFERENT port. The script only supports one
+  # argo-proxy per user per node (single SCREEN_SESSION name, single
+  # ~/.config/argoproxy/config.yaml). Killing the session would silently
+  # destroy that other instance and strand any tunnel pointed at it.
+  # Detect this multi-port collision and warn before killing.
+  local other_argoproxy_port=""
+  if pgrep -u "$(id -un)" -f "argo-proxy serve" >/dev/null 2>&1; then
+    # We own at least one argo-proxy. Find what port(s) it's bound to,
+    # excluding the one we're about to start on (which we already
+    # confirmed is free).
+    other_argoproxy_port="$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
+      | awk -v me="$(id -un)" -v want="$PROXY_PORT" '
+          $1 ~ /^argo/ && $3 == me {
+            split($9, a, ":");
+            p = a[length(a)];
+            gsub(/[^0-9]/, "", p);
+            if (p != "" && p != want) print p;
+          }' | head -n1)"
+  fi
+  if [ -n "$other_argoproxy_port" ]; then
+    warn "You already have an argo-proxy of yours running on port ${other_argoproxy_port}"
+    warn "  on this host. The script supports ONE argo-proxy per user per node"
+    warn "  (single screen session '${SCREEN_SESSION}', single config file at"
+    warn "  ~/.config/argoproxy/config.yaml). Starting a new one on port ${PROXY_PORT}"
+    warn "  will require killing the existing screen session, which destroys"
+    warn "  the argo-proxy on :${other_argoproxy_port} and strands any tunnel pointed there."
+    warn ""
+    if [ "${CLEAN_ASSUME_YES:-0}" = 1 ]; then
+      warn "Proceeding (-y / --yes given)."
+    else
+      local reply; reply="$(ask "Replace the existing argo-proxy on :${other_argoproxy_port} with a new one on :${PROXY_PORT}? [y/N]:" "n")"
+      case "$reply" in
+        y|Y|yes|YES|Yes) ;;
+        *) die "Aborted at multi-port-collision step. Use the existing port (${other_argoproxy_port}) or stop the existing argo-proxy first ('$(basename "$0") stop')." ;;
+      esac
+    fi
+  fi
+
+  # Past the multi-port check. If a session still exists, treat it as
+  # housekeeping (the process inside it died, e.g. from a previous
+  # 'stop') and clean up calmly before starting fresh.
   case "$launcher" in
     screen)
       if screen -ls 2>/dev/null | grep -q "\.${SCREEN_SESSION}\b"; then
@@ -3110,7 +3208,18 @@ render_summary() {
       missing=$((SUM_MODEL_UNIQ_COUNT - SUM_CFG_AVAIL_COUNT))
       [ "$missing" -lt 0 ] && missing=0
     fi
-    if [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ] || [ "$missing" -gt 0 ]; then
+    # Three sub-cases here, branching on whether the user has an OpenCode
+    # config at all and what model drift exists:
+    #
+    #   * No OpenCode config exists yet -> 'update-models' would die with
+    #     "Run 'client' first." Suggest 'client' instead. (G5 fix.)
+    #   * Config exists, has drift (orphans or new available) -> suggest
+    #     'update-models' to reconcile.
+    #   * Config exists and is in sync -> just run 'opencode'.
+    if [ ! -f "${HOME}/.config/opencode/config.json" ]; then
+      lines+=("OpenCode config not yet written. Run  '$(basename "$0") client'")
+      lines+=("  to install OpenCode and write its config, then 'opencode' to use it.")
+    elif [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ] || [ "$missing" -gt 0 ]; then
       local hint=""
       if [ "$missing" -gt 0 ] && [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ]; then
         hint="add ${missing} new and review ${SUM_CFG_ORPHAN_COUNT} orphan(s)"
@@ -3914,9 +4023,26 @@ EOS
     # Forward the values we need via env on the ssh command line.
     local remote_env
     remote_env="SCREEN_SESSION='${SCREEN_SESSION}' REMOTE_SELF='${REMOTE_SELF}' REMOTE_LOG='${REMOTE_LOG}' RC='${rc_choice}' DRY='${CLEAN_DRY_RUN:-0}'"
+    # On-node short-circuit: if cached_node refers to this host, the
+    # "remote" cleanup is actually local. Run the script directly with
+    # bash instead of going through ssh -- avoids a useless SSH hop
+    # to ourselves (and the associated mux master setup if MFA mode
+    # were on, though it shouldn't be for an intra-site connection).
+    local cleanup_is_local=0
+    if host_is_target "$cached_node"; then
+      cleanup_is_local=1
+    fi
     if [ "${CLEAN_DRY_RUN:-0}" = 1 ]; then
-      log "[dry-run] would ssh ${cached_user}@${cached_node} $(jump_descr) and run remote cleanup."
+      if [ "$cleanup_is_local" -eq 1 ]; then
+        log "[dry-run] cached_node ${cached_node} resolves to this host; would run cleanup locally (no ssh)."
+      else
+        log "[dry-run] would ssh ${cached_user}@${cached_node} $(jump_descr) and run remote cleanup."
+      fi
       log "  [dry-run] env to forward: ${remote_env}"
+    elif [ "$cleanup_is_local" -eq 1 ]; then
+      log "Running remote-cleanup script locally (cached_node ${cached_node} is this host)..."
+      eval "${remote_env} bash" "${remote_script_file}" 2>&1 | sed 's/^/    /' || \
+        warn "Local-equivalent cleanup returned non-zero; some artifacts may remain."
     else
       # shellcheck disable=SC2046
       ssh -o StrictHostKeyChecking=accept-new \
