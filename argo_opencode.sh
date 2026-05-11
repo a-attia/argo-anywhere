@@ -375,22 +375,111 @@ on_anl_compute_node() {
   printf '%s' "$ans"
 }
 
-# host_is_target <hostname>: prints 'yes' if <hostname> matches our local
-# FQDN (or the short-name form). Used to detect "the node the user picked
-# is the node we're already on" -- in which case skipping the SSH tunnel
-# and pointing the client straight at 127.0.0.1:PORT is the right move.
+# _my_interface_ips: print all IPv4 addresses bound to interfaces on this
+# host, one per line. Used by host_is_target to handle the load-balanced-
+# alias case where the user-typed hostname doesn't match `hostname -f` but
+# DOES resolve to an IP we're bound to.
+#
+# Cross-platform: try `ip` (Linux iproute2), fall back to `ifconfig`
+# (macOS, BSD, older Linux). Skip 127.0.0.1 and 0.0.0.0 -- those don't
+# help for alias matching since every host has them.
+_my_interface_ips() {
+  if command -v ip >/dev/null 2>&1; then
+    ip -o -4 addr show 2>/dev/null \
+      | awk '{print $4}' \
+      | cut -d/ -f1 \
+      | grep -vE '^(127\.|0\.0\.0\.0$)'
+  elif command -v ifconfig >/dev/null 2>&1; then
+    ifconfig 2>/dev/null \
+      | awk '/inet (addr:)?[0-9]/{
+          gsub(/^addr:/,"",$2);
+          ip=$2; sub(/^addr:/,"",ip);
+          print ip
+        }' \
+      | grep -vE '^(127\.|0\.0\.0\.0$)'
+  fi
+}
+
+# host_is_target <hostname>: prints 'yes' if <hostname> refers to this
+# host. Used to detect "the node the user picked is the node we're
+# already on" -- in which case skipping the SSH tunnel and pointing the
+# client straight at 127.0.0.1:PORT is the right move.
+#
+# Three checks, in increasing order of cost:
+#
+#   1. String comparison against `hostname -f` (cheapest; catches
+#      explicit --node compute-386-01.cels.anl.gov-style invocations).
+#
+#   2. DNS resolution of <hostname> compared to DNS resolution of
+#      `hostname -f` (cheap; one getent each; catches the case where
+#      both names resolve to the same IP without a string match).
+#
+#   3. DNS resolution of <hostname> intersected with our own interface
+#      IPs (catches the load-balanced-alias case: user types
+#      compute-01.cels.anl.gov, the alias round-robins to several
+#      physical hosts including this one, the cheap string check at (1)
+#      and the resolution-of-our-fqdn at (2) miss because they only
+#      compare to ONE name we know we have).
 host_is_target() {
   local target; target="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local me; me="$(this_host_fqdn)"
   [ -n "$me" ] || return 1
+
+  # (1) cheap string comparison + short-name tolerance
   if [ "$me" = "$target" ]; then return 0; fi
-  # Tolerate short-name vs FQDN mismatch in either direction.
   case "$me" in
     "${target}".*) return 0 ;;
   esac
   case "$target" in
     "${me}".*) return 0 ;;
   esac
+
+  # (2) compare resolved IPs (cheap; one getent each). Only attempt when
+  # getent is available (Linux) -- macOS doesn't ship it but the alias-
+  # match case isn't usually relevant on macOS (you're not on a node
+  # whose alias another machine knows). Skip silently if getent missing;
+  # fall through to (3) below.
+  if command -v getent >/dev/null 2>&1; then
+    local target_ip me_ip
+    target_ip="$(getent hosts "$target" 2>/dev/null | awk '{print $1; exit}')"
+    me_ip="$(getent hosts "$me" 2>/dev/null | awk '{print $1; exit}')"
+    if [ -n "$target_ip" ] && [ -n "$me_ip" ] && [ "$target_ip" = "$me_ip" ]; then
+      return 0
+    fi
+  fi
+
+  # (3) does the target alias resolve to any of MY interface IPs?
+  # Robust against round-robin DNS where the alias has multiple A
+  # records and only some of them are us.
+  local target_ips my_ips
+  if command -v getent >/dev/null 2>&1; then
+    target_ips="$(getent hosts "$target" 2>/dev/null | awk '{print $1}')"
+  else
+    # macOS / no getent: try host or dscacheutil. Best-effort; if none
+    # available, return failure (we tried).
+    if command -v host >/dev/null 2>&1; then
+      target_ips="$(host "$target" 2>/dev/null \
+                     | awk '/has address/{print $NF}')"
+    elif command -v dscacheutil >/dev/null 2>&1; then
+      target_ips="$(dscacheutil -q host -a name "$target" 2>/dev/null \
+                     | awk '/^ip_address:/{print $2}')"
+    else
+      target_ips=""
+    fi
+  fi
+  [ -n "$target_ips" ] || return 1
+
+  my_ips="$(_my_interface_ips)"
+  [ -n "$my_ips" ] || return 1
+
+  local tip mip
+  for tip in $target_ips; do
+    for mip in $my_ips; do
+      if [ "$tip" = "$mip" ]; then
+        return 0
+      fi
+    done
+  done
   return 1
 }
 
