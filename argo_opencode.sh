@@ -1138,14 +1138,21 @@ open_tunnel_and_monitor() {
       die "Tunnel up but proxy not answering on localhost:${PROXY_PORT} after ${waited}s."
     fi
   done
-  ok "Tunnel is live. argo-proxy responding at http://localhost:${PROXY_PORT}"
+  ok "Tunnel is live. argo-proxy reachable at http://localhost:${PROXY_PORT}/v1"
 
   # Render the same summary box that `status` shows, so the user sees one
   # easily-interpretable block before we go quiet in the foreground.
   gather_summary
   render_summary
 
-  log "You can now run: opencode    (or whatever client you prefer)"
+  # Be honest about what this script HAS configured (OpenCode) vs what else
+  # could in principle reach the proxy. The /v1 base URL is OpenAI-compatible,
+  # so any client speaking that dialect (Claude Code, aider, codex, raw curl,
+  # the OpenAI Python/Node SDKs, etc.) can target the URL directly using the
+  # same Argonne-username-as-bearer-token scheme.
+  log "OpenCode is installed and configured for this proxy.  Run: opencode"
+  log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
+  log "  with Authorization: Bearer ${ANL_USERNAME}"
 
   # Background health monitor. Notes the tunnel pid, polls /health on a timer,
   # notifies the user on sustained failure or tunnel-process death.
