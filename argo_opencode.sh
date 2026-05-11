@@ -40,10 +40,10 @@
 #      mid-script. We additionally check POSIXLY_CORRECT to force the re-exec
 #      under a clean, non-POSIX `bash`.
 #
-# Bug history: B17 -- without the POSIXLY_CORRECT branch, `sh argo_opencode.sh`
-# on macOS ran as far as opening the tunnel before bombing on `<(...)` in
-# gather_summary. The re-exec now happens before any non-POSIX construct
-# can be parsed.
+# Bug history: without the POSIXLY_CORRECT branch above (the "macOS-sh-is-
+# bash-in-POSIX-mode" bug), `sh argo_opencode.sh` on macOS ran as far as
+# opening the tunnel before bombing on `<(...)` in gather_summary. The
+# re-exec now happens before any non-POSIX construct can be parsed.
 if [ -z "${BASH_VERSION:-}" ] || [ -n "${POSIXLY_CORRECT:-}" ]; then
   # Drop POSIXLY_CORRECT so the re-exec'd bash doesn't inherit POSIX mode
   # via the env. (`exec bash` alone would re-set it from the inherited env.)
@@ -62,20 +62,33 @@ set -euo pipefail
 #   2.  USER-EDITABLE CONFIG     -- ANL_NODES, ANL_JUMP, defaults
 #   3.  PRETTY PRINTING          -- colors, log/ok/warn/err/die/ask
 #   4.  BOX DRAWING              -- print_summary_box and helpers
-#   5.  PLATFORM HELPERS         -- detect_os, notify_user
+#   5.  PLATFORM HELPERS         -- detect_os, this_host_fqdn, on_anl_compute_node,
+#                                   _my_interface_ips, host_is_target, notify_user
 #   6.  ENV NAMESPACING          -- legacy -> ARGO_OPENCODE_* promotion
 #   7.  PORT RESOLUTION          -- read from config, --port handling
 #   8.  JUMP HOST HANDLING       -- ssh_jump_args, jump_descr
-#   9.  MFA / MULTIPLEXING       -- ssh_mux_args, ssh_args, ssh_reachable
+#   9.  MFA / SSH MULTIPLEXING   -- mfa_enabled, SSH attempt tracker
+#                                   (ssh_attempt_pre/ok/fail), ssh_mux_args,
+#                                   ssh_mux_close_all, ssh_args, ssh_reachable,
+#                                   ssh_mux_open
 #   10. USERNAME RESOLUTION      -- resolve_username, cache I/O
 #   11. CONFIG FILE HANDLING     -- handle_config_file (k/b/d/m/a prompt)
-#   12. OPENCODE CONFIG WRITER   -- write_opencode_config + ensure_opencode_installed
+#   12. OPENCODE CONFIG WRITER + INSTALLER -- write_opencode_config,
+#                                   ensure_opencode_installed,
+#                                   setup_opencode_client
 #   13. SSH PREFLIGHT            -- ssh_preflight (jump or first node)
 #   14. NODE PICKER              -- pick_node, --node, --probe-nodes
 #   15. REMOTE BOOTSTRAP         -- scp + ssh to invoke server mode
-#   16. LOCAL TUNNEL + MONITOR   -- open_tunnel + monitor_tunnel_loop, health loop
-#   17. CLIENT MODE              -- mode_client (orchestrates everything)
-#   18. SERVER MODE              -- mode_server (runs on the ANL node)
+#   16. LOCAL TUNNEL + HEALTH MONITOR -- cleanup_local, spawn_health_monitor,
+#                                   open_tunnel, monitor_tunnel_loop;
+#                                   collision detection: local_tunnel_status,
+#                                   probe_remote_port_owner,
+#                                   find_next_free_remote_port,
+#                                   prompt_port_collision, ensure_or_reuse_tunnel
+#   17. CLIENT / TUNNEL MODES    -- _client_common_setup, mode_tunnel, mode_client
+#   18. SERVER MODE              -- mode_server (runs on the ANL node;
+#                                   also called in-process by the on-node
+#                                   short-circuit in _client_common_setup)
 #   19. SUMMARY GATHERING        -- fetch_proxy_models, gather_summary
 #   20. SUMMARY RENDERING        -- render_summary (the big box)
 #   21. STATUS / STOP            -- mode_status, mode_stop
@@ -390,11 +403,12 @@ _my_interface_ips() {
       | cut -d/ -f1 \
       | grep -vE '^(127\.|0\.0\.0\.0$)'
   elif command -v ifconfig >/dev/null 2>&1; then
+    # Match `inet <ip>` (BSD/macOS) and `inet addr:<ip>` (older Linux net-tools).
+    # gsub strips the optional `addr:` prefix from $2 in place.
     ifconfig 2>/dev/null \
       | awk '/inet (addr:)?[0-9]/{
-          gsub(/^addr:/,"",$2);
-          ip=$2; sub(/^addr:/,"",ip);
-          print ip
+          gsub(/^addr:/, "", $2);
+          print $2
         }' \
       | grep -vE '^(127\.|0\.0\.0\.0$)'
   fi
@@ -1423,10 +1437,11 @@ open_tunnel() {
 
   # Wait briefly for the local port to come up.
   #
-  # B16 NOTE: under MFA mode, the foreground `ssh -N -L` we just spawned
-  # routes through the existing ControlMaster connection (because
-  # ControlMaster=auto is in $(ssh_args) and a master to ${user}@${node}
-  # already exists from ssh_preflight). What this means in practice:
+  # MUX-OWNED-FORWARD NOTE: under MFA mode, the foreground `ssh -N -L` we
+  # just spawned routes through the existing ControlMaster connection
+  # (because ControlMaster=auto is in $(ssh_args) and a master to
+  # ${user}@${node} already exists from ssh_preflight). What this means
+  # in practice:
   #
   #   1. The forward gets installed in the master.
   #   2. The foreground ssh process is then a thin "mux client" that may
@@ -1520,8 +1535,9 @@ monitor_tunnel_loop() {
   #
   # Reconnect backoff: macOS's system OpenSSH exits the foreground `ssh -N -L`
   # immediately after the multiplex master accepts the forward. The first
-  # spawn handles that case explicitly (see B16 NOTE above); the reconnect
-  # path needs the same handling, otherwise the parent loop spins:
+  # spawn handles that case explicitly (see MUX-OWNED-FORWARD NOTE above);
+  # the reconnect path needs the same handling, otherwise the parent loop
+  # spins:
   #     wait $pid -> exits instantly because $pid was already a zombie
   #     -> "ssh tunnel exited" warn
   #     -> ssh -O check ok
@@ -1621,11 +1637,11 @@ monitor_tunnel_loop() {
           rc_ok=1
         fi
         if [ "$rc_ok" -eq 1 ]; then
-          # Apply the same B16 mux-owned check as the first-spawn block: if
-          # the foreground ssh has already exited but /health still answers,
-          # the master is doing the work. Clearing SSH_TUNNEL_PID lets the
-          # next loop iteration wait on the monitor instead of immediately
-          # returning from `wait <dead-pid>` and spinning.
+          # Apply the same mux-owned-forward check as the first-spawn block:
+          # if the foreground ssh has already exited but /health still
+          # answers, the master is doing the work. Clearing SSH_TUNNEL_PID
+          # lets the next loop iteration wait on the monitor instead of
+          # immediately returning from `wait <dead-pid>` and spinning.
           if ! kill -0 "$SSH_TUNNEL_PID" 2>/dev/null; then
             ok "Reconnected silently; mux master owns the new forward."
             SSH_TUNNEL_PID=""
@@ -1731,31 +1747,47 @@ local_tunnel_status() {
   fi
 
   # Heuristic: is this an ssh-related process that's likely OUR tunnel?
-  # Two patterns to recognize:
-  #   1. A foreground `ssh -N -L <port>:...` we just spawned. The command
-  #      line contains the literal `-L <port>:`.
-  #   2. A multiplex MASTER (created by ssh_mux_open / ssh_args ControlMaster)
-  #      that's now holding the forward after the foreground slave exited
-  #      (B16 / macOS pattern). The master's command line shows
-  #      `ssh: /Users/.../sockets/argo-opencode-... [mux]` -- it doesn't
-  #      mention `-L`, but the socket path identifies it as ours.
+  # We distinguish two sub-cases because they have DIFFERENT cleanup
+  # semantics:
+  #
+  #   * fg-tunnel: a foreground `ssh -N -L <port>:...` we just spawned.
+  #     We own this pid; killing it on cleanup is correct.
+  #     Detected by: command line contains the literal `-L <port>:`.
+  #
+  #   * mux: a multiplex MASTER (created by ssh_mux_open / ssh_args
+  #     ControlMaster=auto) that's now holding the forward after the
+  #     foreground slave exited (the macOS / mux-owned scenario from
+  #     the duplicate-bootstrap-via-tee era). OTHER ssh sessions to the
+  #     same destination may also be using this master; killing it on
+  #     cleanup would destroy them too. We must NOT capture this pid
+  #     for cleanup_local's trap.
+  #     Detected by: command line shows `ssh: /Users/.../sockets/argo-opencode-... [mux]`.
+  #
   # Combined with the /health check, false positives would require a
   # foreign ssh that ALSO somehow hits a working /health endpoint. Very
   # unlikely in practice.
-  local is_ssh_tunnel=0
+  local kind="none"
   local cmd
   cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
   case "$cmd" in
-    *ssh*\ -L\ "${port}:"*)         is_ssh_tunnel=1 ;;
-    *ssh*-L\ "${port}:"*)           is_ssh_tunnel=1 ;;
-    *ssh*-L${port}:*)               is_ssh_tunnel=1 ;;
-    *ssh:*argo-opencode-*\[mux\]*)  is_ssh_tunnel=1 ;;
+    *ssh*\ -L\ "${port}:"*)         kind="fg-tunnel" ;;
+    *ssh*-L\ "${port}:"*)           kind="fg-tunnel" ;;
+    *ssh*-L${port}:*)               kind="fg-tunnel" ;;
+    *ssh:*argo-opencode-*\[mux\]*)  kind="mux" ;;
   esac
 
-  if [ "$is_ssh_tunnel" -eq 1 ] && [ "$healthy" -eq 1 ]; then
-    echo "ours-healthy"
-  elif [ "$is_ssh_tunnel" -eq 1 ] && [ "$healthy" -eq 0 ]; then
-    echo "ours-unhealthy"
+  if [ "$kind" = "fg-tunnel" ] && [ "$healthy" -eq 1 ]; then
+    echo "ours-healthy-fg"
+  elif [ "$kind" = "fg-tunnel" ] && [ "$healthy" -eq 0 ]; then
+    echo "ours-unhealthy-fg"
+  elif [ "$kind" = "mux" ] && [ "$healthy" -eq 1 ]; then
+    echo "ours-healthy-mux"
+  elif [ "$kind" = "mux" ] && [ "$healthy" -eq 0 ]; then
+    # Master is bound but /health silent: weird; the master is alive but
+    # nothing on the remote side. Treat as broken-and-mostly-ours; let
+    # the caller decide whether to kill (probably yes, but with mux
+    # implications, not blanket).
+    echo "ours-unhealthy-mux"
   elif [ "$healthy" -eq 1 ]; then
     # /health works but it's not an ssh tunnel. Most likely argo-proxy
     # running locally (mode_server's launcher under screen/tmux/nohup) --
@@ -1936,20 +1968,45 @@ ensure_or_reuse_tunnel() {
   #    listener, decide whether to reuse it before doing any SSH work.
   local lstatus; lstatus="$(local_tunnel_status "$PROXY_PORT")"
   case "$lstatus" in
-    ours-healthy)
+    ours-healthy-fg)
+      # A foreground ssh -N -L we (or a previous invocation by the same
+      # user) spawned. We can capture its pid for cleanup_local's trap
+      # because it's a process we own end-to-end.
       ok "Found existing healthy tunnel on port ${PROXY_PORT}; reusing."
-      # Capture the existing pid so monitor/cleanup behave sanely.
       SSH_TUNNEL_PID="$(lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null | head -n1)"
       trap cleanup_local EXIT INT TERM
       return 0 ;;
+    ours-healthy-mux)
+      # The listener is the multiplex MASTER, not a foreground ssh -L.
+      # Other SSH sessions to the same destination may also be using
+      # this master, so killing it on cleanup would be destructive.
+      # Treat as "tunnel exists but we don't own it for cleanup
+      # purposes" -- same handling as external-healthy: clear
+      # SSH_TUNNEL_PID, no monitor loop, no cleanup_local trap.
+      ok "Found existing tunnel on port ${PROXY_PORT} held by an SSH multiplex"
+      ok "  master we initiated earlier; reusing without taking ownership."
+      ok "  (cleanup_local won't kill the master on Ctrl-C; other sessions"
+      ok "  using the same master stay safe.)"
+      SSH_TUNNEL_PID=""
+      return 2 ;;
     external-healthy)
       ok "argo-proxy is reachable on http://localhost:${PROXY_PORT}/v1 via an"
       ok "  existing local listener (not our SSH tunnel). Using it directly."
       return 2 ;;
-    ours-unhealthy)
+    ours-unhealthy-fg)
       warn "Found a local ssh tunnel on port ${PROXY_PORT} but /health is silent;"
       warn "  killing it and starting a fresh one."
       lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null | xargs -n1 kill 2>/dev/null || true
+      sleep 1
+      ;;
+    ours-unhealthy-mux)
+      warn "Multiplex master on port ${PROXY_PORT} but /health silent."
+      warn "  Closing it via 'ssh -O exit' (which is mux-aware and won't"
+      warn "  affect other sessions just by trying), then starting fresh."
+      # ssh_mux_close_all walks the socket directory; it's the right tool
+      # because it uses 'ssh -O exit' which the master responds to
+      # gracefully (no other-session destruction).
+      ssh_mux_close_all
       sleep 1
       ;;
     other-or-broken)
@@ -2272,8 +2329,8 @@ mode_client() {
 # Same writer-contract caveat as write_opencode_config: handle_config_file
 # only passes the dest path, so we resolve the user from env.
 #
-# B13 ownership policy
-# --------------------
+# Ownership policy (preserve-unknown-keys writer)
+# -----------------------------------------------
 # When called by handle_config_file, the writer's job is to produce the
 # CANDIDATE file that diffing/merging is done against. Two cases:
 #
@@ -2292,7 +2349,11 @@ mode_client() {
 #                               0.0.0.0 would expose the proxy to other
 #                               compute-node users)
 #            port            -- must match what the client tunnels to;
-#                               B12 server-side check enforces this
+#                               the server-side cfg-port-vs-PROXY_PORT
+#                               check (just before launching argo-proxy)
+#                               enforces this and refuses to launch on
+#                               a mismatch (else argo-proxy would bind
+#                               the wrong port and the client polls in vain)
 #          NOT owned (preserved from existing if present):
 #            verbose, argo_base_url, argo_url, argo_stream_url,
 #            argo_embedding_url, concurrent_downloads,
@@ -2471,8 +2532,8 @@ mode_server() {
   # originated from config/cache in the parent.
   if [ -z "$user_was_in_env" ] && [ -z "$port_was_in_env" ] \
      && [ -z "$already_logged" ]; then
-    log "Standalone server mode (no env vars from client; resolved from"
-    log "  config + defaults):"
+    log "Standalone 'server' invocation. Resolved identity from local"
+    log "  config + cache (rather than env vars supplied by 'client'):"
     log "  user : ${ANL_USERNAME}"
     log "  port : ${PROXY_PORT}"
     if [ "${CLEAN_ASSUME_YES:-0}" = 1 ]; then
@@ -2497,11 +2558,12 @@ mode_server() {
   #
   # IMPORTANT: `exec CMD | tee FILE` does NOT replace the current shell with
   # the pipeline -- bash applies `exec` only to the LEFT side of the pipe.
-  # The current shell waits for the pipeline, then continues running the rest
-  # of mode_server, causing the bootstrap to run TWICE (B14). The second run
-  # hits the "Existing argo-proxy already serving... reusing." path so it
-  # appears benign but it's still wrong: it spends time, prompts the user
-  # again on the same handle_config_file step, and confuses the log.
+  # The current shell waits for the pipeline, then continues running the
+  # rest of mode_server, causing the bootstrap to run TWICE (the
+  # "duplicate-bootstrap-via-tee" bug). The second run hits the
+  # "Existing argo-proxy already serving... reusing." path so it appears
+  # benign but it's still wrong: it spends time, prompts the user again
+  # on the same handle_config_file step, and confuses the log.
   #
   # Fix: drop `exec`, run the pipeline, then either exit (when mode_server
   # is the script's main mode -- i.e. invoked as `bash argo_opencode.sh
@@ -2524,6 +2586,10 @@ mode_server() {
     exit "$rc"
   fi
 
+  # ===========================================================================
+  # mode_server BODY (everything above is identity resolution, prompt, and
+  # tee/log re-exec wrapping; the actual bootstrap work starts here).
+  # ===========================================================================
   log "[server] starting bootstrap on $(hostname) for user=${ANL_USERNAME} port=${PROXY_PORT}"
 
   # 1) Python 3.10+ on the system path (used to build the venv if missing).
