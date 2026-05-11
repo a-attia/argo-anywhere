@@ -2014,7 +2014,13 @@ EOF
   if host_is_target "$node"; then
     log "Selected node is this host ($(this_host_fqdn)); skipping SSH tunnel."
     log "  argo-proxy will be started here directly; no SSH bootstrap needed."
-    ARGO_OPENCODE_USER="$ANL_USERNAME" ARGO_OPENCODE_PORT="$PROXY_PORT" mode_server
+    # _MODE_SERVER_INPROC=1 tells mode_server to RETURN (not exit) after
+    # its tee/log re-exec finishes, so we can continue with the OpenCode
+    # setup + status box + post-setup messages below. Without this, the
+    # exit at the end of mode_server's logging branch would kill the
+    # script silently after the bootstrap reuse line, leaving the user
+    # at a fresh shell prompt with no client setup performed.
+    _MODE_SERVER_INPROC=1 ARGO_OPENCODE_USER="$ANL_USERNAME" ARGO_OPENCODE_PORT="$PROXY_PORT" mode_server
     if curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
       ok "argo-proxy is live at http://localhost:${PROXY_PORT}/v1 (no tunnel needed; this host runs the proxy)."
     else
@@ -2262,13 +2268,25 @@ mode_server() {
   # appears benign but it's still wrong: it spends time, prompts the user
   # again on the same handle_config_file step, and confuses the log.
   #
-  # Fix: drop `exec`, run the pipeline, exit with the bash leg's exit code
-  # (PIPESTATUS[0]) so server failures still propagate to remote_bootstrap.
+  # Fix: drop `exec`, run the pipeline, then either exit (when mode_server
+  # is the script's main mode -- i.e. invoked as `bash argo_opencode.sh
+  # server` over SSH from the laptop) or return (when called in-process
+  # from _client_common_setup's on-node short-circuit, where the caller
+  # has more work to do after the bootstrap finishes). The signal is
+  # the _MODE_SERVER_INPROC global, which the in-process caller sets
+  # before invoking us.
   if [ -z "${ARGO_OPENCODE_LOGGING:-}" ]; then
     export ARGO_OPENCODE_LOGGING=1
     mkdir -p "$(dirname "${HOME}/${REMOTE_LOG}")"
     bash "$0" server 2>&1 | tee -a "${HOME}/${REMOTE_LOG}"
-    exit "${PIPESTATUS[0]}"
+    local rc="${PIPESTATUS[0]}"
+    if [ "${_MODE_SERVER_INPROC:-0}" = 1 ]; then
+      # In-process call: return so the caller can continue. Failure
+      # propagates as a non-zero return that the caller can handle.
+      return "$rc"
+    fi
+    # Main-mode invocation: this script's job is done.
+    exit "$rc"
   fi
 
   log "[server] starting bootstrap on $(hostname) for user=${ANL_USERNAME} port=${PROXY_PORT}"
