@@ -130,6 +130,53 @@ Avoid `[ test ] && cmd` at function/branch top level. When the test fails,
 Use `if/then/fi` and write multi-line remote scripts via temp files
 (`mktemp` + `ssh ... < file`), **never** `var="$(cat <<'EOS' ... EOS)"`.
 
+### Audit "main-mode" functions before calling them in-process
+
+A recurring class of bug surfaced three times in one session. Each had
+the same shape: a function that was originally written as the script's
+**main mode** (i.e. "the script's job IS to run this function and
+exit") was later refactored to ALSO be callable as one step of a
+longer in-process flow. The function's main-mode-only assumptions
+silently broke the in-process caller.
+
+Concrete instances we hit (commits `df10abe`, `ed71864`, `32601c3`):
+
+- **`$()` capture of a function that mutates globals.** Command
+  substitution runs the function in a subshell where mutations to
+  script-level globals (`ANL_USERNAME`, `ARGO_OPENCODE_USER`,
+  `PROXY_PORT`, env-var auto-defaults, etc.) evaporate when the
+  subshell exits. The parent then sees the global as unbound and
+  trips `set -u`. Fix: don't capture; use a designated `_RETURN_*`
+  global to convey the "return value."
+
+- **`exit` inside a function that may now be called in-process.**
+  `mode_server`'s tee-then-exit pattern was correct when `mode_server`
+  was the only thing the script did (invoked over SSH from the
+  laptop). It became wrong when `_client_common_setup`'s on-node
+  short-circuit started invoking `mode_server` as one step of a
+  longer flow. Fix: gate the `exit` on a "called in-process" flag
+  and `return` the same status code in the in-process branch.
+
+- **Assumptions about shell state outside the script.** OpenCode's
+  Linux installer drops the binary at `~/.opencode/bin/` and adds
+  `PATH=~/.opencode/bin:$PATH` to `~/.bashrc`. The post-install
+  `command -v opencode` correctly returned non-zero because the
+  running script's PATH didn't include the new directory; the
+  user's *next* shell would have it but ours doesn't. Fix:
+  prepend the well-known install location to PATH for the rest of
+  the script invocation if the binary is there, so subsequent steps
+  in the SAME script can use it.
+
+The meta-rule for future refactors: **when a function that was
+originally a "main mode" gets called in-process from somewhere else,
+audit it for `exit`, `exec`, `$()` capture by callers, and any
+implicit assumption that "the user's next shell" or "the next process"
+will pick up state changes we made.** None of these survive an
+in-process call. The fix usually involves either (a) adding a flag
+like `_FOO_INPROC=1` that the function checks before exiting, or
+(b) factoring the function into "do the work" + "wrap with the
+main-mode-only behavior."
+
 ### Targets bash 3.2+
 
 macOS default. No bash-4 features (no `${var,,}`, no `mapfile`, no
