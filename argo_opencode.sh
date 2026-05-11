@@ -295,6 +295,11 @@ print_summary_box() {
     local content="$1" color="${2:-}" pad
     local maxc=$((inner - 2))   # 1 leading space + 1 trailing space
     local vw; vw="$(visible_width "$content")"
+    # The 'maxc > 3' gate handles a pathological narrow-terminal case: if
+    # maxc <= 3 we don't have room for 'X..' (1 char + ellipsis). Real
+    # terminals never go that narrow (4-col terminal would be unusable
+    # for any program); if it ever happens, the line just overflows the
+    # right edge -- ugly but not crashing.
     if [ "$vw" -gt "$maxc" ] && [ "$maxc" -gt 3 ]; then
       # Strip ANSI before truncating (none of the body lines carry ANSI today)
       local stripped; stripped="$(printf '%s' "$content" | sed $'s/\033\\[[0-9;]*m//g')"
@@ -883,7 +888,8 @@ resolve_username() {
     [[ "$u" =~ ^[a-zA-Z][a-zA-Z0-9._-]*$ ]] && break
     err "Invalid username. Use letters, digits, dot, underscore, hyphen."
   done
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$STATE_DIR" 2>/dev/null \
+    || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?). Set ARGO_OPENCODE_USER in env to skip caching."
   printf '%s\n' "$u" > "$USER_CACHE"
   echo "$u"
 }
@@ -1232,7 +1238,9 @@ pick_node() {
     log "Verifying reachability of '${req}' $(jump_descr)..."
     if ssh_reachable "$user" "$req"; then
       ok "  reachable: ${req}"
-      mkdir -p "$STATE_DIR"; printf '%s\n' "$req" > "$NODE_CACHE"
+      mkdir -p "$STATE_DIR" 2>/dev/null \
+        || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?)."
+      printf '%s\n' "$req" > "$NODE_CACHE"
       echo "$req"
       return
     else
@@ -1359,7 +1367,9 @@ EOF
     fi
   done
 
-  mkdir -p "$STATE_DIR"; printf '%s\n' "$picked" > "$NODE_CACHE"
+  mkdir -p "$STATE_DIR" 2>/dev/null \
+    || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?)."
+  printf '%s\n' "$picked" > "$NODE_CACHE"
   echo "$picked"
 }
 
@@ -2893,7 +2903,13 @@ mode_server() {
         tmux kill-session -t "${SCREEN_SESSION}" || true
       fi
       log "Starting argo-proxy in tmux session '${SCREEN_SESSION}'..."
-      tmux new-session -d -s "${SCREEN_SESSION}" "${venv}/bin/argo-proxy serve"
+      # tmux new-session [shell-command]: takes ONE string that's
+      # interpreted by the user's shell. We can't split into multiple
+      # args (unlike screen -dmS NAME ARG1 ARG2). If $venv contains
+      # spaces (e.g. $HOME = '/Users/Alice Smith'), naively interpolating
+      # would word-split. Use printf %q to shell-escape the binary path.
+      local _tmux_cmd; _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve"
+      tmux new-session -d -s "${SCREEN_SESSION}" "$_tmux_cmd"
       ;;
     nohup)
       warn "Neither screen nor tmux available; falling back to nohup."
@@ -2908,10 +2924,34 @@ mode_server() {
     sleep 1; waited=$((waited+1))
     if [ "$waited" -ge 20 ]; then
       err "argo-proxy did not start listening within ${waited}s."
-      if [ -f "${HOME}/argoproxy.out" ]; then
-        err "Last 30 lines of argoproxy.out:"
-        tail -n 30 "${HOME}/argoproxy.out" >&2
-      fi
+      # The diagnostic to surface depends on which launcher we used --
+      # earlier code paths only wrote a stdout/stderr log file in the
+      # nohup branch (line 'nohup ... > ${HOME}/argoproxy.out'). For
+      # screen and tmux, argo-proxy's output is captured INSIDE the
+      # session and there's no log file to tail. Tell the user how to
+      # see the actual error in each case.
+      case "$launcher" in
+        screen)
+          err "argo-proxy's output is inside the screen session. Inspect with:"
+          err "  screen -r ${SCREEN_SESSION}        # detach with Ctrl-A then d"
+          err "If the session has already exited (no screen for argo-proxy left),"
+          err "  the failure left no log; re-run with --force-reinstall to start fresh."
+          ;;
+        tmux)
+          err "argo-proxy's output is inside the tmux session. Inspect with:"
+          err "  tmux attach -t ${SCREEN_SESSION}   # detach with Ctrl-B then d"
+          err "If the session has already exited (no tmux for argo-proxy left),"
+          err "  the failure left no log; re-run with --force-reinstall to start fresh."
+          ;;
+        nohup)
+          if [ -f "${HOME}/argoproxy.out" ]; then
+            err "Last 30 lines of ${HOME}/argoproxy.out:"
+            tail -n 30 "${HOME}/argoproxy.out" >&2
+          else
+            err "Expected ${HOME}/argoproxy.out but no log was written."
+          fi
+          ;;
+      esac
       die "Server bootstrap failed."
     fi
   done
@@ -3914,14 +3954,27 @@ EOF
 
   # ---- Execute ----------------------------------------------------------
 
-  # Local: stop the tunnel first so we don't leave a dangling listener after
-  # we've removed our cached state.
+  # Local: stop the listener first so we don't leave a dangling process
+  # after we've removed our cached state. The label depends on what kind
+  # of listener it is -- on a laptop it's our SSH tunnel; on a compute
+  # node it's argo-proxy itself. mode_stop has the same distinction
+  # (with an extra blast-radius warning prompt for the argo-proxy case);
+  # clean already required the user to type 'yes' to proceed, so we
+  # don't re-prompt here, but we DO need to label the process correctly
+  # so the user understands what was killed.
   if [ -n "$listener_pid" ]; then
+    local listener_label="local listener"
+    case "$(local_tunnel_status "$PROXY_PORT")" in
+      ours-healthy-fg|ours-unhealthy-fg|ours-healthy-mux|ours-unhealthy-mux)
+        listener_label="local SSH tunnel" ;;
+      external-healthy|other-or-broken)
+        listener_label="local listener (likely argo-proxy itself)" ;;
+    esac
     if [ "${CLEAN_DRY_RUN:-0}" = 1 ]; then
-      log "Local SSH tunnel on :${PROXY_PORT} (pid ${listener_pid})..."
+      log "${listener_label} on :${PROXY_PORT} (pid ${listener_pid})..."
       log "  [dry-run] would: kill ${listener_pid}"
     else
-      log "Stopping local SSH tunnel (pid ${listener_pid})..."
+      log "Stopping ${listener_label} (pid ${listener_pid})..."
       kill "$listener_pid" 2>/dev/null || true
       sleep 1
       kill -0 "$listener_pid" 2>/dev/null && kill -9 "$listener_pid" 2>/dev/null || true
