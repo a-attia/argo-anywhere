@@ -2206,18 +2206,132 @@ ensure_or_reuse_tunnel() {
 }
 
 # ============================================================================
-# SECTION: 17. CLIENT / TUNNEL MODES (orchestrators)
+# SECTION: 17. CLIENT / TUNNEL MODES + MULTI-CLIENT DISPATCHER (orchestrators)
 # ============================================================================
+# Multi-client architecture (see AGENTS.md "Multi-client distribution"):
+#
+# The script supports several AI clients (OpenCode today; Claude Code,
+# aider, Cursor, generic OpenAI-compatible to be added). It is shipped as
+# ONE physical file invoked under multiple names via repo symlinks
+# (argo_opencode.sh, argo_claudecode.sh, argo_anywhere.sh, ...). The
+# script inspects $0 at startup and selects a default client based on the
+# invocation name. Subcommands always work explicitly regardless of name.
+#
+# Each supported client provides a function setup_<name>_client() that
+# (a) ensures the client binary is installed, (b) writes/updates the
+# client's config to point at our local proxy, and (c) is idempotent.
+# Phase 3+ adds setup_claudecode_client, setup_aider_client, etc., as
+# peers of setup_opencode_client.
+#
+# The CLIENTS_AVAILABLE array below is the registry: it lists supported
+# clients in display order, with a label for the interactive picker.
+# Adding a new client = append a row + write its setup_<name>_client
+# function + add a symlink at the repo root.
+CLIENTS_AVAILABLE=(
+  "opencode|OpenCode (sst/opencode-style; default)"
+)
+# default_client_for_invocation: print the default client name based on
+# the script's invocation name ($0). Empty string means "no default;
+# show the interactive picker." Used by mode_client to decide whether
+# to set up a specific client or invoke the picker.
+default_client_for_invocation() {
+  local name; name="$(basename "${0:-argo_opencode.sh}")"
+  case "$name" in
+    argo_opencode.sh|argo-opencode|argo_opencode) echo "opencode" ;;
+    argo_claudecode.sh|argo-claudecode|argo_claudecode) echo "claudecode" ;;
+    argo_aider.sh|argo-aider|argo_aider) echo "aider" ;;
+    argo_cursor.sh|argo-cursor|argo_cursor) echo "cursor" ;;
+    argo_generic.sh|argo-generic|argo_generic) echo "generic" ;;
+    argo_anywhere.sh|argo-anywhere|argo_anywhere) echo "" ;;
+    *) echo "opencode" ;;  # unknown name -> back-compat default
+  esac
+}
+
+# interactive_setup_picker: show CLIENTS_AVAILABLE as a numbered menu and
+# echo the chosen client name. Empty echo on user-aborts (Enter/empty);
+# loops on invalid input. Used by mode_client when invoked under
+# argo_anywhere.sh (no default client) and by the explicit 'setup'
+# subcommand.
+interactive_setup_picker() {
+  cat >&2 <<EOF
+
+  Supported AI clients:
+EOF
+  local i=1 entry name label
+  for entry in "${CLIENTS_AVAILABLE[@]}"; do
+    name="${entry%%|*}"
+    label="${entry#*|}"
+    printf '    %d) %s\n' "$i" "$label" >&2
+    i=$((i+1))
+  done
+  printf '    %s(future phases will add more)%s\n' "$C_DIM" "$C_OFF" >&2
+
+  while :; do
+    local choice
+    choice="$(ask "Pick a client [1-${#CLIENTS_AVAILABLE[@]}, or hit Enter to abort]:" "")"
+    if [ -z "$choice" ]; then
+      echo ""
+      return
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]] \
+       && [ "$choice" -ge 1 ] \
+       && [ "$choice" -le "${#CLIENTS_AVAILABLE[@]}" ]; then
+      entry="${CLIENTS_AVAILABLE[$((choice-1))]}"
+      echo "${entry%%|*}"
+      return
+    fi
+    warn "Invalid choice; pick 1-${#CLIENTS_AVAILABLE[@]} or Enter to abort."
+  done
+}
+
+# do_post_tunnel_for_client <client_name>: per-client setup + post-tunnel
+# messaging. Called by mode_client after the tunnel is up. Dispatches to
+# the right setup_<name>_client function based on the registry. Each
+# client's branch is responsible for its own install/config + the tail
+# log message ("Run: <cmd>" / "Open Settings >...").
+#
+# Why a dispatcher rather than mode_client doing the if/else inline:
+# keeps mode_client's overall flow constant (tunnel up -> per-client
+# setup -> summary -> monitor) regardless of how many clients we add.
+# Also makes Phase 4 additions (aider/cursor/generic) one-line additions
+# here rather than scattered if-branches.
+do_post_tunnel_for_client() {
+  local client="$1"
+  case "$client" in
+    opencode)
+      setup_opencode_client
+      gather_summary
+      render_summary
+      log "OpenCode is installed and configured for this proxy.  Run: opencode"
+      log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
+      log "  with Authorization: Bearer ${ANL_USERNAME}"
+      ;;
+    # claudecode|aider|cursor|generic) added in Phase 3a-ii / Phase 4
+    "")
+      # No client selected (anywhere mode + user picked empty / aborted).
+      # Tunnel is up; user can configure clients manually.
+      gather_summary
+      render_summary
+      log "Tunnel is up; no client configured."
+      log "Configure any OpenAI-compatible client to target http://localhost:${PROXY_PORT}/v1"
+      log "  with Authorization: Bearer ${ANL_USERNAME}"
+      ;;
+    *)
+      die "Unknown client '${client}' (registry mismatch -- this is a script bug)."
+      ;;
+  esac
+}
+
 # mode_tunnel: bring up the SSH tunnel (or the on-node local proxy) and
 # block. Does NOT install or configure any client. Useful when the user
 # has multiple clients to configure manually or wants a tunnel running
 # while they iterate on settings in another terminal.
 #
-# mode_client: tunnel + OpenCode setup. Today the only "real" client mode;
-# Phase 3+ will add per-client modes that sit next to setup_opencode_client
-# (setup_claudecode_client, setup_aider_client, ...). All of them follow
-# the same pattern: bring up the tunnel, configure their client, render
-# the summary, enter the monitor loop.
+# mode_client: tunnel + per-client setup. The "client" is determined by
+# the script's invocation name (default_client_for_invocation), with
+# the interactive picker as the fallback when invoked as
+# argo_anywhere.sh. The actual setup is delegated to
+# do_post_tunnel_for_client which dispatches to setup_<name>_client.
 #
 # These two modes share most of their setup. To avoid drift, they share
 # a helper -- _client_common_setup -- that performs identity resolution,
@@ -2397,6 +2511,28 @@ mode_tunnel() {
 }
 
 mode_client() {
+  # Determine the client to set up. Four sources, in priority order:
+  #   1. FORCE_PICKER=1 (set by the 'setup' subcommand) -> always
+  #      show the interactive picker regardless of invocation name.
+  #   2. CLIENT_OVERRIDE (set by future 'setup <name>' or
+  #      '--client <name>'-style explicit selection; reserved).
+  #   3. default_client_for_invocation (based on $0; e.g.
+  #      argo_claudecode.sh -> "claudecode").
+  #   4. interactive_setup_picker (only reached when invocation default
+  #      is empty, which today means argo_anywhere.sh).
+  local chosen_client=""
+  if [ "${FORCE_PICKER:-0}" = 1 ]; then
+    chosen_client="$(interactive_setup_picker)"
+  else
+    chosen_client="${CLIENT_OVERRIDE:-$(default_client_for_invocation)}"
+    if [ -z "$chosen_client" ]; then
+      chosen_client="$(interactive_setup_picker)"
+    fi
+  fi
+  if [ -z "$chosen_client" ]; then
+    die "No client picked; aborting."
+  fi
+
   # Call directly (NOT via $()): see comment in mode_tunnel for why.
   _client_common_setup 1
   [ -z "$_PICKED_NODE" ] && return 0
@@ -2405,18 +2541,13 @@ mode_client() {
   # Standard remote-tunnel flow:
   #   1. ensure_or_reuse_tunnel handles bootstrap + tunnel (or reuses an
   #      existing healthy tunnel; or prompts for collision resolution)
-  #   2. configure the OpenCode client (install + write config)
-  #   3. render the unified status summary
-  #   4. tell the user what to run, what other clients can target
-  #   5. block in the foreground monitor + reconnect loop (unless ext-healthy)
+  #   2. configure the chosen client (do_post_tunnel_for_client dispatches
+  #      to the right setup_<name>_client function and prints its
+  #      post-setup messages)
+  #   3. block in the foreground monitor + reconnect loop (unless ext-healthy)
   local rc=0
   ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
-  setup_opencode_client
-  gather_summary
-  render_summary
-  log "OpenCode is installed and configured for this proxy.  Run: opencode"
-  log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
-  log "  with Authorization: Bearer ${ANL_USERNAME}"
+  do_post_tunnel_for_client "$chosen_client"
   if [ "$rc" -eq 2 ]; then
     log "(external listener; not entering monitor loop. The proxy is reachable"
     log "  but not managed by this script invocation.)"
@@ -4676,7 +4807,7 @@ main() {
   # non-flag, non-known-subcommand token is an error.
   while [ $# -gt 0 ]; do
     case "$1" in
-      client|tunnel|server|status|stop|update-models|clean|help)
+      client|tunnel|setup|server|status|stop|update-models|clean|help)
         if [ -n "$mode" ] && [ "$mode" != "$1" ]; then
           die "Conflicting subcommands: '${mode}' and '$1'."
         fi
@@ -4768,6 +4899,12 @@ main() {
   case "$mode" in
     client)        mode_client ;;
     tunnel)        mode_tunnel ;;
+    # 'setup' is a thin alias for 'client' that always uses the
+    # interactive client picker, regardless of invocation name. So
+    # 'bash argo_opencode.sh setup' shows the picker even though
+    # argo_opencode.sh's default is OpenCode. Useful for power users
+    # to configure a non-default client without renaming the script.
+    setup)         CLIENT_OVERRIDE=""; FORCE_PICKER=1; mode_client ;;
     server)        mode_server ;;
     status)        mode_status ;;
     stop)          mode_stop ;;
