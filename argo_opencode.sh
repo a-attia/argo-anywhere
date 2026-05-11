@@ -1530,9 +1530,34 @@ monitor_tunnel_loop() {
 }
 
 # ============================================================================
-# SECTION: 17. CLIENT MODE (orchestrates the full laptop -> ANL flow)
+# SECTION: 17. CLIENT / TUNNEL MODES (orchestrators)
 # ============================================================================
-mode_client() {
+# mode_tunnel: bring up the SSH tunnel (or the on-node local proxy) and
+# block. Does NOT install or configure any client. Useful when the user
+# has multiple clients to configure manually or wants a tunnel running
+# while they iterate on settings in another terminal.
+#
+# mode_client: tunnel + OpenCode setup. Today the only "real" client mode;
+# Phase 3+ will add per-client modes that sit next to setup_opencode_client
+# (setup_claudecode_client, setup_aider_client, ...). All of them follow
+# the same pattern: bring up the tunnel, configure their client, render
+# the summary, enter the monitor loop.
+#
+# These two modes share most of their setup. To avoid drift, they share
+# a helper -- _client_common_setup -- that performs identity resolution,
+# on-node detection, port-mismatch handling, node selection, ssh
+# preflight, and the on-node same-host short-circuit. It returns the
+# selected node via stdout (or empty string when the short-circuit fired
+# and the caller should bail out without further tunnel work).
+
+# _client_common_setup: shared front-half of mode_client and mode_tunnel.
+# Echoes the selected node hostname, OR echoes empty string if the on-node
+# short-circuit fired (caller should run setup steps and return without
+# starting a tunnel). The caller passes a flag indicating whether OpenCode
+# config writing is desired in the short-circuit branch (mode_client wants
+# it, mode_tunnel does not).
+_client_common_setup() {
+  local with_opencode_setup="${1:-1}"
   ANL_USERNAME="$(resolve_username)"
   # Set both names as script-level globals (NOT exported). Later code in this
   # process reads them as shell variables (e.g. write_opencode_config,
@@ -1553,10 +1578,6 @@ mode_client() {
   #     unnecessary extra hop (and may not even be reachable from a node).
   #   * --no-mfa auto-on:  Duo doesn't fire for intra-site SSH; switching
   #     off MFA mode skips the multiplex setup we'd never benefit from.
-  # The user can still pass --no-jump/--no-mfa explicitly with the same
-  # effect, or pass --probe-nodes etc. to opt back into the slow path.
-  # The tunnel-to-self short-circuit (sub-case (a)) is handled AFTER node
-  # selection, below.
   if [ "$(on_anl_compute_node)" = "yes" ]; then
     if [ -z "${ARGO_OPENCODE_NO_JUMP:-}" ]; then
       log "Detected ANL compute node ($(this_host_fqdn)); defaulting to --no-jump."
@@ -1569,21 +1590,10 @@ mode_client() {
     fi
   fi
 
-  # If --port (or ARGO_OPENCODE_PORT) was used and disagrees with config.json,
-  # ask the user before mutating their config. Without an explicit override,
-  # we already read the port FROM the config, so by definition no mismatch.
-  #
-  # Four options:
-  #   [m] migrate config + continue on override port
-  #   [u] use override port for THIS run only; don't touch config
-  #       (useful for a parallel test tunnel, or a short-lived override
-  #       when you don't want to disturb a working OpenCode setup. The
-  #       caveat is that nothing on the OpenCode side will be talking to
-  #       the override-port tunnel -- you'd point a separate client at it
-  #       manually, or use the run purely for testing/inspection.)
-  #   [k] keep config; use the config's port (override ignored)
-  #   [a] abort; resolve manually
-  if [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
+  # Port-mismatch prompt only matters when we'll be touching the OpenCode
+  # config; mode_tunnel skips it because it doesn't write any client config.
+  if [ "$with_opencode_setup" = 1 ] \
+     && [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
     warn "Port mismatch:"
     warn "  --port / env requested : ${PROXY_PORT}"
     warn "  ~/.config/opencode/config.json baseURL: ${PORT_FROM_CONFIG}"
@@ -1602,8 +1612,6 @@ EOF
     case "$choice" in
       m|M) ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
       u|U) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
-           # Suppress the otherwise-mandatory OpenCode config write below.
-           # We accomplish this by setting a flag the writer step honors.
            SKIP_OPENCODE_CONFIG_WRITE=1 ;;
       k|K) PROXY_PORT="$PORT_FROM_CONFIG"; ok "Using port ${PROXY_PORT} from config (override ignored)." ;;
       a|A) die "Aborted at port-reconciliation step." ;;
@@ -1615,53 +1623,75 @@ EOF
   # that node. (Cannot open against ANL_JUMP -- jump host is shell-restricted.)
   # Order under --no-mfa: preflight against the jump host first (BatchMode
   # test is fast and gives clean SSH-key error message), then pick node.
+  local node
   if mfa_enabled; then
-    # If --node / ARGO_OPENCODE_NODE was passed, pick_node calls ssh_reachable
-    # which is itself the first SSH to the node; that opens the mux master
-    # implicitly. If the user is taking the static-list picker (default), no
-    # SSH happens during pick_node and we open the master explicitly below.
-    local node; node="$(pick_node "$ANL_USERNAME")"
-    log "Selected node: ${node}"
+    node="$(pick_node "$ANL_USERNAME")"
+    log "Selected node: ${node}" >&2
     ssh_preflight "$ANL_USERNAME" "$node"
   else
     ssh_preflight "$ANL_USERNAME"
-    local node; node="$(pick_node "$ANL_USERNAME")"
-    log "Selected node: ${node}"
+    node="$(pick_node "$ANL_USERNAME")"
+    log "Selected node: ${node}" >&2
   fi
 
-  # If the picked node IS the host we're already running on, skip the
-  # SSH bootstrap and the tunnel entirely -- they would either fail
-  # (ssh tunnel-to-self collides with the local argo-proxy on the same
-  # port) or be wasteful (an SSH multiplex master to localhost with a
-  # forward to localhost adds latency without functional benefit).
-  # Just run the server-mode bootstrap inline (idempotent: starts
-  # argo-proxy under screen/tmux/nohup if it isn't already up, reuses
-  # any existing healthy instance owned by this user) and verify the
-  # local proxy is reachable before handing off to the user.
+  # On-node short-circuit. If the picked node is THIS host, the SSH tunnel
+  # is unnecessary (and would collide with the local argo-proxy on the same
+  # port). Run mode_server inline to start argo-proxy locally; do client
+  # setup if the caller asked for it; print the appropriate "all set" msg;
+  # echo empty string so the caller knows to return without further work.
   if host_is_target "$node"; then
     log "Selected node is this host ($(this_host_fqdn)); skipping SSH tunnel."
     log "  argo-proxy will be started here directly; no SSH bootstrap needed."
-    # Re-invoke ourselves in server mode (in-process) so the proxy is up.
-    # mode_server is idempotent and uses the same env-var contract as the
-    # remote bootstrap (ARGO_OPENCODE_USER, ARGO_OPENCODE_PORT) which we
-    # set above, so this is the same code path the remote node would run.
     ARGO_OPENCODE_USER="$ANL_USERNAME" ARGO_OPENCODE_PORT="$PROXY_PORT" mode_server
-    # Verify /health one more time so the user gets a clear final OK.
     if curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
       ok "argo-proxy is live at http://localhost:${PROXY_PORT}/v1 (no tunnel needed; this host runs the proxy)."
     else
       die "argo-proxy did not become reachable on http://localhost:${PROXY_PORT}/health after server bootstrap."
     fi
-    setup_opencode_client
+    if [ "$with_opencode_setup" = 1 ]; then
+      setup_opencode_client
+    fi
     gather_summary
     render_summary
-    log "OpenCode is installed and configured for this proxy.  Run: opencode"
+    if [ "$with_opencode_setup" = 1 ]; then
+      log "OpenCode is installed and configured for this proxy.  Run: opencode"
+    fi
     log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
     log "  with Authorization: Bearer ${ANL_USERNAME}"
     log "(no foreground tunnel to keep alive; argo-proxy stays running under"
     log "  screen/tmux/nohup; use '$(basename "$0") clean' to stop everything.)"
+    echo ""  # signal short-circuit
     return 0
   fi
+
+  echo "$node"
+}
+
+# mode_tunnel: open the SSH tunnel (or local proxy on a compute node) and
+# enter the foreground monitor loop. No client setup. Useful for power users
+# managing multiple clients themselves, or for keeping a tunnel alive across
+# multiple terminal sessions where each one configures a different client.
+mode_tunnel() {
+  local node
+  node="$(_client_common_setup 0)"
+  # Empty == on-node short-circuit fired and we're done.
+  [ -z "$node" ] && return 0
+
+  remote_bootstrap "$ANL_USERNAME" "$node"
+  open_tunnel "$ANL_USERNAME" "$node"
+  gather_summary
+  render_summary
+  log "Tunnel is up; no client configured (this is 'tunnel' mode)."
+  log "Point any OpenAI-compatible client at http://localhost:${PROXY_PORT}/v1"
+  log "  with Authorization: Bearer ${ANL_USERNAME}"
+  monitor_tunnel_loop "$ANL_USERNAME" "$node"
+}
+
+mode_client() {
+  local node
+  node="$(_client_common_setup 1)"
+  # Empty == on-node short-circuit fired and we're done.
+  [ -z "$node" ] && return 0
 
   # Standard remote-tunnel flow:
   #   1. bootstrap argo-proxy on the picked node (idempotent)
@@ -3077,6 +3107,11 @@ Subcommands:
                   (intra-site SSH doesn't need either); if the picked node
                   is the local host, the SSH tunnel is skipped entirely
                   and the local argo-proxy is used directly.
+  tunnel          Same as 'client' but does NOT install or configure any
+                  client. Just brings up the tunnel (or local proxy on a
+                  compute node) and blocks. Useful for power users who
+                  manage their own client configs, or for keeping a tunnel
+                  alive while configuring multiple clients in other terms.
   server          Run argo-proxy here. Auto-invoked by 'client' over SSH on
                   the picked compute node, but can also be run standalone
                   from a logged-in shell on a node ('I want to leave a
@@ -3523,7 +3558,7 @@ main() {
   # non-flag, non-known-subcommand token is an error.
   while [ $# -gt 0 ]; do
     case "$1" in
-      client|server|status|stop|update-models|clean|help)
+      client|tunnel|server|status|stop|update-models|clean|help)
         if [ -n "$mode" ] && [ "$mode" != "$1" ]; then
           die "Conflicting subcommands: '${mode}' and '$1'."
         fi
@@ -3580,7 +3615,7 @@ main() {
   # when the config says 64742 will silently report FAIL because nothing is
   # listening on 1234). Skip in client (handled there) and in server/help.
   case "$mode" in
-    client|server|help) ;;
+    client|tunnel|server|help) ;;
     *)
       if [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
         warn "Port override (${PROXY_PORT}, source: ${PORT_SOURCE}) differs from"
@@ -3592,6 +3627,7 @@ main() {
 
   case "$mode" in
     client)        mode_client ;;
+    tunnel)        mode_tunnel ;;
     server)        mode_server ;;
     status)        mode_status ;;
     stop)          mode_stop ;;
