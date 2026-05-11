@@ -105,6 +105,21 @@ not per SSH call. The mux master is opened against the chosen compute node
 
 To turn this off for non-Duo hosts: `--no-mfa` or `ARGO_OPENCODE_NO_MFA=1`.
 
+## Tunnel monitoring and reconnect
+
+While `client` is in the foreground, a background loop polls
+`http://localhost:<port>/health` every 15 s and notifies you on sustained
+failure. If the foreground SSH process exits but `/health` still responds
+(common on macOS, where the multiplex master takes over the forward and the
+foreground client exits immediately), the script recognizes this as the
+no-op it is and stays quiet — the master keeps the tunnel alive on its own.
+
+If a real reconnect IS needed and the mux master is still alive, the script
+attempts a silent reconnect (no Duo prompt). If reconnects fire too rapidly
+(≥3 within 60 s — typically a sign of a flapping network or an OpenSSH quirk
+the script can't paper over), it pauses for ~30 s before retrying so it
+doesn't spam the master, your terminal, or system notifications.
+
 ## Port policy
 
 The OpenCode config's `baseURL` is the source of truth. The default port is
