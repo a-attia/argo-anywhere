@@ -20,41 +20,49 @@ run `client`.**
 
 ## Quick start
 
-Pick the file name that matches the AI client you want to set up. The script
-ships as ONE physical file (`argo_opencode.sh`) plus per-client symlinks; the
-file inspects its invocation name and picks sensible defaults per name.
+The script ships as ONE physical file (`argo_anywhere.sh`) plus per-client
+symlinks; the file inspects its invocation name and picks sensible defaults
+per name. Pick the URL that matches what you want:
 
-| Client | Download URL (substitute `main` -> `vX.Y.Z` to pin) |
+| Filename | Default behavior |
 |---|---|
-| OpenCode (default) | `https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh` |
-| Claude Code | `https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_claudecode.sh` |
-| Interactive picker (any client) | `https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh` |
+| `argo_anywhere.sh` (canonical) | Interactive picker -- choose your client at startup |
+| `argo_opencode.sh` (symlink) | [OpenCode](https://opencode.ai/) |
+| `argo_claudecode.sh` (symlink) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) |
 
-For example, OpenCode (pinned to a release; recommended for stability):
+Use `vX.Y.Z` instead of `main` in the URL to pin to a release (recommended for
+stability):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/argo_opencode.sh \
+# OpenCode (pinned to a release):
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_opencode.sh \
      -o argo_opencode.sh
 bash argo_opencode.sh                # runs 'client' by default
 # ...in another terminal once it says "Tunnel is live":
 opencode
 ```
 
-Or Claude Code:
-
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_claudecode.sh \
+# Claude Code (pinned to a release):
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_claudecode.sh \
      -o argo_claudecode.sh
 bash argo_claudecode.sh
 # ...in another terminal once it says "Tunnel is live":
 claude
 ```
 
+```sh
+# Or download the canonical name and pick at startup:
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_anywhere.sh \
+     -o argo_anywhere.sh
+bash argo_anywhere.sh                # shows the client picker
+```
+
 Or live from `main` (gets you the latest fixes, may move under your feet):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh \
-     -o argo_opencode.sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh \
+     -o argo_anywhere.sh
 ```
 
 The first run prompts for your ANL (Argonne) username and asks you to pick
@@ -66,19 +74,40 @@ Three ways:
 
 ```sh
 # 1. The 'setup' subcommand always shows the client picker:
-bash argo_opencode.sh setup
+bash argo_anywhere.sh setup
 
-# 2. The argo_anywhere.sh symlink defaults to the picker:
+# 2. argo_anywhere.sh defaults to the picker:
 bash argo_anywhere.sh
 
 # 3. Each per-client name (argo_claudecode.sh, etc.) defaults to that client.
 ```
 
+### Upgrading from before v1.2.0
+
+Pre-v1.2.0 the canonical filename was `argo_opencode.sh`. The rename to
+`argo_anywhere.sh` is a pure file move + back-compat shims; **no manual
+migration is required**:
+
+- Existing curl URLs (e.g. `…/v1.1.0/argo_opencode.sh`) keep working forever
+  -- tags are immutable.
+- Existing per-client URLs (e.g. `…/main/argo_opencode.sh`) keep working --
+  GitHub serves the symlink content transparently (the file is now a symlink
+  to `argo_anywhere.sh`).
+- The state directory (`~/.config/argo_opencode/`) is auto-migrated to
+  `~/.config/argo_anywhere/` on the next run; cached username/node survive.
+- Old env-var names (`ARGO_OPENCODE_USER`, etc.) keep working with a
+  one-time deprecation warning per variable. Update your `.bashrc` exports
+  to `ARGO_ANYWHERE_*` at your leisure.
+- Stale SSH multiplex sockets (`~/.ssh/sockets/argo-opencode-*`) are
+  closed by `clean`.
+- Stale remote-side files (`~/.argo_opencode.sh`, `~/.argo_opencode.server.log`
+  on the compute node) are removed by the next `clean`.
+
 ## Subcommands
 
 | Subcommand | What it does |
 |---|---|
-| `client` (default) | Full laptop-side flow: install chosen client + write its config + tunnel + monitor. Chosen client is determined by invocation name (e.g. `argo_opencode.sh` -> OpenCode, `argo_claudecode.sh` -> Claude Code). |
+| `client` (default) | Full laptop-side flow: install chosen client + write its config + tunnel + monitor. Chosen client is determined by invocation name (e.g. `argo_opencode.sh` -> OpenCode, `argo_claudecode.sh` -> Claude Code, `argo_anywhere.sh` -> interactive picker). |
 | `setup` | Same as `client` but ALWAYS shows the client picker, regardless of invocation name |
 | `tunnel` | Same as `client` but does NOT install or configure any client; just brings up the tunnel |
 | `server` | Auto-invoked on the ANL compute node by `client` |
@@ -92,7 +121,7 @@ The `help` subcommand prints the full guide. Keep it open while you work
 through unfamiliar prompts:
 
 ```sh
-bash argo_opencode.sh help | less
+bash argo_anywhere.sh help | less
 ```
 
 ## Prerequisites
@@ -120,16 +149,16 @@ bash argo_opencode.sh help | less
 |---|---|
 | `~/.config/opencode/config.json` | OpenCode config (only when running the OpenCode flow) |
 | `~/.claude/settings.json` *or* `./.claude/settings.local.json` | Claude Code config (only when running the Claude Code flow); see "Claude Code scope" below |
-| `~/.config/argo_opencode/user` | Cached ANL username |
-| `~/.config/argo_opencode/node` | Last-used compute node |
-| `~/.ssh/sockets/argo-opencode-<user>-<host>-<port>` | SSH multiplex master socket (Duo prompts only fire once per session) |
+| `~/.config/argo_anywhere/user` | Cached ANL username |
+| `~/.config/argo_anywhere/node` | Last-used compute node |
+| `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master socket (Duo prompts only fire once per session) |
 
 **ANL compute node** (after first run):
 
 | Path | Purpose |
 |---|---|
-| `~/.argo_opencode.sh` | Pushed copy of this script |
-| `~/.argo_opencode.server.log` | Server-mode bootstrap log |
+| `~/.argo_anywhere.sh` | Pushed copy of this script |
+| `~/.argo_anywhere.server.log` | Server-mode bootstrap log |
 | `~/agovenv/` | Python venv with argo-proxy installed |
 | `~/.config/argoproxy/config.yaml` | argo-proxy config (port + user) |
 
@@ -142,7 +171,7 @@ ANL CELS hosts use Duo. The script defaults to MFA-aware mode using SSH
 not per SSH call. The mux master is opened against the chosen compute node
 (not the jump host, which on CELS is shell-restricted).
 
-To turn this off for non-Duo hosts: `--no-mfa` or `ARGO_OPENCODE_NO_MFA=1`.
+To turn this off for non-Duo hosts: `--no-mfa` or `ARGO_ANYWHERE_NO_MFA=1`.
 
 ## Running on a compute node
 
@@ -159,19 +188,19 @@ an ANL compute node (the FQDN matches a name in `ANL_NODES` or ends in
   directly. argo-proxy keeps running under `screen`/`tmux`/`nohup`
   after `client` returns; use `clean` to stop it.
 
-Override either default with `ARGO_OPENCODE_NO_JUMP=0` or
-`ARGO_OPENCODE_NO_MFA=0` if your setup needs the slow path.
+Override either default with `ARGO_ANYWHERE_NO_JUMP=0` or
+`ARGO_ANYWHERE_NO_MFA=0` if your setup needs the slow path.
 
 If you only want to leave argo-proxy running on a node (no client
 install, no tunnel), use `server` directly:
 
 ```sh
 ssh <user>@compute-XX.cels.anl.gov
-bash argo_opencode.sh server   # starts argo-proxy under screen, returns
+bash argo_anywhere.sh server   # starts argo-proxy under screen, returns
 ```
 
 Other clients on other machines can then point at this proxy via their
-own SSH `-L` forward, or via `argo_opencode.sh client --node compute-XX`
+own SSH `-L` forward, or via `argo_anywhere.sh client --node compute-XX`
 from those machines.
 
 ## Sharing a compute node with other users
@@ -201,7 +230,7 @@ To handle this gracefully, the script:
     Your choice [n/p/r/a, default=n]:
   ```
 
-- **`--auto-port`** (or `ARGO_OPENCODE_AUTO_PORT=1`) skips the prompt and
+- **`--auto-port`** (or `ARGO_ANYWHERE_AUTO_PORT=1`) skips the prompt and
   auto-picks the next free port. After picking, the existing OpenCode
   config-migration prompt fires so you can choose to make the new port
   sticky (recommended) or use it for one run only.
@@ -234,7 +263,7 @@ physical hosts (`compute-XXX-Y`). Two consequences worth knowing:
   ```sh
   ssh <user>@<physical-host> 'pkill -u <user> -f "argo-proxy serve"'
   ```
-  Or simply `bash argo_opencode.sh clean` whenever you've definitively
+  Or simply `bash argo_anywhere.sh clean` whenever you've definitively
   finished with a node — that handles the current physical host's
   argo-proxy via the screen session. Orphans on other physical hosts
   remain.
@@ -318,7 +347,7 @@ attempts in this run are refused, and you'll see a recovery message:
 [err ]   * Closed laptop while SSH agent forwarding was active
 [err ]   * Expired Kerberos tickets
 [err ]   * SSH key removed from the agent ('ssh-add -D' earlier)
-[err ]   * Wrong username (--user / ARGO_OPENCODE_USER mismatch)
+[err ]   * Wrong username (--user / ARGO_ANYWHERE_USER mismatch)
 ```
 
 Recovery: verify SSH works manually (`ssh <user>@logins.cels.anl.gov true`),
@@ -335,7 +364,7 @@ The OpenCode config's `baseURL` is the source of truth. The default port is
 **64742**. To override for one run:
 
 ```sh
-bash argo_opencode.sh --port 64999 client
+bash argo_anywhere.sh --port 64999 client
 # Prompts whether to migrate config (m), use override for this run only (u),
 # keep the config's port (k), or abort (a).
 ```
@@ -344,25 +373,25 @@ bash argo_opencode.sh --port 64999 client
 
 ```sh
 # Check what's happening
-bash argo_opencode.sh status
+bash argo_anywhere.sh status
 
 # See the full /v1/models list
-ARGO_OPENCODE_SHOW_MODELS=1 bash argo_opencode.sh status
+ARGO_ANYWHERE_SHOW_MODELS=1 bash argo_anywhere.sh status
 
 # Refresh the OpenCode model list from the live proxy
-bash argo_opencode.sh update-models                  # interactive: prompts per-orphan
-bash argo_opencode.sh update-models --keep-orphans   # add new; keep all stale entries
-bash argo_opencode.sh update-models --drop-orphans   # add new; drop all stale entries
+bash argo_anywhere.sh update-models                  # interactive: prompts per-orphan
+bash argo_anywhere.sh update-models --keep-orphans   # add new; keep all stale entries
+bash argo_anywhere.sh update-models --drop-orphans   # add new; drop all stale entries
 
 # Tear down only the local tunnel
-bash argo_opencode.sh stop
+bash argo_anywhere.sh stop
 
 # Remove everything this script created (preview first)
-bash argo_opencode.sh clean --dry-run                # safe enumeration; no changes
-bash argo_opencode.sh clean                          # interactive (per-file prompts for risky items)
-bash argo_opencode.sh clean -y                       # non-interactive; deletes safe items, KEEPS risky configs
-bash argo_opencode.sh clean -y --purge-backups       # also drop accumulated .bak.* files
-bash argo_opencode.sh clean -y --purge               # delete EVERYTHING, including configs
+bash argo_anywhere.sh clean --dry-run                # safe enumeration; no changes
+bash argo_anywhere.sh clean                          # interactive (per-file prompts for risky items)
+bash argo_anywhere.sh clean -y                       # non-interactive; deletes safe items, KEEPS risky configs
+bash argo_anywhere.sh clean -y --purge-backups       # also drop accumulated .bak.* files
+bash argo_anywhere.sh clean -y --purge               # delete EVERYTHING, including configs
 ```
 
 `clean` separates artifacts into three risk tiers:
@@ -376,7 +405,7 @@ bash argo_opencode.sh clean -y --purge               # delete EVERYTHING, includ
 - **never touched** — the OpenCode binary, the script itself, system tools
 
 For the full guide (troubleshooting, customization, env vars, security
-notes), run `bash argo_opencode.sh help`.
+notes), run `bash argo_anywhere.sh help`.
 
 ## Testing
 
@@ -388,10 +417,10 @@ external help (~5–10 min, one Duo prompt).
 For lighter smoke tests after edits:
 
 ```sh
-bash -n argo_opencode.sh                              # syntax
-bash argo_opencode.sh -h                              # short usage
-bash argo_opencode.sh status                          # exit 1 if no tunnel
-bash argo_opencode.sh clean --dry-run -y --local-only # safe enumeration
+bash -n argo_anywhere.sh                              # syntax
+bash argo_anywhere.sh -h                              # short usage
+bash argo_anywhere.sh status                          # exit 1 if no tunnel
+bash argo_anywhere.sh clean --dry-run -y --local-only # safe enumeration
 ```
 
 ## Related projects

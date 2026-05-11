@@ -1,4 +1,4 @@
-# Example argo-proxy configuration written by argo_opencode.sh on the
+# Example argo-proxy configuration written by argo_anywhere.sh on the
 # compute node side (~/.config/argoproxy/config.yaml).
 #
 # The script's writer owns four keys: config_version, user, host, port.

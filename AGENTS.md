@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Maintainer / contributor notes for `argo_opencode.sh`. The user-facing
+Maintainer / contributor notes for `argo_anywhere.sh`. The user-facing
 documentation is `README.md` and the script's own `help` subcommand. This
 file is the *behind-the-scenes* guide: invariants, gotchas, design rationale,
 and the historical bugs we'd rather not repeat.
@@ -10,7 +10,7 @@ and the historical bugs we'd rather not repeat.
 A single-purpose repo around one substantial bash script and its supporting
 docs and config examples:
 
-- `argo_opencode.sh` — end-to-end orchestrator that lets Argonne users run
+- `argo_anywhere.sh` — end-to-end orchestrator that lets Argonne users run
   [OpenCode](https://opencode.ai/) on their laptop against
   [argo-proxy](https://github.com/Oaklight/argo-proxy) on an ANL compute
   node, regardless of whether the laptop is on the ANL network or not.
@@ -26,7 +26,7 @@ There is **no** package layout, `requirements.txt`, `pyproject.toml`, test
 scaffolding, or CI. The script is deliberately a single self-contained file
 that users `curl` and run.
 
-## `argo_opencode.sh` — what to know before editing
+## `argo_anywhere.sh` — what to know before editing
 
 The script is ~3000 lines of **bash** (not POSIX `sh`). Its first executable
 lines re-exec under `bash` if invoked through any other shell, which catches
@@ -95,7 +95,7 @@ the forward. The monitor and parent wait-loop both handle empty
 ### Port policy
 
 The OpenCode config's `baseURL` is the source of truth. `--port N` and
-`ARGO_OPENCODE_PORT` are one-shot overrides; if they disagree with the
+`ARGO_ANYWHERE_PORT` are one-shot overrides; if they disagree with the
 config, `mode_client` asks `[m]igrate / [u]se-once / [k]eep / [a]bort`.
 Non-client subcommands warn on mismatch but don't prompt.
 
@@ -120,25 +120,32 @@ users until it was fixed.
 ### Env vars are namespaced
 
 Canonical names:
-- `ARGO_OPENCODE_USER`
-- `ARGO_OPENCODE_NODE`
-- `ARGO_OPENCODE_PORT`
-- `ARGO_OPENCODE_NO_JUMP`
-- `ARGO_OPENCODE_NO_MFA`
-- `ARGO_OPENCODE_FORCE_REINSTALL`
-- `ARGO_OPENCODE_SHOW_MODELS`
-- `ARGO_OPENCODE_CONTROL_PERSIST`
+- `ARGO_ANYWHERE_USER`
+- `ARGO_ANYWHERE_NODE`
+- `ARGO_ANYWHERE_PORT`
+- `ARGO_ANYWHERE_NO_JUMP`
+- `ARGO_ANYWHERE_NO_MFA`
+- `ARGO_ANYWHERE_FORCE_REINSTALL`
+- `ARGO_ANYWHERE_SHOW_MODELS`
+- `ARGO_ANYWHERE_CONTROL_PERSIST`
 - `ARGO_BOX_STYLE`
 
-Legacy names `ANL_USERNAME`, `PROXY_PORT`, `SHOW_MODELS` still work with a
-one-time deprecation warning. They are snapshotted **before** the script's
-own config block reassigns them, so promotion sees the inherited values.
+Two generations of legacy names still work with a one-time deprecation
+warning each (snapshotted **before** the script's own config block
+reassigns them, so promotion sees the inherited values):
+
+- Pre-namespace (oldest): `ANL_USERNAME`, `PROXY_PORT`, `SHOW_MODELS`.
+- Pre-rename (v1.1.0 era; argo_opencode.sh): every `ARGO_OPENCODE_<X>`
+  is still honored as a legacy alias of `ARGO_ANYWHERE_<X>`. Users with
+  `export ARGO_OPENCODE_USER=...` in their shell rc files see one WARN
+  per stale var on the first run after upgrade; the script otherwise
+  behaves identically.
 
 The Argonne username is distinct from the laptop's `$USER` — never
-substitute one for the other. The writers always read `ARGO_OPENCODE_USER`
+substitute one for the other. The writers always read `ARGO_ANYWHERE_USER`
 (with `ANL_USERNAME` as legacy fallback). `mode_server`'s pid-owner check
 uses `id -un` (OS-level, correct) but the config-user check uses
-`ARGO_OPENCODE_USER` (Argonne-level, correct).
+`ARGO_ANYWHERE_USER` (Argonne-level, correct).
 
 ### `set -euo pipefail` is on
 
@@ -163,7 +170,7 @@ Concrete instances we hit (commits `df10abe`, `ed71864`, `32601c3`):
 
 - **`$()` capture of a function that mutates globals.** Command
   substitution runs the function in a subshell where mutations to
-  script-level globals (`ANL_USERNAME`, `ARGO_OPENCODE_USER`,
+  script-level globals (`ANL_USERNAME`, `ARGO_ANYWHERE_USER`,
   `PROXY_PORT`, env-var auto-defaults, etc.) evaporate when the
   subshell exits. The parent then sees the global as unbound and
   trips `set -u`. Fix: don't capture; use a designated `_RETURN_*`
@@ -217,7 +224,7 @@ surface as exit codes the bash side translates to user-facing warnings.
 Why this rule and not "rewrite to Python" or "split into multiple files":
 
 - **Single-file distribution is a load-bearing UX property.** Users
-  `curl one .sh -o argo_opencode.sh && bash it`. The same single file is
+  `curl one .sh -o argo_anywhere.sh && bash it`. The same single file is
   `scp`'d to the compute node and re-exec'd as `server`. Splitting into
   multiple files (a `lib/*.py` directory, even a single sibling `.py`)
   breaks both flows.
@@ -248,10 +255,11 @@ themselves are pre-factored extraction points — moving them to a real
 
 The script supports several AI clients (OpenCode, Claude Code, aider,
 Cursor, generic OpenAI-compatible), but there is only **one** real
-`.sh` file in the repo. Per-client filenames (`argo_claudecode.sh`,
-`argo_aider.sh`, `argo_cursor.sh`, `argo_anywhere.sh`) are **symlinks**
-to `argo_opencode.sh`. GitHub serves symlinks correctly via raw URLs
-(returns the linked content, not a redirect), so users can:
+`.sh` file in the repo: `argo_anywhere.sh`. Per-client filenames
+(`argo_opencode.sh`, `argo_claudecode.sh`, `argo_aider.sh`,
+`argo_cursor.sh`) are **symlinks** to `argo_anywhere.sh`. GitHub
+serves symlinks correctly via raw URLs (returns the linked content,
+not a redirect), so users can:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_claudecode.sh -o argo_claudecode.sh
@@ -272,7 +280,7 @@ Per-client API contract — every supported client must define:
   dispatcher (`do_post_tunnel_for_client`). MUST be idempotent. Calls
   `ensure_<name>_installed`, then `handle_config_file <path> <desc>
   write_<name>_config`. Reads `PROXY_PORT`, `ANL_USERNAME`,
-  `ARGO_OPENCODE_USER` from script-level globals.
+  `ARGO_ANYWHERE_USER` from script-level globals.
 - `ensure_<name>_installed()` — install-or-detect the client binary.
   After install, prepend any well-known install location to `PATH` so
   the rest of the running script sees the binary (the upstream
@@ -290,7 +298,7 @@ Per-client API contract — every supported client must define:
   then prints any client-specific tail messages ("Run: claude" etc.).
 - An arm in `default_client_for_invocation` that maps
   `argo_<name>.sh` → `<name>`.
-- A repo-root symlink `argo_<name>.sh -> argo_opencode.sh`.
+- A repo-root symlink `argo_<name>.sh -> argo_anywhere.sh`.
 
 Optional but conventional:
 
@@ -312,7 +320,7 @@ Why this shape (and why NOT truly separate per-client scripts):
 - **Single-file distribution preserved.** Each per-client name is
   still a single curl. No tarballs, no shared `argo_lib.sh`, no
   multi-file `scp` to compute nodes.
-- **One source of truth.** Edit `argo_opencode.sh`; every name
+- **One source of truth.** Edit `argo_anywhere.sh`; every name
   updates automatically. No drift between copies.
 
 Costs accepted (the "20%" we lose vs truly separate scripts):
@@ -327,8 +335,13 @@ Costs accepted (the "20%" we lose vs truly separate scripts):
 
 Maintenance rules:
 
-- The real file MUST be `argo_opencode.sh` (back-compat with the
-  pre-rename era).
+- The real file is `argo_anywhere.sh` (canonical name as of v1.2.0).
+  Pre-v1.2.0 the canonical name was `argo_opencode.sh`; that name now
+  lives as a symlink to `argo_anywhere.sh`. Existing curl URLs (pinned
+  to v1.1.0 or earlier) keep working forever; existing main-tracking
+  URLs (`…/main/argo_opencode.sh`) keep working because GitHub serves
+  symlinks transparently. See "Single-instance constraint" + "Multi-
+  client distribution" sections + the rename history in `git log`.
 - Symlinks are normal `ln -s` in the repo; commit them as such.
   `git ls-files --stage` shows symlinks with mode `120000`.
 - New per-client name = new symlink + add an arm to the
@@ -414,11 +427,11 @@ Three risk tiers:
 No unit tests, no CI. After non-trivial edits run at least the smoke tests:
 
 ```sh
-bash -n argo_opencode.sh                              # syntax
-bash argo_opencode.sh -h                              # short usage
-bash argo_opencode.sh help | head -50                 # long help renders
-bash argo_opencode.sh status                          # exit 1 if no tunnel
-bash argo_opencode.sh clean --dry-run -y --local-only # safe enumeration
+bash -n argo_anywhere.sh                              # syntax
+bash argo_anywhere.sh -h                              # short usage
+bash argo_anywhere.sh help | head -50                 # long help renders
+bash argo_anywhere.sh status                          # exit 1 if no tunnel
+bash argo_anywhere.sh clean --dry-run -y --local-only # safe enumeration
 ```
 
 The `status` summary's "ALL GREEN" branch only fires when the script's

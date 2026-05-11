@@ -1,7 +1,7 @@
-# argo_opencode.sh — live verification guide
+# argo_anywhere.sh — live verification guide
 
 Audience: maintainers / contributors who have made a non-trivial change to
-`argo_opencode.sh` and want to confirm the end-to-end `client` flow still works
+`argo_anywhere.sh` and want to confirm the end-to-end `client` flow still works
 before tagging a release or asking someone else to update.
 
 This is the **live** smoke test (real SSH, real Duo prompt, real argo-proxy
@@ -19,7 +19,7 @@ Reading time: ~5 min. Run time: ~5–10 min including one Duo prompt.
   **If it fails** block before moving on.
 - Replace `<user>` with your ANL (Argonne) username and `<node>` with the
   compute node you actually use (e.g. `compute-01.cels.anl.gov`).
-- This guide assumes you are running the version of `argo_opencode.sh` in
+- This guide assumes you are running the version of `argo_anywhere.sh` in
   *your current working directory* — typically your local clone of
   https://github.com/a-attia/argo-opencode. It does **not** re-download from
   GitHub or any hosted copy. If you want to test the published release
@@ -31,12 +31,12 @@ Reading time: ~5 min. Run time: ~5–10 min including one Duo prompt.
 
 ```sh
 # Script syntax + basic invocation still work?
-bash -n argo_opencode.sh && echo "syntax OK"
-bash argo_opencode.sh -h >/dev/null 2>&1 && echo "usage OK"
+bash -n argo_anywhere.sh && echo "syntax OK"
+bash argo_anywhere.sh -h >/dev/null 2>&1 && echo "usage OK"
 
 # What's the resolved port for this checkout? (so you know what to look for
 # in lsof / curl output below)
-bash argo_opencode.sh status 2>&1 | grep -E 'Configured port' || true
+bash argo_anywhere.sh status 2>&1 | grep -E 'Configured port' || true
 ```
 
 **Pass:** `syntax OK` and `usage OK` both print. If you have an existing
@@ -89,7 +89,7 @@ tunnel dies.
 ```sh
 # What port will the script use? (read from your OpenCode config; falls back
 # to the built-in default 64742)
-PORT="$(bash argo_opencode.sh status 2>&1 \
+PORT="$(bash argo_anywhere.sh status 2>&1 \
         | awk -F': *' '/Configured port/{print $2; exit}')"
 echo "PORT=$PORT"
 
@@ -97,7 +97,7 @@ echo "PORT=$PORT"
 lsof -nPi ":${PORT}" -sTCP:LISTEN || echo "(nothing listening on $PORT)"
 
 # Kill it via the script (also exits if nothing to do)
-bash argo_opencode.sh stop
+bash argo_anywhere.sh stop
 sleep 1
 lsof -nPi ":${PORT}" -sTCP:LISTEN || echo "${PORT} free"
 ```
@@ -117,7 +117,7 @@ This is the main test. Run interactively and answer the prompts as you would
 for a normal session.
 
 ```sh
-bash argo_opencode.sh client
+bash argo_anywhere.sh client
 ```
 
 You should see, in order:
@@ -125,8 +125,8 @@ You should see, in order:
 ### 3a — username + port resolution
 
 ```
-[argo_opencode] Using ANL username: <user>
-[argo_opencode] Using port: <port>  (source: opencode config baseURL)
+[argo_anywhere] Using ANL username: <user>
+[argo_anywhere] Using port: <port>  (source: opencode config baseURL)
 ```
 
 **Pass:** username matches what you cached, port matches your config, source
@@ -152,12 +152,12 @@ The cached node from your last run is the default. To exercise the picker:
 
 **Pick whatever node you intend to test against.**
 
-**Pass:** `[argo_opencode] Selected node: <node>`.
+**Pass:** `[argo_anywhere] Selected node: <node>`.
 
 ### 3c — first SSH to the node + Duo
 
 ```
-[argo_opencode] Opening multiplexed SSH master to <user>@<node> (Duo prompt expected once)...
+[argo_anywhere] Opening multiplexed SSH master to <user>@<node> (Duo prompt expected once)...
 (<user>@logins.cels.anl.gov) Duo two-factor login for <user>
 ...
 Passcode or option (1-1): 1
@@ -175,7 +175,7 @@ in progress:
 ```sh
 ls ~/.ssh/sockets/
 ```
-You should see a socket named `argo-opencode-<user>-<node>-22` — i.e. the
+You should see a socket named `argo-anywhere-<user>-<node>-22` — i.e. the
 literal user/host/port tokens, **not** an opaque hex hash. The literal name
 is required for socket reuse to survive `~/.ssh/config` rewrites.
 
@@ -206,9 +206,9 @@ your local OS account name.
 ### 3e — bootstrap on the compute node
 
 ```
-[argo_opencode] Copying script to <user>@<node>:~/.argo_opencode.sh...
-[argo_opencode] Running server bootstrap on <node>...
-[argo_opencode] [server] starting bootstrap on <node>... for user=<user> port=<port>
+[argo_anywhere] Copying script to <user>@<node>:~/.argo_anywhere.sh...
+[argo_anywhere] Running server bootstrap on <node>...
+[argo_anywhere] [server] starting bootstrap on <node>... for user=<user> port=<port>
 [ ok ] system python3 3.x OK
 [ ok ] venv python 3.x OK (/home/<user>/agovenv)
 [ ok ] argo-proxy: argo-proxy <version>
@@ -240,7 +240,7 @@ After the diff, re-prompt fires. **Type `b`** to back up + overwrite.
 
 ```
 [ ok ] Backed up to ...config.yaml.bak.<ts> and overwrote argo-proxy config.
-[argo_opencode] Starting argo-proxy in screen session 'agovproxy'...
+[argo_anywhere] Starting argo-proxy in screen session 'agovproxy'...
 [ ok ] argo-proxy is listening on 127.0.0.1:<port>.
 [ ok ] Server is up on <node>:<port>.
 ```
@@ -255,14 +255,14 @@ After the diff, re-prompt fires. **Type `b`** to back up + overwrite.
 ### 3f — tunnel up + summary
 
 ```
-[argo_opencode] Opening tunnel: localhost:<port> -> <node>:<port> via logins.cels.anl.gov
+[argo_anywhere] Opening tunnel: localhost:<port> -> <node>:<port> via logins.cels.anl.gov
 [ ok ] Tunnel is live. argo-proxy responding at http://localhost:<port>
 ```
 
 Then the ALL GREEN summary box, with non-zero model counts.
 
 ```
-[argo_opencode] Foregrounding tunnel. Ctrl-C to disconnect.
+[argo_anywhere] Foregrounding tunnel. Ctrl-C to disconnect.
 ```
 
 The script is now blocking. **Leave this terminal alone** — Ctrl-C will tear
@@ -273,25 +273,25 @@ down the tunnel.
 ## Step 4 — verify the tunnel from a SECOND terminal
 
 ```sh
-PORT="$(bash argo_opencode.sh status 2>&1 \
+PORT="$(bash argo_anywhere.sh status 2>&1 \
         | awk -F': *' '/Configured port/{print $2; exit}')"
 
 # Identify the tunnel process
 ps -ax -o pid,ppid,user,etime,command | grep -E "[s]sh.*-N -L ${PORT}"
 # Expected: ssh -N -L <port>:localhost:<port> ... <user>@<node>
-# PPID should be the bash argo_opencode.sh pid, NOT 1.
+# PPID should be the bash argo_anywhere.sh pid, NOT 1.
 
 # Direct hit on /health
 curl -s "http://localhost:${PORT}/health"
 echo
 
 # Status from the script
-bash argo_opencode.sh status 2>&1 | tail -25
+bash argo_anywhere.sh status 2>&1 | tail -25
 ```
 
 **Pass:**
 - ssh process exists, no `-f` flag, PPID is the foregrounded
-  `argo_opencode.sh client` invocation.
+  `argo_anywhere.sh client` invocation.
 - `curl /health` returns `{"status": "healthy"}`.
 - `status` summary box shows ALL GREEN.
 
@@ -341,7 +341,7 @@ lsof -nPi ":${PORT}" -sTCP:LISTEN
 
 ```sh
 # Kill stale local listener, if any
-PORT="$(bash argo_opencode.sh status 2>&1 | awk -F': *' '/Configured port/{print $2; exit}')"
+PORT="$(bash argo_anywhere.sh status 2>&1 | awk -F': *' '/Configured port/{print $2; exit}')"
 lsof -nPi ":${PORT}" -sTCP:LISTEN -t | xargs -r kill 2>/dev/null
 
 # Kill stale remote session + argo-proxy on the node
@@ -354,13 +354,13 @@ ssh -J <user>@logins.cels.anl.gov <user>@<node> '
 '
 ```
 
-Then re-run `bash argo_opencode.sh client` (or, in a pinch, the legacy
+Then re-run `bash argo_anywhere.sh client` (or, in a pinch, the legacy
 `start_argo_tunnel.sh` if you kept it around).
 
 ### You accidentally Ctrl-C'd the foregrounded client
 
 That's fine — `cleanup_local` runs, the tunnel comes down cleanly. Re-run
-`bash argo_opencode.sh client` to bring it back. Cached username and node
+`bash argo_anywhere.sh client` to bring it back. Cached username and node
 will be reused so you skip those prompts.
 
 ---
@@ -371,11 +371,11 @@ These are the cheap checks to run after any non-trivial edit, even if you're
 not ready for the full live test above:
 
 ```sh
-bash -n argo_opencode.sh                              # syntax
-bash argo_opencode.sh -h                              # short usage
-bash argo_opencode.sh help | head -50                 # long help renders
-bash argo_opencode.sh status                          # exit 1 if no tunnel
-bash argo_opencode.sh clean --dry-run -y --local-only # safe enumeration
+bash -n argo_anywhere.sh                              # syntax
+bash argo_anywhere.sh -h                              # short usage
+bash argo_anywhere.sh help | head -50                 # long help renders
+bash argo_anywhere.sh status                          # exit 1 if no tunnel
+bash argo_anywhere.sh clean --dry-run -y --local-only # safe enumeration
 ```
 
 If any of these fail or print unexpected output, fix before moving to a live
@@ -414,12 +414,12 @@ ssh -J <user>@logins.cels.anl.gov <user>@compute-01.cels.anl.gov
 ```
 
 Once on the node, fetch the script (or use the existing
-`~/.argo_opencode.sh` if it's recent enough — `md5sum` it against the
+`~/.argo_anywhere.sh` if it's recent enough — `md5sum` it against the
 fresh download to be sure):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh -o argo_opencode.sh
-md5sum argo_opencode.sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh -o argo_anywhere.sh
+md5sum argo_anywhere.sh
 ```
 
 ### On-node test 1: `client` with same-host short-circuit
@@ -429,10 +429,10 @@ SSH tunnel, running argo-proxy locally instead.
 
 ```sh
 # Capture pre-state
-stat -c '%Y %n' ~/.argo_opencode.sh ~/.argo_opencode.server.log 2>/dev/null
+stat -c '%Y %n' ~/.argo_anywhere.sh ~/.argo_anywhere.server.log 2>/dev/null
 date +%s
 
-bash argo_opencode.sh client
+bash argo_anywhere.sh client
 # When the picker shows up, pick compute-01 (or whichever alias is the
 # default-marked entry). The fix in commit ee8b13c makes the script
 # default to the alias that resolves to your physical host.
@@ -440,9 +440,9 @@ bash argo_opencode.sh client
 
 **Pass criteria:**
 
-- `[argo_opencode] Detected ANL compute node (compute-XXX-Y...); defaulting to --no-jump.` — auto-detection fired.
-- `[argo_opencode] Selected node is this host (compute-XXX-Y...); skipping SSH tunnel.` — short-circuit fired.
-- `~/.argo_opencode.sh` mtime: **unchanged** (no scp happened).
+- `[argo_anywhere] Detected ANL compute node (compute-XXX-Y...); defaulting to --no-jump.` — auto-detection fired.
+- `[argo_anywhere] Selected node is this host (compute-XXX-Y...); skipping SSH tunnel.` — short-circuit fired.
+- `~/.argo_anywhere.sh` mtime: **unchanged** (no scp happened).
 - argo-proxy: same pid as before (existing instance reused, not restarted).
 - The shell returns to the prompt (no foreground tunnel).
 
@@ -455,7 +455,7 @@ config.
 # Snapshot OpenCode config mtime
 stat -c '%Y %n' ~/.config/opencode/config.json 2>/dev/null
 
-bash argo_opencode.sh tunnel
+bash argo_anywhere.sh tunnel
 ```
 
 **Pass criteria:**
@@ -470,12 +470,12 @@ bash argo_opencode.sh tunnel
 Goal: verify the standalone-server identity-resolution prompt.
 
 ```sh
-bash argo_opencode.sh server
+bash argo_anywhere.sh server
 ```
 
 **Pass criteria:**
 
-- `[argo_opencode] Standalone 'server' invocation. Resolved identity from local config + cache ...`
+- `[argo_anywhere] Standalone 'server' invocation. Resolved identity from local config + cache ...`
 - `Proceed? [Y/n]:` — type `Y` or hit Enter.
 - The prompt fires **exactly once** (the tee re-exec subprocess inherits
   the resolved values via env, so its standalone-detection sees them as
@@ -484,7 +484,7 @@ bash argo_opencode.sh server
 Now test the non-interactive path:
 
 ```sh
-bash argo_opencode.sh -y server
+bash argo_anywhere.sh -y server
 # Should NOT prompt. -y skips the confirmation.
 ```
 
@@ -492,7 +492,7 @@ And the env-supplied path (verifies the prompt is also suppressed when
 env is supplied explicitly):
 
 ```sh
-ARGO_OPENCODE_USER=<user> ARGO_OPENCODE_PORT=64742 bash argo_opencode.sh server
+ARGO_ANYWHERE_USER=<user> ARGO_ANYWHERE_PORT=64742 bash argo_anywhere.sh server
 # Should NOT prompt. The env-was-supplied check bypasses the standalone branch.
 ```
 
@@ -502,7 +502,7 @@ Goal: verify the on-node `mode_stop` shows the destructive-action
 confirmation prompt and refuses by default.
 
 ```sh
-bash argo_opencode.sh stop
+bash argo_anywhere.sh stop
 # When the prompt asks 'Kill the listener anyway? [y/N]:' type 'n'.
 ```
 
@@ -516,7 +516,7 @@ bash argo_opencode.sh stop
 Then test the actual kill path:
 
 ```sh
-bash argo_opencode.sh stop
+bash argo_anywhere.sh stop
 # Type 'y' this time.
 ```
 
@@ -536,8 +536,8 @@ Hard to test without a second user actually running argo-proxy on the
 same physical host on the same port. If you happen to have two
 collaborators willing to test simultaneously:
 
-- User A: `bash argo_opencode.sh client` → claims port 64742.
-- User B: `bash argo_opencode.sh client` → should see the
+- User A: `bash argo_anywhere.sh client` → claims port 64742.
+- User B: `bash argo_anywhere.sh client` → should see the
   `[warn] Port 64742 on <node> is in use by another user (pid X, owned
   by '<a>'; you are '<b>')` prompt with `[n/p/r/a]` choices.
 - User B picks `[n]` → script auto-finds next free port (e.g. 64743),
@@ -566,13 +566,13 @@ auth, simulate failures by running `client` with a deliberately wrong
 username:
 
 ```sh
-bash argo_opencode.sh --user no-such-user client
+bash argo_anywhere.sh --user no-such-user client
 # Should fail at ssh_preflight with "Cannot reach no-such-user@<host> without a password."
 # This counts ONE SSH attempt failure.
 
 # Repeat 3 times total:
-bash argo_opencode.sh --user no-such-user client
-bash argo_opencode.sh --user no-such-user client
+bash argo_anywhere.sh --user no-such-user client
+bash argo_anywhere.sh --user no-such-user client
 
 # By the third attempt within the same session, the tracker should fire
 # and refuse further SSH attempts. But each script invocation is a fresh
@@ -611,20 +611,20 @@ work end to end. Run after any change to the dispatcher
 
 ```sh
 ls -la argo_*.sh
-# Expect: argo_opencode.sh (regular file), argo_anywhere.sh and
-# argo_claudecode.sh as symlinks (mode lrwxr-xr-x) pointing to argo_opencode.sh.
+# Expect: argo_anywhere.sh (regular file), argo_anywhere.sh and
+# argo_claudecode.sh as symlinks (mode lrwxr-xr-x) pointing to argo_anywhere.sh.
 ```
 
 ### Multi-client test 1: invocation-name dispatch
 
 ```sh
-bash argo_opencode.sh -h | head -1     # "Usage: argo_opencode.sh ..."
+bash argo_anywhere.sh -h | head -1     # "Usage: argo_anywhere.sh ..."
 bash argo_claudecode.sh -h | head -1   # "Usage: argo_claudecode.sh ..."
 bash argo_anywhere.sh -h | head -1     # "Usage: argo_anywhere.sh ..."
 ```
 
 All three must show their own basename. Any showing
-`argo_opencode.sh` from a non-opencode invocation means the symlink
+`argo_anywhere.sh` from a non-opencode invocation means the symlink
 isn't being resolved or `$0` is being mangled.
 
 ### Multi-client test 2: interactive picker (anywhere)
@@ -651,9 +651,9 @@ printf '1\n' | bash argo_anywhere.sh --user nobody --node bogus.example 2>&1 | h
 ### Multi-client test 3: `setup` subcommand forces picker
 
 ```sh
-printf '\n' | bash argo_opencode.sh setup 2>&1 | head -8
-# Expect the picker to appear EVEN THOUGH the invocation is argo_opencode.sh.
-# (Without `setup`, argo_opencode.sh would proceed straight to the
+printf '\n' | bash argo_anywhere.sh setup 2>&1 | head -8
+# Expect the picker to appear EVEN THOUGH the invocation is argo_anywhere.sh.
+# (Without `setup`, argo_anywhere.sh would proceed straight to the
 # OpenCode flow without showing the picker.)
 ```
 
@@ -668,7 +668,7 @@ Test the global-scope branch (no existing `~/.claude/settings.json`):
 [ -f ~/.claude/settings.json ] && mv ~/.claude/settings.json ~/.claude/settings.json.testbak
 bash argo_claudecode.sh
 # In the script's log lines, look for:
-#   [argo_opencode] Claude Code scope: global (auto; no existing env block to preserve).
+#   [argo_anywhere] Claude Code scope: global (auto; no existing env block to preserve).
 # Then verify the file:
 cat ~/.claude/settings.json
 # Should contain:
@@ -694,7 +694,7 @@ EOF
 cd /tmp && mkdir -p test-claude-scope && cd test-claude-scope
 bash ~/path/to/argo_claudecode.sh
 # Look for:
-#   [argo_opencode] Claude Code scope: project (auto; ~/.claude/settings.json
+#   [argo_anywhere] Claude Code scope: project (auto; ~/.claude/settings.json
 #     already has an env block).
 # Then verify project file was written, global was untouched:
 cat ./.claude/settings.local.json    # should have ANTHROPIC_BASE_URL etc.
@@ -705,9 +705,9 @@ cat ~/.claude/settings.json          # should still have the personal key
 
 ```sh
 bash argo_claudecode.sh --scope global
-# Look for:  [argo_opencode] Claude Code scope: global (--scope global).
+# Look for:  [argo_anywhere] Claude Code scope: global (--scope global).
 bash argo_claudecode.sh --scope project
-# Look for:  [argo_opencode] Claude Code scope: project (--scope project).
+# Look for:  [argo_anywhere] Claude Code scope: project (--scope project).
 bash argo_claudecode.sh --scope bogus
 # Should die with: --scope must be 'project' or 'global' (got 'bogus').
 ```
