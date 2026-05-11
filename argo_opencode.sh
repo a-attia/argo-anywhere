@@ -2391,11 +2391,17 @@ mode_server() {
   # supported workflow ("leave a proxy on this node for any client to
   # reach"). Show what we resolved and ask for confirmation before
   # starting anything.
-
+  #
   # Capture whether env had values BEFORE we start filling defaults, so
-  # we can decide later whether to prompt.
+  # we can decide later whether to prompt. Also gate on the logging
+  # re-exec flag (ARGO_OPENCODE_LOGGING): once we're past the tee
+  # re-exec, the work is being done in a subprocess. Even though we
+  # export the resolved values below to suppress the second-pass
+  # prompt, this is a belt-and-braces guard against forgetting that
+  # contract in some future refactor.
   local user_was_in_env="${ARGO_OPENCODE_USER:+1}"
   local port_was_in_env="${ARGO_OPENCODE_PORT:+1}"
+  local already_logged="${ARGO_OPENCODE_LOGGING:+1}"
 
   # Canonical names; fall back to legacy aliases for one cycle so direct
   # 'bash argo_opencode.sh server' invocations don't break for anyone who
@@ -2435,7 +2441,14 @@ mode_server() {
   # If neither was in env, the user invoked us standalone. Show what we
   # found and ask for confirmation before doing any work. -y skips the
   # prompt for non-interactive use.
-  if [ -z "$user_was_in_env" ] && [ -z "$port_was_in_env" ]; then
+  #
+  # Skip the prompt entirely if we're inside the tee re-exec (the parent
+  # invocation already prompted; the re-exec'd subprocess shouldn't ask
+  # again). Also export the resolved values to env so the re-exec's
+  # standalone-detection sees them as "from env" even though they
+  # originated from config/cache in the parent.
+  if [ -z "$user_was_in_env" ] && [ -z "$port_was_in_env" ] \
+     && [ -z "$already_logged" ]; then
     log "Standalone server mode (no env vars from client; resolved from"
     log "  config + defaults):"
     log "  user : ${ANL_USERNAME}"
@@ -2450,6 +2463,11 @@ mode_server() {
       esac
     fi
   fi
+  # Propagate resolved values to the upcoming re-exec (and to any other
+  # child processes mode_server might spawn). This is what lets the
+  # re-exec'd 'bash $0 server' see them as already-set in env, so its
+  # own standalone-detection branch is a no-op.
+  export ARGO_OPENCODE_USER ARGO_OPENCODE_PORT
 
   # If we haven't already, re-invoke ourselves with stdout+stderr piped through
   # tee so the bootstrap log captures everything. Avoids process substitution
