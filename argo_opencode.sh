@@ -165,6 +165,10 @@ STATE_DIR="${HOME}/.config/argo_opencode"
 USER_CACHE="${STATE_DIR}/user"
 NODE_CACHE="${STATE_DIR}/node"
 
+# OpenCode config path (read by us, written by setup_opencode_client +
+# update-models). Centralized constant so future renames touch one site.
+OPENCODE_CONFIG="${HOME}/.config/opencode/config.json"
+
 # Remote paths (compute node side)
 REMOTE_SELF=".argo_opencode.sh"
 REMOTE_LOG=".argo_opencode.server.log"
@@ -266,7 +270,7 @@ print_summary_box() {
   w="$(visible_width "$verdict")"; [ "$w" -gt "$maxw" ] && maxw="$w"
   for line in "${lines[@]}"; do
     case "$line" in
-      "${_SECT_PREFIX}"*) line="${line#${_SECT_PREFIX}}" ;;
+      "${_SECT_PREFIX}"*) line="${line#"${_SECT_PREFIX}"}" ;;
     esac
     w="$(visible_width "$line")"; [ "$w" -gt "$maxw" ] && maxw="$w"
   done
@@ -327,7 +331,7 @@ print_summary_box() {
     for line in "${lines[@]}"; do
       case "$line" in
         "${_SECT_PREFIX}"*)
-          local label="${line#${_SECT_PREFIX}}"
+          local label="${line#"${_SECT_PREFIX}"}"
           if [ "$first_body" -ne 1 ]; then
             _bx_rule
           fi
@@ -559,7 +563,7 @@ PORT_SOURCE=""                    # diagnostic: which source above won
 
 # Read the port from the OpenCode config's baseURL. Empty if unparseable.
 read_port_from_opencode_config() {
-  local cfg="${HOME}/.config/opencode/config.json" url=""
+  local cfg="${OPENCODE_CONFIG}" url=""
   [ -f "$cfg" ] || return 0
   if command -v jq >/dev/null 2>&1; then
     url="$(jq -r '.provider.argo.options.baseURL // empty' "$cfg" 2>/dev/null)"
@@ -1085,7 +1089,7 @@ setup_opencode_client() {
     log "  config.json baseURL is unchanged at port ${PORT_FROM_CONFIG};"
     log "  this run's tunnel is on port ${PROXY_PORT}."
   else
-    handle_config_file "${HOME}/.config/opencode/config.json" "OpenCode config" write_opencode_config
+    handle_config_file "${OPENCODE_CONFIG}" "OpenCode config" write_opencode_config
   fi
 }
 
@@ -2924,7 +2928,7 @@ extract_available_internal_names() {
 # extract_configured_internal_names: reads ~/.config/opencode/config.json and
 # prints the keys under provider.argo.models, one per line.
 extract_configured_internal_names() {
-  local cfg="${HOME}/.config/opencode/config.json"
+  local cfg="${OPENCODE_CONFIG}"
   [ -f "$cfg" ] || return 0
   if command -v jq >/dev/null 2>&1; then
     jq -r '.provider.argo.models // {} | keys[]' "$cfg" 2>/dev/null
@@ -3187,7 +3191,7 @@ render_summary() {
   # remote log path are only meaningful once 'client' has run, so suppress
   # them when there is nothing real to point at.
   lines+=("__SECTION__:Paths")
-  lines+=("OpenCode config  : ${HOME}/.config/opencode/config.json")
+  lines+=("OpenCode config  : ${OPENCODE_CONFIG}")
   if [ -d "$STATE_DIR" ] || [ "$have_user" -eq 1 ] || [ "$have_node" -eq 1 ]; then
     lines+=("Script state dir : ${STATE_DIR}")
   fi
@@ -3216,7 +3220,7 @@ render_summary() {
     #   * Config exists, has drift (orphans or new available) -> suggest
     #     'update-models' to reconcile.
     #   * Config exists and is in sync -> just run 'opencode'.
-    if [ ! -f "${HOME}/.config/opencode/config.json" ]; then
+    if [ ! -f "${OPENCODE_CONFIG}" ]; then
       lines+=("OpenCode config not yet written. Run  '$(basename "$0") client'")
       lines+=("  to install OpenCode and write its config, then 'opencode' to use it.")
     elif [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ] || [ "$missing" -gt 0 ]; then
@@ -3418,7 +3422,7 @@ EOF
 # Refreshes provider.argo.models in ~/.config/opencode/config.json from the
 # live /v1/models endpoint, preserving everything else in the config.
 mode_update_models() {
-  local cfg="${HOME}/.config/opencode/config.json"
+  local cfg="${OPENCODE_CONFIG}"
 
   # Hard requirement: jq. Anything less is brittle for in-place JSON surgery.
   if ! command -v jq >/dev/null 2>&1; then
@@ -3799,7 +3803,7 @@ mode_clean() {
   listener_pid="$( { lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null || true; } | head -n1)"
 
   # Local backups we left behind
-  local oc_backups=""; oc_backups="$(ls -1 "${HOME}/.config/opencode/config.json.bak."* 2>/dev/null || true)"
+  local oc_backups=""; oc_backups="$(ls -1 "${OPENCODE_CONFIG}.bak."* 2>/dev/null || true)"
 
   # ---- Build and print the plan -----------------------------------------
   # Risky-policy label must mirror _clean_risky_file's decision tree:
@@ -3848,7 +3852,7 @@ LOCAL  -  safe (fully owned by this script)
   SSH multiplex sockets in ${SSH_MUX_DIR}/  $( [ "$mux_count" -gt 0 ] && echo "(${mux_count} present)" || echo "(none)" )
 
 LOCAL  -  risky (created/edited by us, but path is owned by another tool)
-  ~/.config/opencode/config.json               $( [ -f "${HOME}/.config/opencode/config.json" ] && echo "(present, ${risky_file_action})" || echo "(absent)" )
+  ~/.config/opencode/config.json               $( [ -f "${OPENCODE_CONFIG}" ] && echo "(present, ${risky_file_action})" || echo "(absent)" )
   ~/.config/opencode/config.json.bak.*         $( [ -n "$oc_backups" ] && printf '(%d backup file(s), %s)' "$(printf '%s\n' "$oc_backups" | wc -l | tr -d ' ')" "${risky_bak_action}" || echo "(none)" )
 
 EOF
@@ -3924,7 +3928,7 @@ EOF
 
   # Local: risky configs
   log "Reviewing risky local files..."
-  _clean_risky_file "${HOME}/.config/opencode/config.json" \
+  _clean_risky_file "${OPENCODE_CONFIG}" \
     "OpenCode config" \
     "We wrote/edited the 'argo' provider block. The rest of the file may be your own (other providers, OpenCode preferences). Recommended: [r]estore from backup if you have one, otherwise [k]eep."
 
@@ -4632,7 +4636,21 @@ main() {
       --port-range)
         [ -n "${2:-}" ] || die "--port-range expects a value of the form LO-HI."
         case "$2" in
-          [0-9]*-[0-9]*) ARGO_OPENCODE_PORT_RANGE="$2"; shift 2 ;;
+          [0-9]*-[0-9]*)
+            local _pr_lo="${2%-*}" _pr_hi="${2#*-}"
+            # Both ends must be valid TCP ports (1024-65535) and LO < HI.
+            # Catches: --port-range 0-100 (privileged ports), 70000-80000
+            # (out of TCP range), 65000-64900 (reversed, would probe nothing).
+            if ! [[ "$_pr_lo" =~ ^[1-9][0-9]*$ ]] || [ "$_pr_lo" -lt 1024 ] || [ "$_pr_lo" -gt 65535 ]; then
+              die "--port-range LO out of valid range (1024-65535): got '$_pr_lo'"
+            fi
+            if ! [[ "$_pr_hi" =~ ^[1-9][0-9]*$ ]] || [ "$_pr_hi" -lt 1024 ] || [ "$_pr_hi" -gt 65535 ]; then
+              die "--port-range HI out of valid range (1024-65535): got '$_pr_hi'"
+            fi
+            if [ "$_pr_lo" -ge "$_pr_hi" ]; then
+              die "--port-range needs LO < HI: got '${_pr_lo}-${_pr_hi}'"
+            fi
+            ARGO_OPENCODE_PORT_RANGE="$2"; shift 2 ;;
           *) die "--port-range expects LO-HI (e.g. 64742-64842), got '$2'." ;;
         esac ;;
       --keep-orphans)
