@@ -61,9 +61,13 @@ bash argo_opencode.sh help | less
 
 **Laptop:**
 - bash 3.2+ (macOS default works), `ssh`, `scp`, `curl`, `lsof`
+  - macOS ships all of these. Minimal Linux installs (Alpine, slim Docker
+    images) sometimes lack `lsof` — install it before running the script.
 - SSH key-based auth to `logins.cels.anl.gov` (the script will refuse to
   proceed and show exact instructions if password auth is required)
-- Optional: `jq` for `update-models` and the `[m]erge` config-handling option
+- `jq`: **required** for `update-models`; **strongly recommended** for
+  `status` (without it the model-count math is approximate and the
+  `[m]erge` config-handling option is unavailable for JSON files)
 - Optional: ANL VPN if you're off-site and your local network policy needs it
 
 **ANL compute node** (auto-handled by `server` mode):
@@ -128,9 +132,22 @@ bash argo_opencode.sh update-models
 bash argo_opencode.sh stop
 
 # Remove everything this script created (preview first)
-bash argo_opencode.sh clean --dry-run
-bash argo_opencode.sh clean
+bash argo_opencode.sh clean --dry-run                # safe enumeration; no changes
+bash argo_opencode.sh clean                          # interactive (per-file prompts for risky items)
+bash argo_opencode.sh clean -y                       # non-interactive; deletes safe items, KEEPS risky configs
+bash argo_opencode.sh clean -y --purge-backups       # also drop accumulated .bak.* files
+bash argo_opencode.sh clean -y --purge               # delete EVERYTHING, including configs
 ```
+
+`clean` separates artifacts into three risk tiers:
+
+- **safe** (state dir, mux sockets, our SSH tunnel, the remote venv) —
+  removed on confirmation
+- **risky** (`~/.config/opencode/config.json`,
+  `~/.config/argoproxy/config.yaml`, and their `.bak.*` files) —
+  per-file `[k]eep / [r]estore-from-backup / [d]elete / [b]ackups-only`
+  prompt, or `--purge` / `--purge-backups` for the non-interactive paths
+- **never touched** — the OpenCode binary, the script itself, system tools
 
 For the full guide (troubleshooting, customization, env vars, security
 notes), run `bash argo_opencode.sh help`.
