@@ -40,9 +40,22 @@ URLs are documented in `README.md` and the script's own header.
 
 ### Subcommands
 
-`client` (default), `server`, `status`, `stop`, `update-models`, `clean`,
-`help`. The `client` mode `scp`s the file to a chosen compute node and
-re-execs it as `server` over SSH.
+`client` (default), `tunnel`, `server`, `status`, `stop`, `update-models`,
+`clean`, `help`.
+
+- `client` is the all-in-one workflow: SSH tunnel + OpenCode install +
+  config write + monitor. `scp`s the file to a chosen compute node and
+  re-execs it as `server` over SSH.
+- `tunnel` is `client` minus the OpenCode install/config: open the SSH
+  forward (or local proxy on a compute node) and block in the foreground
+  monitor loop. Useful for power users managing their own client
+  configurations or for keeping a tunnel alive while configuring multiple
+  clients in other terminals.
+- `server` runs argo-proxy locally. Auto-invoked by `client` over SSH on
+  the picked compute node, but also a documented standalone workflow
+  ("leave a proxy on this node for any client to reach"). Resolves
+  identity from env, then `~/.config/argoproxy/config.yaml`, then cache;
+  prompts for confirmation when no env was supplied (skip with `-y`).
 
 ### MFA-aware by default
 

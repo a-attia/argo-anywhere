@@ -398,3 +398,202 @@ test.
 | 3f   | Tunnel comes up; `/health` answers; summary box renders ALL GREEN |
 | 4    | Tunnel process has correct parent; argo-proxy YAML diff shows only owned-key changes |
 | 5    | OpenCode end-to-end against the new tunnel works |
+
+---
+
+## On-node paths (Phase 2 additions)
+
+The above guide tests the **laptop → tunnel → compute node** flow. If
+you want to verify the script's on-node paths (running `client`, `tunnel`,
+or `server` directly from a shell on a compute node), use this section.
+
+### Setup: get a shell on a compute node
+
+```sh
+ssh -J <user>@logins.cels.anl.gov <user>@compute-01.cels.anl.gov
+```
+
+Once on the node, fetch the script (or use the existing
+`~/.argo_opencode.sh` if it's recent enough — `md5sum` it against the
+fresh download to be sure):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh -o argo_opencode.sh
+md5sum argo_opencode.sh
+```
+
+### On-node test 1: `client` with same-host short-circuit
+
+Goal: verify the script detects "I'm on the picked node" and skips the
+SSH tunnel, running argo-proxy locally instead.
+
+```sh
+# Capture pre-state
+stat -c '%Y %n' ~/.argo_opencode.sh ~/.argo_opencode.server.log 2>/dev/null
+date +%s
+
+bash argo_opencode.sh client
+# When the picker shows up, pick compute-01 (or whichever alias is the
+# default-marked entry). The fix in commit ee8b13c makes the script
+# default to the alias that resolves to your physical host.
+```
+
+**Pass criteria:**
+
+- `[argo_opencode] Detected ANL compute node (compute-XXX-Y...); defaulting to --no-jump.` — auto-detection fired.
+- `[argo_opencode] Selected node is this host (compute-XXX-Y...); skipping SSH tunnel.` — short-circuit fired.
+- `~/.argo_opencode.sh` mtime: **unchanged** (no scp happened).
+- argo-proxy: same pid as before (existing instance reused, not restarted).
+- The shell returns to the prompt (no foreground tunnel).
+
+### On-node test 2: `tunnel` standalone
+
+Goal: verify `tunnel` brings up the tunnel without touching the OpenCode
+config.
+
+```sh
+# Snapshot OpenCode config mtime
+stat -c '%Y %n' ~/.config/opencode/config.json 2>/dev/null
+
+bash argo_opencode.sh tunnel
+```
+
+**Pass criteria:**
+
+- Same on-node short-circuit lines as test 1.
+- No `[ ok ] OpenCode already installed` or `OpenCode config already
+  up to date` lines (because tunnel doesn't run setup_opencode_client).
+- `~/.config/opencode/config.json` mtime: **unchanged**.
+
+### On-node test 3: `server` standalone
+
+Goal: verify the standalone-server identity-resolution prompt.
+
+```sh
+bash argo_opencode.sh server
+```
+
+**Pass criteria:**
+
+- `[argo_opencode] Standalone 'server' invocation. Resolved identity from local config + cache ...`
+- `Proceed? [Y/n]:` — type `Y` or hit Enter.
+- The prompt fires **exactly once** (the tee re-exec subprocess inherits
+  the resolved values via env, so its standalone-detection sees them as
+  already-set; the second-pass prompt is suppressed).
+
+Now test the non-interactive path:
+
+```sh
+bash argo_opencode.sh -y server
+# Should NOT prompt. -y skips the confirmation.
+```
+
+And the env-supplied path (verifies the prompt is also suppressed when
+env is supplied explicitly):
+
+```sh
+ARGO_OPENCODE_USER=<user> ARGO_OPENCODE_PORT=64742 bash argo_opencode.sh server
+# Should NOT prompt. The env-was-supplied check bypasses the standalone branch.
+```
+
+### On-node test 4: `stop` confirmation prompt
+
+Goal: verify the on-node `mode_stop` shows the destructive-action
+confirmation prompt and refuses by default.
+
+```sh
+bash argo_opencode.sh stop
+# When the prompt asks 'Kill the listener anyway? [y/N]:' type 'n'.
+```
+
+**Pass criteria:**
+
+- Warning lists the blast radius ("any client ... pointed at this host:port",
+  "any laptop whose SSH tunnel forwards to this host:port", etc.).
+- Default `[N]` aborts cleanly with `[err ] Aborted.`
+- argo-proxy is still running afterward (verify with `lsof -nPi :64742 -sTCP:LISTEN`).
+
+Then test the actual kill path:
+
+```sh
+bash argo_opencode.sh stop
+# Type 'y' this time.
+```
+
+**Pass criteria:**
+
+- `[ ok ] Killed: <pid>`
+- Either a "session is still around" hint with screen/tmux cleanup
+  command (if the wrapper survived), OR a calm "session manager exited
+  along with its child; no cleanup needed" line (the typical case where
+  argo-proxy was the only process inside its screen wrapper).
+- No `xargs: warning: --max-args and --replace are mutually exclusive`
+  message.
+
+### On-node test 5: multi-user collision UX
+
+Hard to test without a second user actually running argo-proxy on the
+same physical host on the same port. If you happen to have two
+collaborators willing to test simultaneously:
+
+- User A: `bash argo_opencode.sh client` → claims port 64742.
+- User B: `bash argo_opencode.sh client` → should see the
+  `[warn] Port 64742 on <node> is in use by another user (pid X, owned
+  by '<a>'; you are '<b>')` prompt with `[n/p/r/a]` choices.
+- User B picks `[n]` → script auto-finds next free port (e.g. 64743),
+  prompts the OpenCode-config migration `[m/u/k/a]`.
+
+If you can't arrange this, the cheaper substitute is to manually start
+something on the port to mimic a collision:
+
+```sh
+# Bind 64742 with a sleep process owned by your account
+nohup sh -c 'python3 -m http.server 64742 >/dev/null 2>&1' >/dev/null 2>&1 &
+PORT_HOG_PID=$!
+
+# Then run client; the local_tunnel_status check should see "external-healthy"
+# and skip the tunnel. NOT the same as the multi-user case (different OS user)
+# but exercises the local-collision branch.
+
+# Cleanup:
+kill $PORT_HOG_PID
+```
+
+### On-node test 6: SSH attempt tracker
+
+To verify the CSPO-IP-block defense without actually breaking your SSH
+auth, simulate failures by running `client` with a deliberately wrong
+username:
+
+```sh
+bash argo_opencode.sh --user no-such-user client
+# Should fail at ssh_preflight with "Cannot reach no-such-user@<host> without a password."
+# This counts ONE SSH attempt failure.
+
+# Repeat 3 times total:
+bash argo_opencode.sh --user no-such-user client
+bash argo_opencode.sh --user no-such-user client
+
+# By the third attempt within the same session, the tracker should fire
+# and refuse further SSH attempts. But each script invocation is a fresh
+# process, so the counter resets each time. To exercise the in-session
+# threshold, you'd need a single invocation that does multiple SSH calls
+# and fails each (e.g. --probe-nodes with no ANL_NODES reachable).
+```
+
+The tracker is mostly a defense against the script's reconnect loops
+hammering on a flapping network — verifying it in normal use is
+inherently awkward.
+
+---
+
+## What each on-node step verifies
+
+| Test | What it verifies |
+|------|------------------|
+| 1    | Same-host short-circuit; no scp; argo-proxy reuse |
+| 2    | `tunnel` subcommand doesn't touch OpenCode config |
+| 3    | Standalone `server` resolution + single confirmation prompt; -y skips; env-supplied skips |
+| 4    | `mode_stop` confirmation prompt; default-N aborts; -y bypass; calm post-kill messaging |
+| 5    | Multi-user collision UX (`[n/p/r/a]` prompt, `--auto-port`, OpenCode migration follow-up) |
+| 6    | SSH attempt tracker fires at threshold (~3 consecutive failures within a single invocation) |

@@ -4204,6 +4204,14 @@ cluster login node) can then point at the proxy via their own SSH -L
 forward, or via 'argo_opencode.sh client --node compute-XX' from those
 machines.
 
+When invoked standalone (without env vars from 'client'), 'server'
+resolves your username and port from local sources (in order:
+~/.config/argoproxy/config.yaml, ~/.config/argo_opencode/user, then
+'id -un' as a last resort for username, PROXY_PORT_DEFAULT for port).
+It then shows you the resolved values and asks "Proceed? [Y/n]:"
+before doing any work. Pass -y / --yes to skip the prompt for
+non-interactive use (e.g. systemd unit, launchd plist, cron job).
+
 SHARING A COMPUTE NODE WITH OTHER USERS
 ---------------------------------------
 Each user runs their own argo-proxy on the picked compute node, listening
