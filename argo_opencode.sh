@@ -593,11 +593,19 @@ resolve_port() {
   fi
   # Always read config too (even when not chosen) so we can compare later.
   [ -z "$PORT_FROM_CONFIG" ] && PORT_FROM_CONFIG="$(read_port_from_opencode_config || true)"
-  # Sanity check
+  # Sanity check: must be a number in valid TCP range.
   case "$p" in
     [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|[1-5][0-9][0-9][0-9][0-9]|6[0-4][0-9][0-9][0-9]|65[0-4][0-9][0-9]|655[0-2][0-9]|6553[0-5]) ;;
     *) die "Resolved port '$p' is not a valid TCP port number." ;;
   esac
+  # Reject privileged ports (1-1023). argo-proxy can't bind these without
+  # root, and the bootstrap would fail late ('Address already in use'
+  # is what bash would see -- actually permission-denied at the kernel
+  # level, but the symptom is the same). Be consistent with --port-range
+  # validation (1024-65535) and the interactive port-prompt's range.
+  if [ "$p" -lt 1024 ]; then
+    die "Resolved port '$p' is privileged (<1024); use 1024-65535. argo-proxy cannot bind these without root."
+  fi
   PROXY_PORT="$p"
 }
 
@@ -924,8 +932,12 @@ EOF
     case "$choice" in
       k|K) ok "Keeping existing ${desc}."; break ;;
       b|B)
+        # Backup name includes $$ (this shell's PID) for uniqueness when
+        # two invocations both reach this branch within the same second.
+        # Plain seconds-resolution timestamps would clobber each other in
+        # that race; PID makes each invocation's backup unique.
         local bak
-        bak="${target}.bak.$(date +%Y%m%d-%H%M%S)"
+        bak="${target}.bak.$(date +%Y%m%d-%H%M%S).$$"
         cp -p "$target" "$bak"
         cp "$proposed" "$target"
         ok "Backed up to ${bak} and overwrote ${desc}."
@@ -2824,20 +2836,24 @@ mode_server() {
   # ~/.config/argoproxy/config.yaml). Killing the session would silently
   # destroy that other instance and strand any tunnel pointed at it.
   # Detect this multi-port collision and warn before killing.
+  #
+  # We use lsof (already required elsewhere in the script) directly,
+  # without an upfront pgrep gate. An earlier version had a pgrep gate
+  # for "skip the lsof scan if no argo-proxy exists at all," but pgrep
+  # is missing on truly minimal compute-node images (rare; mainly Alpine
+  # without procps). lsof + awk does the right thing on its own: if no
+  # argo-proxy rows match, awk prints nothing, the variable stays empty,
+  # the warning doesn't fire. Slight efficiency cost (we run lsof
+  # unconditionally), but correctness everywhere.
   local other_argoproxy_port=""
-  if pgrep -u "$(id -un)" -f "argo-proxy serve" >/dev/null 2>&1; then
-    # We own at least one argo-proxy. Find what port(s) it's bound to,
-    # excluding the one we're about to start on (which we already
-    # confirmed is free).
-    other_argoproxy_port="$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
-      | awk -v me="$(id -un)" -v want="$PROXY_PORT" '
-          $1 ~ /^argo/ && $3 == me {
-            split($9, a, ":");
-            p = a[length(a)];
-            gsub(/[^0-9]/, "", p);
-            if (p != "" && p != want) print p;
-          }' | head -n1)"
-  fi
+  other_argoproxy_port="$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
+    | awk -v me="$(id -un)" -v want="$PROXY_PORT" '
+        $1 ~ /^argo/ && $3 == me {
+          split($9, a, ":");
+          p = a[length(a)];
+          gsub(/[^0-9]/, "", p);
+          if (p != "" && p != want) print p;
+        }' | head -n1)"
   if [ -n "$other_argoproxy_port" ]; then
     warn "You already have an argo-proxy of yours running on port ${other_argoproxy_port}"
     warn "  on this host. The script supports ONE argo-proxy per user per node"
