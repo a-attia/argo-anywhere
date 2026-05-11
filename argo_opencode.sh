@@ -2539,11 +2539,17 @@ mode_server() {
   else launcher="nohup"
   fi
 
-  # If a stale session exists but the port isn't answering, kill it.
+  # We reach this point only when nothing is listening on PROXY_PORT (the
+  # earlier "is something already serving?" branch returned). If a screen
+  # or tmux session by our name still exists, it's empty (the argo-proxy
+  # process inside it died, e.g. from a previous 'stop'). Cleaning it up
+  # before starting a fresh one is correct, but the wording matters: this
+  # is housekeeping, not 'killing something useful.'
   case "$launcher" in
     screen)
       if screen -ls 2>/dev/null | grep -q "\.${SCREEN_SESSION}\b"; then
-        warn "Stale screen session '${SCREEN_SESSION}' found; killing it."
+        log "Found existing (empty) screen session '${SCREEN_SESSION}'"
+        log "  from a previous run; cleaning up before starting fresh."
         screen -S "${SCREEN_SESSION}" -X quit || true
       fi
       log "Starting argo-proxy in screen session '${SCREEN_SESSION}'..."
@@ -2551,7 +2557,8 @@ mode_server() {
       ;;
     tmux)
       if tmux has-session -t "${SCREEN_SESSION}" 2>/dev/null; then
-        warn "Stale tmux session '${SCREEN_SESSION}' found; killing it."
+        log "Found existing (empty) tmux session '${SCREEN_SESSION}'"
+        log "  from a previous run; cleaning up before starting fresh."
         tmux kill-session -t "${SCREEN_SESSION}" || true
       fi
       log "Starting argo-proxy in tmux session '${SCREEN_SESSION}'..."
@@ -2757,10 +2764,17 @@ render_summary() {
     verdict="DEGRADED   -  proxy healthy but /v1/models did not respond"
     vcolor="$C_YLW"
   elif [ "$SUM_LISTENER_OK" -eq 1 ]; then
-    verdict="DEGRADED   -  tunnel up, proxy NOT answering"
+    verdict="DEGRADED   -  listener present, proxy NOT answering"
     vcolor="$C_YLW"
   else
-    verdict="FAIL       -  no local tunnel on :${PROXY_PORT}"
+    # Phrase the FAIL case based on where we are. On a compute node
+    # we expect argo-proxy itself; "no tunnel" is misleading because
+    # there's never supposed to be a tunnel here.
+    if [ "$(on_anl_compute_node)" = "yes" ]; then
+      verdict="FAIL       -  argo-proxy not running on :${PROXY_PORT}"
+    else
+      verdict="FAIL       -  no local tunnel on :${PROXY_PORT}"
+    fi
     vcolor="$C_RED"
   fi
 
@@ -2898,7 +2912,15 @@ render_summary() {
       lines+=("Run  'opencode'  in another terminal.")
     fi
   elif [ "$SUM_LISTENER_OK" -eq 0 ]; then
-    lines+=("Start the tunnel with  '$(basename "$0") client'.")
+    # On a compute node, the listener should be argo-proxy itself; running
+    # 'client' triggers the on-node short-circuit which starts argo-proxy
+    # locally (no tunnel). Phrase the hint accordingly.
+    if [ "$(on_anl_compute_node)" = "yes" ]; then
+      lines+=("Start argo-proxy on this node with  '$(basename "$0") client'")
+      lines+=("  (or  '$(basename "$0") server'  to bring up only the proxy).")
+    else
+      lines+=("Start the tunnel with  '$(basename "$0") client'.")
+    fi
   elif [ "$SUM_HEALTH_OK" -eq 0 ]; then
     if [ "$cached_node" != "(unset)" ] && [ "$cached_user" != "(unset)" ]; then
       lines+=("Inspect the remote bootstrap log:")
@@ -2919,7 +2941,11 @@ render_summary() {
 # SECTION: 21. STATUS / STOP (mode_status, mode_stop)
 # ============================================================================
 mode_status() {
-  log "Local tunnel listener on :${PROXY_PORT}:"
+  # Preamble label: "Local tunnel listener" makes sense on a laptop where
+  # the listener IS our SSH tunnel. On a compute node the listener is
+  # argo-proxy itself, and "tunnel" is misleading. Use the more neutral
+  # "Local listener" everywhere.
+  log "Local listener on :${PROXY_PORT}:"
   lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN 2>/dev/null || warn "  (none)"
 
   log "argo-proxy /health via localhost:"
@@ -2977,7 +3003,7 @@ mode_stop() {
       log "Killing local SSH tunnel listening on :${PROXY_PORT}..."
       echo "$pids" | xargs -n1 kill 2>/dev/null || true
       sleep 1
-      echo "$pids" | xargs -n1 -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
+      echo "$pids" | xargs -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
       ok "Killed: ${pids//$'\n'/ }"
       warn "Note: this does NOT stop argo-proxy on the ANL node. To stop it"
       warn "  remotely, use the launcher actually used by 'server' mode"
@@ -3019,7 +3045,7 @@ EOF
       log "Killing listener on :${PROXY_PORT}..."
       echo "$pids" | xargs -n1 kill 2>/dev/null || true
       sleep 1
-      echo "$pids" | xargs -n1 -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
+      echo "$pids" | xargs -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
       ok "Killed: ${pids//$'\n'/ }"
       warn "Note: the screen/tmux session that hosted argo-proxy may still"
       warn "  exist (now empty). To tear it down too:"
@@ -3035,7 +3061,7 @@ EOF
       log "Killing local processes listening on :${PROXY_PORT}..."
       echo "$pids" | xargs -n1 kill 2>/dev/null || true
       sleep 1
-      echo "$pids" | xargs -n1 -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
+      echo "$pids" | xargs -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
       ok "Killed: ${pids//$'\n'/ }"
       warn "Note: if the killed process was argo-proxy itself (not an SSH tunnel),"
       warn "  any other client pointed at this host:port has just lost its proxy."
