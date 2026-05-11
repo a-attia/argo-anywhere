@@ -137,10 +137,10 @@ notes), run `bash argo_opencode.sh help`.
 
 ## Testing
 
-[`argo_opencode_TESTING.md`](./argo_opencode_TESTING.md) is a step-by-step
-live-verification guide for the `client` end-to-end path. Use it after
-non-trivial edits or before tagging a release. It's structured so you can
-follow it without external help (~5–10 min, one Duo prompt).
+[`docs/TESTING.md`](./docs/TESTING.md) is a step-by-step live-verification
+guide for the `client` end-to-end path. Use it after non-trivial edits or
+before tagging a release. It's structured so you can follow it without
+external help (~5–10 min, one Duo prompt).
 
 For lighter smoke tests after edits:
 
