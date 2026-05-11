@@ -73,7 +73,7 @@ set -euo pipefail
 #   13. SSH PREFLIGHT            -- ssh_preflight (jump or first node)
 #   14. NODE PICKER              -- pick_node, --node, --probe-nodes
 #   15. REMOTE BOOTSTRAP         -- scp + ssh to invoke server mode
-#   16. LOCAL TUNNEL + MONITOR   -- open_tunnel_and_monitor, health loop
+#   16. LOCAL TUNNEL + MONITOR   -- open_tunnel + monitor_tunnel_loop, health loop
 #   17. CLIENT MODE              -- mode_client (orchestrates everything)
 #   18. SERVER MODE              -- mode_server (runs on the ANL node)
 #   19. SUMMARY GATHERING        -- fetch_proxy_models, gather_summary
@@ -570,7 +570,7 @@ mfa_enabled() {
 # Scope of tracking: only ssh_reachable and ssh_mux_open count, because
 # they are the unambiguous-failure-detection sites (ssh ... true returns
 # non-zero = failed auth or connect). The tunnel respawn paths in
-# open_tunnel_and_monitor have their own burst-backoff (RECONN_BURST_LIMIT)
+# open_tunnel + monitor_tunnel_loop have their own burst-backoff (RECONN_BURST_LIMIT)
 # and the common reconnect path does NOT re-auth (the multiplex master
 # holds the connection), so we don't double-count there.
 SSH_FAIL_THRESHOLD=3
@@ -926,6 +926,28 @@ ensure_opencode_installed() {
   ok "OpenCode installed."
 }
 
+# ----------------------------------------------------------------------------
+# OpenCode end-to-end client setup (subsection of 12)
+# ----------------------------------------------------------------------------
+# setup_opencode_client: ensure OpenCode is installed and its config is up to
+# date for the resolved (PROXY_PORT, ANL_USERNAME). Idempotent. Honors the
+# SKIP_OPENCODE_CONFIG_WRITE flag set by mode_client when the user picked [u]
+# at the port-mismatch prompt.
+#
+# This is the "per-client" piece of mode_client, extracted so future per-client
+# setup functions (setup_claudecode_client, setup_aider_client, ...) can sit
+# next to it as peers and the orchestrator can call any combination.
+setup_opencode_client() {
+  ensure_opencode_installed
+  if [ "${SKIP_OPENCODE_CONFIG_WRITE:-0}" = 1 ]; then
+    log "Skipping OpenCode config write (--port override + [u] choice)."
+    log "  config.json baseURL is unchanged at port ${PORT_FROM_CONFIG};"
+    log "  this run's tunnel is on port ${PROXY_PORT}."
+  else
+    handle_config_file "${HOME}/.config/opencode/config.json" "OpenCode config" write_opencode_config
+  fi
+}
+
 # ============================================================================
 # SECTION: 13. SSH PREFLIGHT (verify reachability + open MFA mux master)
 # ============================================================================
@@ -1173,7 +1195,7 @@ remote_bootstrap() {
 }
 
 # ============================================================================
-# SECTION: 16. LOCAL TUNNEL + HEALTH MONITOR (open_tunnel_and_monitor)
+# SECTION: 16. LOCAL TUNNEL + HEALTH MONITOR (open_tunnel + monitor_tunnel_loop)
 # ============================================================================
 # Foreground ssh -L; background loop polls /health and notifies on failure.
 # Reconnect-via-mux when the tunnel drops but the master is still alive.
@@ -1230,10 +1252,21 @@ spawn_health_monitor() {
   done
 }
 
-open_tunnel_and_monitor() {
+# open_tunnel: bring up the SSH local-forward and wait until /health on
+# localhost:PROXY_PORT answers (or fail loudly). Sets SSH_TUNNEL_PID as a
+# side effect; on the macOS/mux-owned scenario that pid may be empty (the
+# fg ssh exited but the multiplex master is holding the forward). Returns
+# 0 on success, dies on failure.
+#
+# Caller is responsible for: deciding it's OK to start a tunnel (see
+# ensure_or_reuse_tunnel), rendering the post-tunnel summary, and either
+# calling monitor_tunnel_loop to block forever or doing one-shot work.
+open_tunnel() {
   local user="$1" node="$2"
 
   # Refuse to clash with an existing local listener on the same port.
+  # (commit-3 will refine this to detect "ours-healthy" reuse via
+  # local_tunnel_status; today it's a hard refuse for any local listener.)
   if lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
     err "Port ${PROXY_PORT} is already in use locally."
     err "  Identify: lsof -nPi :${PROXY_PORT} -sTCP:LISTEN"
@@ -1304,20 +1337,15 @@ open_tunnel_and_monitor() {
     fi
   done
   ok "Tunnel is live. argo-proxy reachable at http://localhost:${PROXY_PORT}/v1"
+}
 
-  # Render the same summary box that `status` shows, so the user sees one
-  # easily-interpretable block before we go quiet in the foreground.
-  gather_summary
-  render_summary
-
-  # Be honest about what this script HAS configured (OpenCode) vs what else
-  # could in principle reach the proxy. The /v1 base URL is OpenAI-compatible,
-  # so any client speaking that dialect (Claude Code, aider, codex, raw curl,
-  # the OpenAI Python/Node SDKs, etc.) can target the URL directly using the
-  # same Argonne-username-as-bearer-token scheme.
-  log "OpenCode is installed and configured for this proxy.  Run: opencode"
-  log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
-  log "  with Authorization: Bearer ${ANL_USERNAME}"
+# monitor_tunnel_loop: block on the tunnel forever; reconnect transparently
+# when fg ssh dies if the multiplex master is still alive; tear everything
+# down on Ctrl-C / SIGTERM. Reads SSH_TUNNEL_PID/MONITOR_PID set by
+# open_tunnel. Returns only when the tunnel is permanently down (and the
+# trap'd cleanup_local will exit the script).
+monitor_tunnel_loop() {
+  local user="$1" node="$2"
 
   # Background health monitor. Notes the tunnel pid, polls /health on a timer,
   # notifies the user on sustained failure or tunnel-process death.
@@ -1601,15 +1629,6 @@ EOF
     log "Selected node: ${node}"
   fi
 
-  ensure_opencode_installed
-  if [ "${SKIP_OPENCODE_CONFIG_WRITE:-0}" = 1 ]; then
-    log "Skipping OpenCode config write (--port override + [u] choice)."
-    log "  config.json baseURL is unchanged at port ${PORT_FROM_CONFIG};"
-    log "  this run's tunnel is on port ${PROXY_PORT}."
-  else
-    handle_config_file "${HOME}/.config/opencode/config.json" "OpenCode config" write_opencode_config
-  fi
-
   # If the picked node IS the host we're already running on, skip the
   # SSH bootstrap and the tunnel entirely -- they would either fail
   # (ssh tunnel-to-self collides with the local argo-proxy on the same
@@ -1633,6 +1652,7 @@ EOF
     else
       die "argo-proxy did not become reachable on http://localhost:${PROXY_PORT}/health after server bootstrap."
     fi
+    setup_opencode_client
     gather_summary
     render_summary
     log "OpenCode is installed and configured for this proxy.  Run: opencode"
@@ -1643,8 +1663,22 @@ EOF
     return 0
   fi
 
+  # Standard remote-tunnel flow:
+  #   1. bootstrap argo-proxy on the picked node (idempotent)
+  #   2. open the local SSH forward and wait until /health answers
+  #   3. configure the OpenCode client (install + write config)
+  #   4. render the unified status summary
+  #   5. tell the user what to run, what other clients can target
+  #   6. block in the foreground monitor + reconnect loop
   remote_bootstrap "$ANL_USERNAME" "$node"
-  open_tunnel_and_monitor "$ANL_USERNAME" "$node"
+  open_tunnel "$ANL_USERNAME" "$node"
+  setup_opencode_client
+  gather_summary
+  render_summary
+  log "OpenCode is installed and configured for this proxy.  Run: opencode"
+  log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
+  log "  with Authorization: Bearer ${ANL_USERNAME}"
+  monitor_tunnel_loop "$ANL_USERNAME" "$node"
 }
 
 # ============================================================================
