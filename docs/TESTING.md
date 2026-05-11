@@ -597,3 +597,170 @@ inherently awkward.
 | 4    | `mode_stop` confirmation prompt; default-N aborts; -y bypass; calm post-kill messaging |
 | 5    | Multi-user collision UX (`[n/p/r/a]` prompt, `--auto-port`, OpenCode migration follow-up) |
 | 6    | SSH attempt tracker fires at threshold (~3 consecutive failures within a single invocation) |
+
+---
+
+## Multi-client tests (Phase 3+)
+
+These verify that the per-client invocation/dispatch + Claude Code support
+work end to end. Run after any change to the dispatcher
+(`do_post_tunnel_for_client`, `default_client_for_invocation`,
+`interactive_setup_picker`) or to per-client setup functions.
+
+### Setup: ensure all symlinks are present
+
+```sh
+ls -la argo_*.sh
+# Expect: argo_opencode.sh (regular file), argo_anywhere.sh and
+# argo_claudecode.sh as symlinks (mode lrwxr-xr-x) pointing to argo_opencode.sh.
+```
+
+### Multi-client test 1: invocation-name dispatch
+
+```sh
+bash argo_opencode.sh -h | head -1     # "Usage: argo_opencode.sh ..."
+bash argo_claudecode.sh -h | head -1   # "Usage: argo_claudecode.sh ..."
+bash argo_anywhere.sh -h | head -1     # "Usage: argo_anywhere.sh ..."
+```
+
+All three must show their own basename. Any showing
+`argo_opencode.sh` from a non-opencode invocation means the symlink
+isn't being resolved or `$0` is being mangled.
+
+### Multi-client test 2: interactive picker (anywhere)
+
+```sh
+printf '\n' | bash argo_anywhere.sh 2>&1 | head -10
+# Expect:
+#   Supported AI clients:
+#     1) OpenCode ...
+#     2) Claude Code ...
+#   Pick a client [1-2, ...]:
+#   [err ] No client picked; aborting.
+```
+
+Then with input `1`:
+
+```sh
+printf '1\n' | bash argo_anywhere.sh --user nobody --node bogus.example 2>&1 | head -20
+# Expect: proceeds into the OpenCode flow and fails fast at the
+# preflight step (since 'nobody'/'bogus.example' are not real). The
+# important bit: the picker gates correctly.
+```
+
+### Multi-client test 3: `setup` subcommand forces picker
+
+```sh
+printf '\n' | bash argo_opencode.sh setup 2>&1 | head -8
+# Expect the picker to appear EVEN THOUGH the invocation is argo_opencode.sh.
+# (Without `setup`, argo_opencode.sh would proceed straight to the
+# OpenCode flow without showing the picker.)
+```
+
+### Multi-client test 4: Claude Code scope auto-detection
+
+Pre-conditions: a successful tunnel up to a compute node.
+
+Test the global-scope branch (no existing `~/.claude/settings.json`):
+
+```sh
+# Make sure no global file exists, or back it up first.
+[ -f ~/.claude/settings.json ] && mv ~/.claude/settings.json ~/.claude/settings.json.testbak
+bash argo_claudecode.sh
+# In the script's log lines, look for:
+#   [argo_opencode] Claude Code scope: global (auto; no existing env block to preserve).
+# Then verify the file:
+cat ~/.claude/settings.json
+# Should contain:
+#   "env": {
+#     "ANTHROPIC_BASE_URL": "http://localhost:64742",
+#     "ANTHROPIC_AUTH_TOKEN": "<your-anl-username>"
+#   }
+```
+
+Test the project-scope branch (existing `env` block in global):
+
+```sh
+# Pre-seed a global env block (e.g. simulating personal Anthropic key).
+mkdir -p ~/.claude
+cat > ~/.claude/settings.json <<'EOF'
+{
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-personal-..."
+  }
+}
+EOF
+
+cd /tmp && mkdir -p test-claude-scope && cd test-claude-scope
+bash ~/path/to/argo_claudecode.sh
+# Look for:
+#   [argo_opencode] Claude Code scope: project (auto; ~/.claude/settings.json
+#     already has an env block).
+# Then verify project file was written, global was untouched:
+cat ./.claude/settings.local.json    # should have ANTHROPIC_BASE_URL etc.
+cat ~/.claude/settings.json          # should still have the personal key
+```
+
+### Multi-client test 5: `--scope` override
+
+```sh
+bash argo_claudecode.sh --scope global
+# Look for:  [argo_opencode] Claude Code scope: global (--scope global).
+bash argo_claudecode.sh --scope project
+# Look for:  [argo_opencode] Claude Code scope: project (--scope project).
+bash argo_claudecode.sh --scope bogus
+# Should die with: --scope must be 'project' or 'global' (got 'bogus').
+```
+
+### Multi-client test 6: Claude Code env-block merge preservation
+
+Pre-condition: a `~/.claude/settings.json` with extra top-level keys
+AND extra env keys we don't own.
+
+```sh
+cat > ~/.claude/settings.json <<'EOF'
+{
+  "model": "sonnet",
+  "permissions": {"allow": ["Read"]},
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-personal-...",
+    "MY_OTHER_VAR": "keep-me"
+  }
+}
+EOF
+
+bash argo_claudecode.sh --scope global
+# Pick [b] backup+overwrite at the prompt (or [m] merge if offered).
+# Then:
+cat ~/.claude/settings.json
+# Should still contain:
+#   - "model": "sonnet"
+#   - "permissions": {...}
+#   - env.ANTHROPIC_API_KEY (preserved)
+#   - env.MY_OTHER_VAR (preserved)
+#   - env.ANTHROPIC_BASE_URL (NEW, from us)
+#   - env.ANTHROPIC_AUTH_TOKEN (NEW, from us)
+```
+
+### Multi-client test 7: idempotency
+
+```sh
+bash argo_claudecode.sh        # writes the config
+bash argo_claudecode.sh        # second run should report:
+#   [ ok ] Claude Code config (...) already up to date: ...
+# i.e. cmp -s in handle_config_file finds no diff, no prompt.
+```
+
+---
+
+## What each multi-client step verifies
+
+| Test | What it verifies |
+|------|------------------|
+| 1    | `$0` invocation-name detection survives symlink resolution |
+| 2    | `argo_anywhere.sh` triggers picker; picker shows registered clients; abort-on-empty works |
+| 3    | `setup` subcommand always shows picker regardless of `$0` |
+| 4    | Auto-scope detection (global when no env block; project when there is one) |
+| 5    | `--scope` override; invalid value rejected |
+| 6    | `write_claudecode_config` Python heredoc preserves user-owned env keys + non-env top-level keys |
+| 7    | Per-client setup is idempotent (handle_config_file's cmp branch) |

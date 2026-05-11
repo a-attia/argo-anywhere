@@ -1,14 +1,16 @@
 # argo-opencode
 
-Self-contained orchestrator that lets Argonne users run [OpenCode](https://opencode.ai/)
-against [argo-proxy](https://github.com/Oaklight/argo-proxy) on an ANL compute
-node, from anywhere (inside or outside the ANL network).
+Self-contained orchestrator that lets Argonne users run AI coding assistants
+([OpenCode](https://opencode.ai/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+and others) against [argo-proxy](https://github.com/Oaklight/argo-proxy) on an
+ANL compute node, from anywhere (inside or outside the ANL network).
 
 One bash script, two roles:
 
-- **Client mode (laptop)**: install OpenCode if needed, write the OpenCode
-  config, push this script to a chosen ANL compute node, start argo-proxy
-  there inside `screen`, then open the SSH tunnel and monitor its health.
+- **Client mode (laptop)**: install the chosen AI client if needed, write
+  its config, push this script to a chosen ANL compute node, start
+  argo-proxy there inside `screen`, then open the SSH tunnel and monitor
+  its health.
 - **Server mode (ANL compute node)**: create a Python venv, install
   argo-proxy, write `~/.config/argoproxy/config.yaml`, start
   `argo-proxy serve` in `screen` (preferred), `tmux`, or `nohup`.
@@ -18,7 +20,17 @@ run `client`.**
 
 ## Quick start
 
-Pinned to a release (recommended for stability):
+Pick the file name that matches the AI client you want to set up. The script
+ships as ONE physical file (`argo_opencode.sh`) plus per-client symlinks; the
+file inspects its invocation name and picks sensible defaults per name.
+
+| Client | Download URL (substitute `main` -> `vX.Y.Z` to pin) |
+|---|---|
+| OpenCode (default) | `https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh` |
+| Claude Code | `https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_claudecode.sh` |
+| Interactive picker (any client) | `https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh` |
+
+For example, OpenCode (pinned to a release; recommended for stability):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/argo_opencode.sh \
@@ -26,6 +38,16 @@ curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/argo_o
 bash argo_opencode.sh                # runs 'client' by default
 # ...in another terminal once it says "Tunnel is live":
 opencode
+```
+
+Or Claude Code:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_claudecode.sh \
+     -o argo_claudecode.sh
+bash argo_claudecode.sh
+# ...in another terminal once it says "Tunnel is live":
+claude
 ```
 
 Or live from `main` (gets you the latest fixes, may move under your feet):
@@ -38,15 +60,30 @@ curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_ope
 The first run prompts for your ANL (Argonne) username and asks you to pick
 a compute node. Subsequent runs reuse the cached values.
 
+### Picking a different client without renaming
+
+Three ways:
+
+```sh
+# 1. The 'setup' subcommand always shows the client picker:
+bash argo_opencode.sh setup
+
+# 2. The argo_anywhere.sh symlink defaults to the picker:
+bash argo_anywhere.sh
+
+# 3. Each per-client name (argo_claudecode.sh, etc.) defaults to that client.
+```
+
 ## Subcommands
 
 | Subcommand | What it does |
 |---|---|
-| `client` (default) | Full laptop-side flow: install + config + tunnel + monitor |
+| `client` (default) | Full laptop-side flow: install chosen client + write its config + tunnel + monitor. Chosen client is determined by invocation name (e.g. `argo_opencode.sh` -> OpenCode, `argo_claudecode.sh` -> Claude Code). |
+| `setup` | Same as `client` but ALWAYS shows the client picker, regardless of invocation name |
 | `tunnel` | Same as `client` but does NOT install or configure any client; just brings up the tunnel |
 | `server` | Auto-invoked on the ANL compute node by `client` |
 | `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL) |
-| `update-models` | Refresh the OpenCode model list from the live `/v1/models` |
+| `update-models` | Refresh the OpenCode model list from the live `/v1/models` (OpenCode-specific) |
 | `stop` | Kill the local SSH tunnel (does NOT touch the remote argo-proxy) |
 | `clean` | Remove every artifact this script created (local + remote, with prompts) |
 | `help` | Long-form guide (paths, troubleshooting, customization) |
@@ -81,7 +118,8 @@ bash argo_opencode.sh help | less
 
 | Path | Purpose |
 |---|---|
-| `~/.config/opencode/config.json` | OpenCode config the script writes |
+| `~/.config/opencode/config.json` | OpenCode config (only when running the OpenCode flow) |
+| `~/.claude/settings.json` *or* `./.claude/settings.local.json` | Claude Code config (only when running the Claude Code flow); see "Claude Code scope" below |
 | `~/.config/argo_opencode/user` | Cached ANL username |
 | `~/.config/argo_opencode/node` | Last-used compute node |
 | `~/.ssh/sockets/argo-opencode-<user>-<host>-<port>` | SSH multiplex master socket (Duo prompts only fire once per session) |
@@ -206,6 +244,44 @@ physical hosts (`compute-XXX-Y`). Two consequences worth knowing:
   hostname to its IPs and intersecting with the local interface IPs
   — so picking `compute-01` while logged into `compute-386-01` (where
   the alias includes you) correctly skips the SSH tunnel.
+
+## Claude Code scope (project vs. global)
+
+Claude Code reads its config from up to three files (more-specific wins,
+but the `env` block is **replaced** wholesale across scopes — Anthropic
+chose not to deep-merge it):
+
+| File | Scope |
+|---|---|
+| `~/.claude/settings.json` | global (all projects, all directories) |
+| `./.claude/settings.json` | per-project, **committed** (visible to collaborators) |
+| `./.claude/settings.local.json` | per-project, **gitignored** by default |
+
+`argo_claudecode.sh` writes EITHER the global file OR the project-local
+file (never the committed file — that would force your collaborators to
+also use this proxy). The choice is automatic by default:
+
+- **`~/.claude/settings.json` already has an `env` block** (suggesting you
+  have a personal Anthropic subscription configured globally) → write the
+  **project** scope, so your global Anthropic settings stay intact.
+- **No existing `env` block** → write the **global** scope (smoothest UX
+  for first-time users; Claude Code works from any directory).
+
+To force one or the other:
+
+```sh
+bash argo_claudecode.sh --scope global    # always touch ~/.claude/settings.json
+bash argo_claudecode.sh --scope project   # always touch ./.claude/settings.local.json
+```
+
+When the script writes the project scope, **you must run `claude` from
+that same directory** to pick up the settings. The script prints which
+directory at the end of the setup step.
+
+The script always preserves any non-Anthropic-Argo keys in the target
+file's `env` block (and the file's other top-level keys: `model`,
+`permissions`, `hooks`, etc.). It only owns `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN`.
 
 ## Tunnel monitoring and reconnect
 

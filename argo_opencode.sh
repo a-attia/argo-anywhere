@@ -169,6 +169,20 @@ NODE_CACHE="${STATE_DIR}/node"
 # update-models). Centralized constant so future renames touch one site.
 OPENCODE_CONFIG="${HOME}/.config/opencode/config.json"
 
+# Claude Code config paths.
+#
+# Per Anthropic's docs, Claude Code reads three files in precedence order
+# (most-specific wins, but the `env` block is REPLACED wholesale across
+# scopes -- it is NOT deep-merged):
+#   ./.claude/settings.local.json   project-local (gitignored by default)
+#   ./.claude/settings.json         project-shared (committed)
+#   ~/.claude/settings.json         user/global
+# We write to either the global or project-local scope (never to the
+# committed shared file -- that would force the user's collaborators to
+# also use this proxy). claudecode_pick_scope() decides which.
+CLAUDECODE_GLOBAL_CONFIG="${HOME}/.claude/settings.json"
+CLAUDECODE_PROJECT_CONFIG="./.claude/settings.local.json"
+
 # Remote paths (compute node side)
 REMOTE_SELF=".argo_opencode.sh"
 REMOTE_LOG=".argo_opencode.server.log"
@@ -1109,6 +1123,208 @@ setup_opencode_client() {
   else
     handle_config_file "${OPENCODE_CONFIG}" "OpenCode config" write_opencode_config
   fi
+}
+
+# ----------------------------------------------------------------------------
+# Claude Code config writer + installer + end-to-end client setup
+# (subsection of 12; peer of setup_opencode_client)
+# ----------------------------------------------------------------------------
+# ensure_claudecode_installed: detect or install the upstream `claude` CLI.
+#
+# Upstream installer drops the binary at ~/.claude/local/claude (Linux) or
+# /opt/homebrew/bin/claude (macOS via the standalone installer's PATH
+# update to ~/.bashrc / ~/.zshrc). As with OpenCode, the rc-file PATH
+# update doesn't reach the running shell, so we prepend the well-known
+# locations after install. See the analogous mitigation in
+# ensure_opencode_installed for the rationale.
+ensure_claudecode_installed() {
+  if command -v claude >/dev/null 2>&1; then
+    ok "Claude Code already installed: $(command -v claude)"
+    return
+  fi
+  log "Installing Claude Code..."
+  case "$(detect_os)" in
+    macos|linux)
+      # Anthropic's documented installer; works on both macOS and Linux.
+      curl -fsSL https://claude.ai/install.sh | bash
+      ;;
+    *)
+      die "Unsupported OS for automatic install. Install Claude Code manually then re-run."
+      ;;
+  esac
+
+  if ! command -v claude >/dev/null 2>&1; then
+    local cand
+    for cand in "${HOME}/.claude/local/claude" "${HOME}/.local/bin/claude"; do
+      if [ -x "$cand" ]; then
+        log "Installer placed binary at ${cand} but the new PATH only takes"
+        log "  effect in fresh shells. Prepending it for this run."
+        PATH="$(dirname "$cand"):${PATH}"
+        export PATH
+        break
+      fi
+    done
+  fi
+
+  if ! command -v claude >/dev/null 2>&1; then
+    err "Claude Code install reported success but the binary is not on PATH"
+    err "  and was not found at the standard locations (~/.claude/local/claude,"
+    err "  ~/.local/bin/claude). Try opening a new shell (or 'source ~/.bashrc'"
+    err "  / 'source ~/.zshrc') and re-running this script."
+    die "Cannot continue without a runnable claude binary."
+  fi
+  ok "Claude Code installed: $(command -v claude)"
+}
+
+# claudecode_pick_scope: decide whether to write the project-local or the
+# global Claude Code settings file. Sets _CLAUDECODE_SCOPE_PATH (the file
+# we'll write) and _CLAUDECODE_SCOPE_NAME (human-readable label) as
+# globals, since the writer (write_claudecode_config) is invoked via
+# handle_config_file and gets only the destination path.
+#
+# Decision tree:
+#   1. --scope project|global / CLAUDECODE_SCOPE env -> use that.
+#   2. ~/.claude/settings.json exists AND has a non-empty `env` block
+#      (suggests user has a personal Anthropic subscription configured
+#      globally; we don't want to clobber it) -> default to project scope.
+#   3. Else -> global scope (smoothest UX for first-time users).
+#
+# Why we never write to ./.claude/settings.json (the COMMITTED project
+# file): doing so would force every collaborator on the user's git repo
+# to also use this proxy. .claude/settings.local.json is gitignored by
+# default by Claude Code itself, so it's the right place for per-machine
+# overrides.
+_CLAUDECODE_SCOPE_PATH=""
+_CLAUDECODE_SCOPE_NAME=""
+claudecode_pick_scope() {
+  if [ -n "${CLAUDECODE_SCOPE:-}" ]; then
+    case "$CLAUDECODE_SCOPE" in
+      project)
+        _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
+        _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
+        log "Claude Code scope: project (--scope project)."
+        return
+        ;;
+      global)
+        _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_GLOBAL_CONFIG"
+        _CLAUDECODE_SCOPE_NAME="global (~/.claude/settings.json)"
+        log "Claude Code scope: global (--scope global)."
+        return
+        ;;
+    esac
+  fi
+
+  # Auto-detect: if the global file already has an env block, prefer
+  # project scope to avoid clobbering personal Anthropic settings.
+  local existing_env=0
+  if [ -f "$CLAUDECODE_GLOBAL_CONFIG" ] && command -v python3 >/dev/null 2>&1; then
+    if python3 - "$CLAUDECODE_GLOBAL_CONFIG" >/dev/null 2>&1 <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    env = data.get("env") or {}
+    sys.exit(0 if isinstance(env, dict) and len(env) > 0 else 1)
+except Exception:
+    sys.exit(2)
+PYEOF
+    then existing_env=1
+    fi
+  fi
+
+  if [ "$existing_env" = 1 ]; then
+    _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
+    _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
+    log "Claude Code scope: project (auto; ~/.claude/settings.json already has an env block)."
+    log "  This keeps your global Anthropic settings (e.g. personal subscription) intact."
+    log "  Override with '--scope global' if you'd rather replace the global env."
+  else
+    _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_GLOBAL_CONFIG"
+    _CLAUDECODE_SCOPE_NAME="global (~/.claude/settings.json)"
+    log "Claude Code scope: global (auto; no existing env block to preserve)."
+  fi
+}
+
+# write_claudecode_config: produce a fresh Claude Code settings.json that
+# points env.ANTHROPIC_BASE_URL at our proxy and uses the ANL username as
+# the bearer token. Preserves any pre-existing top-level keys in the
+# target file (model, permissions, hooks, etc.) and any pre-existing env
+# entries OTHER than ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
+# ANTHROPIC_MODEL (which we own).
+#
+# Per Claude Code docs, `env` is REPLACED across scope files, not
+# deep-merged -- so when we write the project scope, anything in the
+# global env that we don't carry forward is silently shadowed for that
+# project. We only own three env keys here; everything else in the
+# target file's env survives our write. The user's global env is
+# untouched as long as we're writing to project scope.
+#
+# IMPORTANT: ANTHROPIC_BASE_URL has NO trailing /v1. Claude Code appends
+# /v1/messages itself; including /v1 here would produce /v1/v1/messages
+# and 404 every request.
+#
+# Exit codes from the python heredoc (interpreted by the bash side):
+#   0 -> success
+#   2 -> input file unreadable / not valid JSON (we treat as "start fresh")
+write_claudecode_config() {
+  local dest="$1"
+  local user="${ARGO_OPENCODE_USER:-${ANL_USERNAME:-}}"
+  [ -n "$user" ] || die "write_claudecode_config: no username available (ARGO_OPENCODE_USER unset)"
+  command -v python3 >/dev/null 2>&1 \
+    || die "write_claudecode_config: python3 is required to merge JSON safely."
+
+  # Source = the file we're about to overwrite at $dest, IF it exists
+  # AND is parseable JSON. handle_config_file calls us with $dest = a
+  # tempfile when the user is choosing among k/b/d/m/a, so we need to
+  # base our merge on the ORIGINAL target file (pre-tempfile), which
+  # we read from the global _CLAUDECODE_SCOPE_PATH. When called for
+  # the no-prior-file branch, the path won't exist and the heredoc
+  # treats it as starting fresh.
+  local orig="$_CLAUDECODE_SCOPE_PATH"
+
+  python3 - "$orig" "$dest" "$user" "$PROXY_PORT" <<'PYEOF'
+import json, os, sys
+
+orig_path, dest_path, user, port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+# Start from the existing file (if any), else an empty dict.
+data = {}
+if os.path.isfile(orig_path):
+    try:
+        with open(orig_path) as f:
+            data = json.load(f) or {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        # Malformed JSON -- start fresh; the user will see the diff
+        # and can pick [k]eep if they'd rather not lose it.
+        data = {}
+
+env = data.get("env") or {}
+if not isinstance(env, dict):
+    env = {}
+
+# Keys we own:
+env["ANTHROPIC_BASE_URL"]  = f"http://localhost:{port}"
+env["ANTHROPIC_AUTH_TOKEN"] = user
+
+data["env"] = env
+
+with open(dest_path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+}
+
+# setup_claudecode_client: ensure Claude Code is installed and its
+# settings.json is up to date for the resolved (PROXY_PORT, ANL_USERNAME).
+# Idempotent. Picks scope automatically (or honors --scope).
+setup_claudecode_client() {
+  ensure_claudecode_installed
+  claudecode_pick_scope
+  handle_config_file "$_CLAUDECODE_SCOPE_PATH" \
+    "Claude Code config (${_CLAUDECODE_SCOPE_NAME})" \
+    write_claudecode_config
 }
 
 # ============================================================================
@@ -2228,7 +2444,8 @@ ensure_or_reuse_tunnel() {
 # Adding a new client = append a row + write its setup_<name>_client
 # function + add a symlink at the repo root.
 CLIENTS_AVAILABLE=(
-  "opencode|OpenCode (sst/opencode-style; default)"
+  "opencode|OpenCode (sst/opencode-style)"
+  "claudecode|Claude Code (Anthropic CLI; uses ANTHROPIC_BASE_URL env)"
 )
 # default_client_for_invocation: print the default client name based on
 # the script's invocation name ($0). Empty string means "no default;
@@ -2306,7 +2523,22 @@ do_post_tunnel_for_client() {
       log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
       log "  with Authorization: Bearer ${ANL_USERNAME}"
       ;;
-    # claudecode|aider|cursor|generic) added in Phase 3a-ii / Phase 4
+    claudecode)
+      setup_claudecode_client
+      gather_summary
+      render_summary
+      log "Claude Code is installed and configured for this proxy."
+      log "  Scope: ${_CLAUDECODE_SCOPE_NAME}"
+      if [ "$_CLAUDECODE_SCOPE_PATH" = "$CLAUDECODE_PROJECT_CONFIG" ]; then
+        log "  Run from THIS directory ($(pwd)) to pick up the project-scoped settings:"
+      else
+        log "  Run from any directory:"
+      fi
+      log "    claude"
+      log "  Models default to whatever Claude Code's --model flag resolves;"
+      log "  the proxy advertises Anthropic's models at /v1/messages."
+      ;;
+    # aider|cursor|generic) added in Phase 4
     "")
       # No client selected (anywhere mode + user picked empty / aborted).
       # Tunnel is up; user can configure clients manually.
@@ -2397,6 +2629,18 @@ _client_common_setup() {
 
   # Port-mismatch prompt only matters when we'll be touching the OpenCode
   # config; mode_tunnel skips it because it doesn't write any client config.
+  #
+  # NOTE (multi-client era): this prompt is currently OpenCode-specific
+  # because PORT_FROM_CONFIG only reads the OpenCode config (not the
+  # Claude Code settings.json's ANTHROPIC_BASE_URL, nor any future client's
+  # equivalent). A user running ONLY argo_claudecode.sh would never see
+  # this branch fire (PORT_FROM_CONFIG would be empty); a user running
+  # both argo_opencode.sh AND argo_claudecode.sh would see it under the
+  # claudecode invocation too, which is acceptable -- the prompt's advice
+  # ("OpenCode will fail to connect on the wrong port") is still correct
+  # for the OpenCode side. When Phase 4 adds aider/cursor we should
+  # generalize PORT_FROM_CONFIG to "port from any known client config"
+  # and reword the prompt.
   if [ "$with_opencode_setup" = 1 ] \
      && [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
     warn "Port mismatch:"
@@ -4067,6 +4311,9 @@ EOF
   cat >&2 <<EOF
 NOT TOUCHED (by design)
   OpenCode binary                              (installed by us but a general-purpose tool)
+  Claude Code binary                           (installed by us but a general-purpose tool)
+  ~/.claude/settings.json                      (owned by Claude Code; we only inject env keys)
+  ./.claude/settings.local.json                (owned by Claude Code; project-scope env we wrote)
   This script file (${0})
   System Python, screen/tmux binaries
 EOF
@@ -4273,21 +4520,29 @@ usage() {
 Usage: $(basename "$0") [SUBCOMMAND] [--user NAME] [--node HOST] [--port N]
                           [--no-jump] [--no-mfa] [--probe-nodes]
                           [--auto-port] [--port-range LO-HI]
+                          [--scope project|global]
                           [--force-reinstall]
                           [--keep-orphans | --drop-orphans]
                           [--dry-run] [--local-only] [-y]
                           [--purge | --purge-backups]
 
 Subcommands:
-  client          (default) Install OpenCode if needed, write the OpenCode
-                  config, push this script to a chosen ANL compute node,
-                  start argo-proxy there inside screen/tmux, then open the
-                  SSH tunnel and monitor its health in the foreground.
-                  If the script detects it is itself running ON an ANL
-                  compute node, --no-jump and --no-mfa are auto-defaulted
-                  (intra-site SSH doesn't need either); if the picked node
-                  is the local host, the SSH tunnel is skipped entirely
-                  and the local argo-proxy is used directly.
+  client          (default) Install the chosen AI client if needed, write
+                  its config, push this script to a chosen ANL compute
+                  node, start argo-proxy there inside screen/tmux, then
+                  open the SSH tunnel and monitor its health in the
+                  foreground. The "chosen client" is determined by the
+                  script's invocation name (argo_opencode.sh -> OpenCode,
+                  argo_claudecode.sh -> Claude Code, argo_anywhere.sh ->
+                  interactive picker). If the script detects it is itself
+                  running ON an ANL compute node, --no-jump and --no-mfa
+                  are auto-defaulted (intra-site SSH doesn't need either);
+                  if the picked node is the local host, the SSH tunnel is
+                  skipped entirely and the local argo-proxy is used directly.
+  setup           Same as 'client' but ALWAYS shows the interactive client
+                  picker, regardless of invocation name. Useful for power
+                  users to configure a non-default client without having
+                  to rename the script.
   tunnel          Same as 'client' but does NOT install or configure any
                   client. Just brings up the tunnel (or local proxy on a
                   compute node) and blocks. Useful for power users who
@@ -4367,6 +4622,15 @@ Options:
                        interactive [n]ext-free-port choice. Default:
                        PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100.
                        Canonical env: ARGO_OPENCODE_PORT_RANGE=LO-HI.
+  --scope project|global  Per-client scope override. Currently consumed
+                       only by Claude Code setup:
+                         project -> ./.claude/settings.local.json (per-repo;
+                                    gitignored by Claude Code defaults).
+                         global  -> ~/.claude/settings.json (all projects).
+                       If unset, the script picks project when ~/.claude/
+                       settings.json already has an env block (preserves
+                       any personal Anthropic settings) and global otherwise.
+                       Canonical env: CLAUDECODE_SCOPE.
 
   Flags below apply to 'update-models':
   --keep-orphans       Skip the per-orphan prompt; keep ALL models in the
@@ -4852,6 +5116,16 @@ main() {
             fi
             ARGO_OPENCODE_PORT_RANGE="$2"; shift 2 ;;
           *) die "--port-range expects LO-HI (e.g. 64742-64842), got '$2'." ;;
+        esac ;;
+      --scope)
+        # Per-client scope override. Currently consumed only by
+        # setup_claudecode_client (project|global). Future clients may
+        # define their own scopes; the parser accepts any string here and
+        # leaves validation to the per-client setup function.
+        [ -n "${2:-}" ] || die "--scope expects a value (e.g. 'project' or 'global')."
+        case "$2" in
+          project|global) CLAUDECODE_SCOPE="$2"; shift 2 ;;
+          *) die "--scope must be 'project' or 'global' (got '$2')." ;;
         esac ;;
       --keep-orphans)
         KEEP_ORPHANS=1; shift ;;

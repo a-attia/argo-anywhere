@@ -40,13 +40,20 @@ URLs are documented in `README.md` and the script's own header.
 
 ### Subcommands
 
-`client` (default), `tunnel`, `server`, `status`, `stop`, `update-models`,
-`clean`, `help`.
+`client` (default), `setup`, `tunnel`, `server`, `status`, `stop`,
+`update-models`, `clean`, `help`.
 
-- `client` is the all-in-one workflow: SSH tunnel + OpenCode install +
+- `client` is the all-in-one workflow: SSH tunnel + chosen-client install +
   config write + monitor. `scp`s the file to a chosen compute node and
-  re-execs it as `server` over SSH.
-- `tunnel` is `client` minus the OpenCode install/config: open the SSH
+  re-execs it as `server` over SSH. The "chosen client" is determined by
+  the script's invocation name (`argo_opencode.sh` → OpenCode,
+  `argo_claudecode.sh` → Claude Code, `argo_anywhere.sh` → interactive
+  picker), with `CLIENT_OVERRIDE` env / the `setup` subcommand as
+  overrides.
+- `setup` is a thin alias for `client` that ALWAYS shows the interactive
+  client picker, regardless of invocation name. Useful when the user
+  wants a non-default client without renaming the file.
+- `tunnel` is `client` minus the per-client install/config: open the SSH
   forward (or local proxy on a compute node) and block in the foreground
   monitor loop. Useful for power users managing their own client
   configurations or for keeping a tunnel alive while configuring multiple
@@ -254,10 +261,45 @@ bash argo_claudecode.sh    # picks Claude Code defaults
 without ever knowing the file behind the name is shared.
 
 The script inspects `$0` (its invocation name, basename only) at
-startup and picks a sensible default client per name. Subcommands
-(`setup-claudecode`, `setup-opencode`, `tunnel`, ...) still work for
-power users who want explicit control regardless of the invocation
-name.
+startup and picks a sensible default client per name. The `setup`
+subcommand always shows the interactive client picker regardless of
+invocation name, for power users who want a non-default client without
+renaming the file.
+
+Per-client API contract — every supported client must define:
+
+- `setup_<name>_client()` — top-level entry point invoked by the
+  dispatcher (`do_post_tunnel_for_client`). MUST be idempotent. Calls
+  `ensure_<name>_installed`, then `handle_config_file <path> <desc>
+  write_<name>_config`. Reads `PROXY_PORT`, `ANL_USERNAME`,
+  `ARGO_OPENCODE_USER` from script-level globals.
+- `ensure_<name>_installed()` — install-or-detect the client binary.
+  After install, prepend any well-known install location to `PATH` so
+  the rest of the running script sees the binary (the upstream
+  installer's rc-file PATH update doesn't reach the running shell —
+  see `ensure_opencode_installed`'s comment for the full rationale).
+- `write_<name>_config(dest)` — produce a fresh config at `dest`.
+  Invoked by `handle_config_file`, so the signature is fixed at "one
+  arg, the destination path"; everything else flows in via globals.
+  Use a Python heredoc for non-trivial JSON/YAML/TOML merging
+  (preserves user-owned keys; we only own the few keys we need).
+- `<name>` row in the `CLIENTS_AVAILABLE` array (display-order +
+  picker label).
+- A `<name>` arm in `do_post_tunnel_for_client` that calls
+  `setup_<name>_client`, then `gather_summary; render_summary`,
+  then prints any client-specific tail messages ("Run: claude" etc.).
+- An arm in `default_client_for_invocation` that maps
+  `argo_<name>.sh` → `<name>`.
+- A repo-root symlink `argo_<name>.sh -> argo_opencode.sh`.
+
+Optional but conventional:
+
+- A `<name>_pick_scope()` function if the client has multiple
+  config locations (project vs global, etc.). Sets globals
+  `_<NAME>_SCOPE_PATH` and `_<NAME>_SCOPE_NAME` for the writer to
+  consume — DO NOT capture via `$()` (the function may need to
+  prompt the user; subshell capture would eat the prompt). See
+  `claudecode_pick_scope` for the reference implementation.
 
 Why this shape (and why NOT truly separate per-client scripts):
 
