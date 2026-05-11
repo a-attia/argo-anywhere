@@ -1639,15 +1639,37 @@ monitor_tunnel_loop() {
             MONITOR_PID=$!
           fi
         else
-          warn "Silent reconnect did not become healthy in 10s; bailing."
-          # Make sure we don't leak the failed reconnect ssh.
+          # Reconnect spawned a fresh ssh -N -L but /health didn't come
+          # back. Most likely cause: argo-proxy on the remote node is
+          # down or restarting. The SSH multiplex master is still alive
+          # (we wouldn't be in this branch otherwise), and once the master
+          # has installed the forward it holds it independently of the
+          # foreground client. So the FORWARD itself stays usable; as
+          # soon as something answers /health on the remote side again,
+          # this tunnel resumes serving without the user doing anything.
+          # Reflect that in the message.
+          warn "Reconnect installed the SSH forward but /health is silent."
+          warn "  Most likely argo-proxy on ${node} is down or restarting."
+          warn "  Good news: the SSH multiplex master is still holding the"
+          warn "  forward, so once argo-proxy on ${node} is back, this tunnel"
+          warn "  will resume serving with no action needed from you."
+          warn "  If you need to bring argo-proxy back manually:"
+          warn "    ssh ${user}@${node} 'bash ~/${REMOTE_SELF} server'"
+          warn "  To fully reset the tunnel itself: 'bash $0 client'"
+          # Kill the freshly-spawned ephemeral fg ssh (it just sits there
+          # consuming a pid; the master keeps the forward), and clear our
+          # pid tracking so the next loop iteration waits on the monitor
+          # rather than a dead pid.
           if [ -n "$SSH_TUNNEL_PID" ]; then
             kill "$SSH_TUNNEL_PID" 2>/dev/null || true
           fi
           SSH_TUNNEL_PID=""
-          notify_user "argo-proxy tunnel" "Silent reconnect failed. Run: bash $0 client"
+          notify_user "argo-proxy tunnel" \
+            "Proxy on ${node}:${PROXY_PORT} not responding; SSH forward stays alive (recovers when proxy returns)."
         fi
       else
+        # SSH master is gone too. Reconnect would need fresh Duo;
+        # script can't do that without user interaction.
         warn "SSH multiplex master is gone (Duo prompt would be required to reconnect)."
         notify_user "argo-proxy tunnel" "Tunnel down; re-run: bash $0 client"
       fi
@@ -3144,13 +3166,34 @@ EOF
       sleep 1
       echo "$pids" | xargs -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
       ok "Killed: ${pids//$'\n'/ }"
-      warn "Note: the screen/tmux session that hosted argo-proxy may still"
-      warn "  exist (now empty). To tear it down too:"
-      cat >&2 <<EOF
-  screen -S ${SCREEN_SESSION} -X quit 2>/dev/null
-  tmux kill-session -t ${SCREEN_SESSION} 2>/dev/null
-  # or use 'clean' for the full local + remote tear-down.
-EOF
+      # Whether to print the screen/tmux cleanup hint depends on whether
+      # those sessions still exist post-kill. When argo-proxy was the only
+      # process inside its screen/tmux wrapper, killing it terminates the
+      # wrapper too -- so the hint would point at a session that's
+      # already gone. Probe both managers and only mention what's left.
+      local stale_screen=0 stale_tmux=0
+      if command -v screen >/dev/null 2>&1 \
+         && screen -ls 2>/dev/null | grep -q "\.${SCREEN_SESSION}\b"; then
+        stale_screen=1
+      fi
+      if command -v tmux >/dev/null 2>&1 \
+         && tmux has-session -t "${SCREEN_SESSION}" 2>/dev/null; then
+        stale_tmux=1
+      fi
+      if [ "$stale_screen" -eq 1 ] || [ "$stale_tmux" -eq 1 ]; then
+        warn "Note: the session that hosted argo-proxy is still around (empty)."
+        warn "  To tear it down too:"
+        if [ "$stale_screen" -eq 1 ]; then
+          printf '  screen -S %s -X quit\n' "$SCREEN_SESSION" >&2
+        fi
+        if [ "$stale_tmux" -eq 1 ]; then
+          printf '  tmux kill-session -t %s\n' "$SCREEN_SESSION" >&2
+        fi
+        printf '  # or use '\''clean'\'' for the full local + remote tear-down.\n' >&2
+      else
+        log "(The argo-proxy session manager exited along with its child;"
+        log "  no screen/tmux cleanup needed.)"
+      fi
       ;;
     *)
       # Fallback (e.g. lsof returned a pid but local_tunnel_status couldn't
