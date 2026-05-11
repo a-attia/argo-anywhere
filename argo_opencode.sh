@@ -1264,11 +1264,15 @@ spawn_health_monitor() {
 open_tunnel() {
   local user="$1" node="$2"
 
-  # Refuse to clash with an existing local listener on the same port.
-  # (commit-3 will refine this to detect "ours-healthy" reuse via
-  # local_tunnel_status; today it's a hard refuse for any local listener.)
+  # Safety net: ensure_or_reuse_tunnel is the proper place to handle local
+  # collision (it can reuse a healthy tunnel or kill an unhealthy one), but
+  # if some path reaches open_tunnel directly without going through
+  # ensure_or_reuse_tunnel, we still want to fail loudly rather than try
+  # to bind a port that's already in use.
   if lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
     err "Port ${PROXY_PORT} is already in use locally."
+    err "  This is a programming error: open_tunnel should be called via"
+    err "  ensure_or_reuse_tunnel which handles collision detection."
     err "  Identify: lsof -nPi :${PROXY_PORT} -sTCP:LISTEN"
     err "  Kill:     kill <PID>   (or: bash $0 stop)"
     die "Refusing to start a duplicate tunnel."
@@ -1529,6 +1533,359 @@ monitor_tunnel_loop() {
   cleanup_local
 }
 
+# ----------------------------------------------------------------------------
+# Tunnel collision detection + reuse (subsection of 16)
+# ----------------------------------------------------------------------------
+# Two distinct collision cases the script needs to handle smoothly:
+#
+#   * Local self-collision: localhost:PROXY_PORT is already bound on this
+#     machine, possibly by THIS user's previous tunnel/client invocation.
+#     If it's our own healthy tunnel, reuse it instead of erroring; if it's
+#     an unrelated process, refuse with the existing message.
+#
+#   * Remote multi-user collision: 127.0.0.1:PROXY_PORT on the picked node
+#     is already bound by another OS user's argo-proxy. Today the
+#     server-side check at line ~1900 catches this AFTER the bootstrap +
+#     SSH have run; nicer is to detect it BEFORE the bootstrap so we can
+#     prompt the user (auto-pick another port, pick one manually, retry,
+#     or abort).
+#
+# These helpers do the detection and prompting. ensure_or_reuse_tunnel ties
+# them together into the decision tree mode_client and mode_tunnel call.
+
+# local_tunnel_status: classify the local listener on PROXY_PORT.
+# Echoes one of:
+#   free                -- nothing bound; safe to start a new tunnel
+#   ours-healthy        -- ssh -L matching our shape AND /health answers; reuse
+#   ours-unhealthy      -- ssh -L matching our shape but /health silent; kill+restart
+#   external-healthy    -- something else bound, /health works (e.g. argo-proxy
+#                          running locally on a compute node); proceed without
+#                          opening a tunnel; clients can use it directly
+#   other-or-broken     -- something else bound and /health doesn't work; refuse
+local_tunnel_status() {
+  local port="$1"
+  local pid
+  pid="$(lsof -nPi ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1)"
+  if [ -z "$pid" ]; then
+    echo "free"
+    return
+  fi
+
+  local healthy=0
+  if curl -fsS --max-time 2 "http://localhost:${port}/health" >/dev/null 2>&1; then
+    healthy=1
+  fi
+
+  # Heuristic: is this an ssh-related process that's likely OUR tunnel?
+  # Two patterns to recognize:
+  #   1. A foreground `ssh -N -L <port>:...` we just spawned. The command
+  #      line contains the literal `-L <port>:`.
+  #   2. A multiplex MASTER (created by ssh_mux_open / ssh_args ControlMaster)
+  #      that's now holding the forward after the foreground slave exited
+  #      (B16 / macOS pattern). The master's command line shows
+  #      `ssh: /Users/.../sockets/argo-opencode-... [mux]` -- it doesn't
+  #      mention `-L`, but the socket path identifies it as ours.
+  # Combined with the /health check, false positives would require a
+  # foreign ssh that ALSO somehow hits a working /health endpoint. Very
+  # unlikely in practice.
+  local is_ssh_tunnel=0
+  local cmd
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+  case "$cmd" in
+    *ssh*\ -L\ "${port}:"*)         is_ssh_tunnel=1 ;;
+    *ssh*-L\ "${port}:"*)           is_ssh_tunnel=1 ;;
+    *ssh*-L${port}:*)               is_ssh_tunnel=1 ;;
+    *ssh:*argo-opencode-*\[mux\]*)  is_ssh_tunnel=1 ;;
+  esac
+
+  if [ "$is_ssh_tunnel" -eq 1 ] && [ "$healthy" -eq 1 ]; then
+    echo "ours-healthy"
+  elif [ "$is_ssh_tunnel" -eq 1 ] && [ "$healthy" -eq 0 ]; then
+    echo "ours-unhealthy"
+  elif [ "$healthy" -eq 1 ]; then
+    # /health works but it's not an ssh tunnel. Most likely argo-proxy
+    # running locally (mode_server's launcher under screen/tmux/nohup) --
+    # the on-compute-node case. From the perspective of clients we're
+    # about to configure, the endpoint they need is reachable, so this
+    # is fine; don't try to open a tunnel.
+    echo "external-healthy"
+  else
+    echo "other-or-broken"
+  fi
+}
+
+# probe_remote_port_owner: ask the picked node "is PROXY_PORT bound, and
+# if so by whom?" Single SSH call. Echoes one of:
+#   free                  -- nothing bound; ok to bootstrap
+#   mine:<pid>            -- bound by an argo-proxy owned by US (will be reused)
+#   other:<owner>:<pid>   -- bound by ANOTHER user; prompt for collision UX
+#   unknown               -- probe failed; caller should warn + proceed
+#                            optimistically (server-side check at line ~1900
+#                            still catches a real collision)
+probe_remote_port_owner() {
+  local user="$1" node="$2" port="$3"
+  ssh_attempt_pre || { echo "unknown"; return; }
+  local result
+  # The remote one-liner does its own pid -> owner lookup and compares
+  # to its own `id -un`, returning "mine:<pid>" or "other:<owner>:<pid>"
+  # so the caller doesn't need to know remote OS user names.
+  # shellcheck disable=SC2046
+  result="$(ssh $(ssh_args "$user" "$node") "${user}@${node}" "
+    pid=\$(lsof -nPi \":${port}\" -sTCP:LISTEN -t 2>/dev/null | head -n1)
+    if [ -z \"\$pid\" ]; then
+      echo free
+    else
+      owner=\$(ps -o user= -p \"\$pid\" 2>/dev/null | awk '{\$1=\$1;print}')
+      [ -z \"\$owner\" ] && owner='?'
+      me=\$(id -un 2>/dev/null)
+      if [ \"\$owner\" = \"\$me\" ]; then
+        echo \"mine:\${pid}\"
+      else
+        echo \"other:\${owner}:\${pid}\"
+      fi
+    fi
+  " 2>/dev/null)"
+  if [ -z "$result" ]; then
+    ssh_attempt_fail
+    echo "unknown"
+  else
+    ssh_attempt_ok
+    echo "$result"
+  fi
+}
+
+# find_next_free_remote_port: walk a port range on the picked node and
+# echo the first port that's free, or empty if none in the range. Single
+# SSH call.
+find_next_free_remote_port() {
+  local user="$1" node="$2" start="$3" end="${4:-}"
+  [ -n "$end" ] || end="$((start + 100))"
+  ssh_attempt_pre || { echo ""; return; }
+  local result
+  # shellcheck disable=SC2046
+  result="$(ssh $(ssh_args "$user" "$node") "${user}@${node}" "
+    p=${start}
+    while [ \"\$p\" -le ${end} ]; do
+      if ! lsof -nPi \":\${p}\" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        echo \"\${p}\"
+        exit 0
+      fi
+      p=\$((p + 1))
+    done
+    exit 1
+  " 2>/dev/null)"
+  if [ -z "$result" ]; then
+    # No free port in the range, OR ssh failed. Don't increment
+    # ssh_attempt_fail unconditionally: an empty result here is the
+    # protocol's "no free port" answer, not necessarily an SSH failure.
+    # We err on the side of NOT counting it.
+    echo ""
+  else
+    ssh_attempt_ok
+    echo "$result"
+  fi
+}
+
+# prompt_port_collision: interactive prompt when the remote port is taken
+# by another user. Echoes the new port the user picked (possibly the same
+# one if they chose [r]etry; the caller re-probes), or empty string on
+# abort (caller should die).
+#
+# The choices:
+#   [n] next free port  -- find_next_free_remote_port over the configured range
+#   [p] pick a port    -- read a number; validate
+#   [r] retry          -- caller re-probes the original port
+#   [a] abort          -- die
+prompt_port_collision() {
+  local user="$1" node="$2" port="$3" owner="$4" owner_pid="$5"
+  local me; me="$(id -un 2>/dev/null)"
+  cat >&2 <<EOF
+
+[warn] Port ${port} on ${node} is in use by another user
+       (pid ${owner_pid}, owned by '${owner}'; you are '${ARGO_OPENCODE_USER:-${me}}').
+
+       Two users can't share an argo-proxy on the same port; each needs
+       their own. Options:
+         [n] next free port  -- probe a range on ${node} and use the first free one
+         [p] pick a port    -- I'll type a number (1024-65535)
+         [r] retry          -- maybe '${owner}' just stopped; check ${port} again
+         [a] abort
+EOF
+  while :; do
+    local choice; choice="$(ask "Your choice [n/p/r/a, default=n]:" "n")"
+    case "$choice" in
+      n|N|"")
+        # Use the configured port range (override via --port-range or env).
+        local rstart="$PROXY_PORT_DEFAULT"
+        local rend=$((rstart + 100))
+        if [ -n "${ARGO_OPENCODE_PORT_RANGE:-}" ]; then
+          # Format: "LO-HI"
+          rstart="${ARGO_OPENCODE_PORT_RANGE%-*}"
+          rend="${ARGO_OPENCODE_PORT_RANGE#*-}"
+        fi
+        log "Probing ${node} for a free port in ${rstart}-${rend}..."
+        local picked; picked="$(find_next_free_remote_port "$user" "$node" "$rstart" "$rend")"
+        if [ -z "$picked" ]; then
+          warn "No free port found in ${rstart}-${rend}."
+          continue   # re-prompt
+        fi
+        ok "Found free port: ${picked}"
+        echo "$picked"
+        return ;;
+      p|P)
+        local newport
+        while :; do
+          newport="$(ask "  Port number [1024-65535]:" "")"
+          case "$newport" in
+            ''|*[!0-9]*) warn "  not a number"; continue ;;
+          esac
+          if [ "$newport" -ge 1024 ] && [ "$newport" -le 65535 ]; then
+            echo "$newport"
+            return
+          else
+            warn "  out of range (1024-65535)"
+          fi
+        done ;;
+      r|R)
+        echo "$port"
+        return ;;
+      a|A)
+        echo ""
+        return ;;
+      *) warn "  unrecognized: '${choice}'" ;;
+    esac
+  done
+}
+
+# ensure_or_reuse_tunnel: the decision tree that ties everything together.
+# Called by mode_client and mode_tunnel after the node is picked but before
+# the bootstrap. Handles:
+#   * local self-collision (reuse our healthy tunnel; kill an unhealthy one;
+#     refuse a foreign listener)
+#   * remote multi-user collision (prompt; loop until resolved or aborted)
+#   * the standard "all clear, bootstrap + open tunnel" path
+#
+# On return, either:
+#   * SSH_TUNNEL_PID is set (we opened or are reusing a tunnel) and the
+#     caller can proceed to setup_*_client + render_summary + monitor loop;
+#   * the on-external-healthy case fired (no tunnel was opened, but
+#     /health works; SSH_TUNNEL_PID stays empty and the caller should
+#     skip monitor_tunnel_loop -- handled via the return value below);
+#   * the function dies on hard error.
+#
+# Returns 0 = tunnel up (call monitor_tunnel_loop), 2 = external-healthy
+# (skip monitor; argo-proxy is reachable but we're not managing it).
+ensure_or_reuse_tunnel() {
+  local user="$1" node="$2"
+
+  # 1) Local-side classification first. If we have a healthy local
+  #    listener, decide whether to reuse it before doing any SSH work.
+  local lstatus; lstatus="$(local_tunnel_status "$PROXY_PORT")"
+  case "$lstatus" in
+    ours-healthy)
+      ok "Found existing healthy tunnel on port ${PROXY_PORT}; reusing."
+      # Capture the existing pid so monitor/cleanup behave sanely.
+      SSH_TUNNEL_PID="$(lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null | head -n1)"
+      trap cleanup_local EXIT INT TERM
+      return 0 ;;
+    external-healthy)
+      ok "argo-proxy is reachable on http://localhost:${PROXY_PORT}/v1 via an"
+      ok "  existing local listener (not our SSH tunnel). Using it directly."
+      return 2 ;;
+    ours-unhealthy)
+      warn "Found a local ssh tunnel on port ${PROXY_PORT} but /health is silent;"
+      warn "  killing it and starting a fresh one."
+      lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null | xargs -n1 kill 2>/dev/null || true
+      sleep 1
+      ;;
+    other-or-broken)
+      err "Port ${PROXY_PORT} is already in use locally (and the listener is"
+      err "  not our SSH tunnel)."
+      err "  Identify: lsof -nPi :${PROXY_PORT} -sTCP:LISTEN"
+      err "  Kill:     kill <PID>   (or: bash $0 stop)"
+      die "Refusing to start a duplicate tunnel."
+      ;;
+    free)
+      :  # fall through to the remote-side check
+      ;;
+  esac
+
+  # 2) Remote-side classification. Probe the node; on multi-user
+  #    collision, prompt the user (with --auto-port short-circuiting
+  #    the prompt to "[n]ext free").
+  local attempts=0
+  local max_attempts=3
+  while [ "$attempts" -lt "$max_attempts" ]; do
+    attempts=$((attempts + 1))
+    local rstatus; rstatus="$(probe_remote_port_owner "$user" "$node" "$PROXY_PORT")"
+    case "$rstatus" in
+      free|mine:*)
+        # All clear. Bootstrap will start argo-proxy (mine:* case = will
+        # reuse the existing one via the server-side check).
+        break ;;
+      other:*)
+        local owner_pid; owner_pid="${rstatus##*:}"
+        local owner; owner="${rstatus%:*}"; owner="${owner#other:}"
+        local newport
+        if [ "${AUTO_PORT:-${ARGO_OPENCODE_AUTO_PORT:-0}}" = 1 ]; then
+          warn "Port ${PROXY_PORT} on ${node} is taken by '${owner}' (pid ${owner_pid})."
+          local rstart="$PROXY_PORT_DEFAULT"
+          local rend=$((rstart + 100))
+          if [ -n "${ARGO_OPENCODE_PORT_RANGE:-}" ]; then
+            rstart="${ARGO_OPENCODE_PORT_RANGE%-*}"
+            rend="${ARGO_OPENCODE_PORT_RANGE#*-}"
+          fi
+          log "--auto-port: probing ${node} for a free port in ${rstart}-${rend}..."
+          newport="$(find_next_free_remote_port "$user" "$node" "$rstart" "$rend")"
+          [ -n "$newport" ] || die "No free port found in ${rstart}-${rend}."
+          ok "Auto-picked free port: ${newport}"
+        else
+          newport="$(prompt_port_collision "$user" "$node" "$PROXY_PORT" "$owner" "$owner_pid")"
+          [ -n "$newport" ] || die "Aborted at port-collision prompt."
+        fi
+        # Re-route through the existing port-mismatch [m/u/k/a] prompt
+        # against the new port, so the user has a chance to update or
+        # not update their OpenCode config. We invoke it inline.
+        if [ "$newport" != "$PROXY_PORT" ]; then
+          # Override CLI port + clear any cached config-source state so
+          # the prompt fires.
+          PROXY_PORT="$newport"
+          PORT_OVERRIDE_CLI="$newport"
+          PORT_SOURCE="auto-pick / collision prompt"
+          # The OpenCode-config migration prompt is in _client_common_setup;
+          # since we've already passed that point, fire it inline.
+          if [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
+            warn "New port ${PROXY_PORT} differs from your OpenCode config (${PORT_FROM_CONFIG})."
+            local choice; choice="$(ask "  [m]igrate config / [u]se for this run only / [k]eep config (use it instead) / [a]bort:" "m")"
+            case "$choice" in
+              m|M) ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
+              u|U) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
+                   SKIP_OPENCODE_CONFIG_WRITE=1 ;;
+              k|K) PROXY_PORT="$PORT_FROM_CONFIG"; ok "Using port ${PROXY_PORT} from config."
+                   # Loop back: recheck collision on the config port.
+                   continue ;;
+              a|A) die "Aborted at port-migration step." ;;
+            esac
+          fi
+        fi
+        # Loop back to re-probe the new port (could also be taken).
+        ;;
+      unknown|*)
+        warn "Could not probe ${node} for port ownership (unknown response)."
+        warn "  Proceeding optimistically; the server-side check will catch a real collision."
+        break ;;
+    esac
+  done
+  if [ "$attempts" -ge "$max_attempts" ]; then
+    die "Gave up after ${max_attempts} port-collision rounds."
+  fi
+
+  # 3) Bootstrap + open the tunnel.
+  remote_bootstrap "$user" "$node"
+  open_tunnel "$user" "$node"
+  return 0
+}
+
 # ============================================================================
 # SECTION: 17. CLIENT / TUNNEL MODES (orchestrators)
 # ============================================================================
@@ -1677,13 +2034,21 @@ mode_tunnel() {
   # Empty == on-node short-circuit fired and we're done.
   [ -z "$node" ] && return 0
 
-  remote_bootstrap "$ANL_USERNAME" "$node"
-  open_tunnel "$ANL_USERNAME" "$node"
+  # ensure_or_reuse_tunnel handles all the collision detection (local
+  # self-reuse, remote multi-user prompt) and on success either opens a
+  # new tunnel or reuses an existing healthy one.
+  local rc=0
+  ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
   gather_summary
   render_summary
   log "Tunnel is up; no client configured (this is 'tunnel' mode)."
   log "Point any OpenAI-compatible client at http://localhost:${PROXY_PORT}/v1"
   log "  with Authorization: Bearer ${ANL_USERNAME}"
+  if [ "$rc" -eq 2 ]; then
+    log "(external listener; not entering monitor loop. Tunnel/proxy is not"
+    log "  managed by this script invocation.)"
+    return 0
+  fi
   monitor_tunnel_loop "$ANL_USERNAME" "$node"
 }
 
@@ -1694,20 +2059,25 @@ mode_client() {
   [ -z "$node" ] && return 0
 
   # Standard remote-tunnel flow:
-  #   1. bootstrap argo-proxy on the picked node (idempotent)
-  #   2. open the local SSH forward and wait until /health answers
-  #   3. configure the OpenCode client (install + write config)
-  #   4. render the unified status summary
-  #   5. tell the user what to run, what other clients can target
-  #   6. block in the foreground monitor + reconnect loop
-  remote_bootstrap "$ANL_USERNAME" "$node"
-  open_tunnel "$ANL_USERNAME" "$node"
+  #   1. ensure_or_reuse_tunnel handles bootstrap + tunnel (or reuses an
+  #      existing healthy tunnel; or prompts for collision resolution)
+  #   2. configure the OpenCode client (install + write config)
+  #   3. render the unified status summary
+  #   4. tell the user what to run, what other clients can target
+  #   5. block in the foreground monitor + reconnect loop (unless ext-healthy)
+  local rc=0
+  ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
   setup_opencode_client
   gather_summary
   render_summary
   log "OpenCode is installed and configured for this proxy.  Run: opencode"
   log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
   log "  with Authorization: Bearer ${ANL_USERNAME}"
+  if [ "$rc" -eq 2 ]; then
+    log "(external listener; not entering monitor loop. The proxy is reachable"
+    log "  but not managed by this script invocation.)"
+    return 0
+  fi
   monitor_tunnel_loop "$ANL_USERNAME" "$node"
 }
 
@@ -3092,6 +3462,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [SUBCOMMAND] [--user NAME] [--node HOST] [--port N]
                           [--no-jump] [--no-mfa] [--probe-nodes]
+                          [--auto-port] [--port-range LO-HI]
                           [--force-reinstall]
                           [--keep-orphans | --drop-orphans]
                           [--dry-run] [--local-only] [-y]
@@ -3175,6 +3546,17 @@ Options:
   --force-reinstall    Wipe the server-side venv (\$HOME/agovenv on the ANL
                        node) and rebuild from scratch. Use after a broken
                        upgrade. Canonical env: ARGO_OPENCODE_FORCE_REINSTALL.
+  --auto-port          When the resolved port is already in use on the
+                       picked compute node by ANOTHER user, automatically
+                       probe a range and pick the first free port (instead
+                       of prompting interactively). Sticky: triggers the
+                       same OpenCode-config migration prompt as a manual
+                       --port override would. Canonical env:
+                       ARGO_OPENCODE_AUTO_PORT=1.
+  --port-range LO-HI   Override the port range for --auto-port and the
+                       interactive [n]ext-free-port choice. Default:
+                       PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100.
+                       Canonical env: ARGO_OPENCODE_PORT_RANGE=LO-HI.
 
   Flags below apply to 'update-models':
   --keep-orphans       Skip the per-orphan prompt; keep ALL models in the
@@ -3582,6 +3964,14 @@ main() {
         ARGO_OPENCODE_NO_MFA=1; shift ;;
       --probe-nodes)
         PROBE_NODES=1; shift ;;
+      --auto-port)
+        AUTO_PORT=1; shift ;;
+      --port-range)
+        [ -n "${2:-}" ] || die "--port-range expects a value of the form LO-HI."
+        case "$2" in
+          [0-9]*-[0-9]*) ARGO_OPENCODE_PORT_RANGE="$2"; shift 2 ;;
+          *) die "--port-range expects LO-HI (e.g. 64742-64842), got '$2'." ;;
+        esac ;;
       --keep-orphans)
         KEEP_ORPHANS=1; shift ;;
       --drop-orphans)
