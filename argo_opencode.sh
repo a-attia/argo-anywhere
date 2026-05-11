@@ -980,6 +980,42 @@ cleanup_local() {
   exit "$rc"
 }
 
+# Background health monitor body. Run as: `spawn_health_monitor "$pid" &`
+# where $pid may be empty (mux-owned forward; no foreground ssh to watch).
+#
+# Behavior:
+#   * polls /health every $HEALTH_INTERVAL seconds;
+#   * on $HEALTH_FAIL_THRESHOLD consecutive failures, alerts the user and
+#     (in mux-owned mode) exits so the parent can react;
+#   * if a tunnel pid was provided, exits when that pid dies so the parent
+#     can attempt a silent reconnect.
+spawn_health_monitor() {
+  local tunnel_pid_to_watch="$1"
+  local fail=0
+  while sleep "$HEALTH_INTERVAL"; do
+    if curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
+      fail=0
+    else
+      fail=$((fail+1))
+      warn "Health check failed (${fail}/${HEALTH_FAIL_THRESHOLD})."
+      if [ "$fail" -ge "$HEALTH_FAIL_THRESHOLD" ]; then
+        notify_user "argo-proxy tunnel" \
+          "Lost connection to ${node:-<node>}:${PROXY_PORT}. The SSH tunnel or the remote proxy is down."
+        # In mux-owned mode (no fg pid to watch), sustained health failure
+        # means the forward is likely gone; exit so the parent can react.
+        if [ -z "$tunnel_pid_to_watch" ]; then
+          exit 0
+        fi
+        fail=0  # re-arm; avoid notification spam
+      fi
+    fi
+    # Detect tunnel-process death (only meaningful when we have a pid).
+    if [ -n "$tunnel_pid_to_watch" ] && ! kill -0 "$tunnel_pid_to_watch" 2>/dev/null; then
+      exit 0
+    fi
+  done
+}
+
 open_tunnel_and_monitor() {
   local user="$1" node="$2"
 
@@ -1070,34 +1106,11 @@ open_tunnel_and_monitor() {
   # PARENT, after `wait` returns -- see below. This intentionally trades a few
   # extra seconds of downtime for a correct pid handoff.
   #
-  # B16: when SSH_TUNNEL_PID is empty (foreground ssh exited; mux master owns
-  # the forward), there is no pid to watch. The monitor should keep polling
-  # /health and only exit if /health has been down long enough that the
-  # forward likely went away. The parent's wait-on-MONITOR_PID branch then
-  # picks up.
-  (
-    fail=0
-    tunnel_pid_to_watch="$SSH_TUNNEL_PID"
-    while sleep "$HEALTH_INTERVAL"; do
-      if curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
-        fail=0
-      else
-        fail=$((fail+1))
-        warn "Health check failed (${fail}/${HEALTH_FAIL_THRESHOLD})."
-        if [ "$fail" -ge "$HEALTH_FAIL_THRESHOLD" ]; then
-          notify_user "argo-proxy tunnel" "Lost connection to ${node}:${PROXY_PORT}. The SSH tunnel or the remote proxy is down."
-          # In mux-owned mode, sustained health failure = forward likely
-          # gone; exit the monitor so the parent can react.
-          [ -z "$tunnel_pid_to_watch" ] && exit 0
-          fail=0  # avoid spamming; re-arm
-        fi
-      fi
-      # Detect tunnel process death (only meaningful when we have a pid).
-      if [ -n "$tunnel_pid_to_watch" ] && ! kill -0 "$tunnel_pid_to_watch" 2>/dev/null; then
-        exit 0
-      fi
-    done
-  ) &
+  # When SSH_TUNNEL_PID is empty (foreground ssh exited; mux master owns the
+  # forward), there is no pid to watch. The monitor keeps polling /health and
+  # only exits if /health has been down long enough that the forward likely
+  # went away. The parent's wait-on-MONITOR_PID branch then picks up.
+  spawn_health_monitor "$SSH_TUNNEL_PID" &
   MONITOR_PID=$!
 
   if [ -n "$SSH_TUNNEL_PID" ]; then
@@ -1113,12 +1126,35 @@ open_tunnel_and_monitor() {
   # is still alive, transparently respawn. Ctrl-C / SIGTERM go through
   # cleanup_local (which `exit`s before we ever reach the reconnect block).
   #
-  # Special case: when SSH_TUNNEL_PID is empty (B16 -- foreground ssh exited
-  # but the mux master is forwarding), there's no foreground process to wait
-  # on. We still want to monitor health, so we wait on the monitor pid
-  # instead (or sleep forever if the monitor is also gone). The reconnect
-  # logic below skips the ssh-O-check + respawn dance because the master is
-  # already serving the forward.
+  # Special case: when SSH_TUNNEL_PID is empty (foreground ssh exited but the
+  # mux master is forwarding), there's no foreground process to wait on. We
+  # still want to monitor health, so we wait on the monitor pid instead (or
+  # sleep forever if the monitor is also gone). The reconnect logic below
+  # skips the ssh-O-check + respawn dance because the master is already
+  # serving the forward.
+  #
+  # Reconnect backoff: macOS's system OpenSSH exits the foreground `ssh -N -L`
+  # immediately after the multiplex master accepts the forward. The first
+  # spawn handles that case explicitly (see B16 NOTE above); the reconnect
+  # path needs the same handling, otherwise the parent loop spins:
+  #     wait $pid -> exits instantly because $pid was already a zombie
+  #     -> "ssh tunnel exited" warn
+  #     -> ssh -O check ok
+  #     -> spawn new fg ssh, which immediately exits the same way
+  #     -> "Reconnected silently" ok
+  #     -> wait the new $pid -> exits instantly -> goto top
+  # symptom = a tight loop of three lines (exited / attempting / reconnected)
+  # with monotonically increasing pids. We protect against this by:
+  #   1. detecting the same mux-owned scenario after each reconnect attempt
+  #      and clearing SSH_TUNNEL_PID so the next loop iteration falls into
+  #      the empty-pid branch (waits on the monitor, not the dead fg pid);
+  #   2. tracking reconnect attempts in a sliding window and sleeping a
+  #      growing backoff if too many fire too fast (defends against the same
+  #      pathology under any other root cause).
+  local reconnect_burst=0          # consecutive reconnects within RECONN_WINDOW_SEC
+  local reconnect_burst_started=0  # epoch seconds the current burst started
+  local RECONN_WINDOW_SEC=60
+  local RECONN_BURST_LIMIT=3
   while true; do
     if [ -n "$SSH_TUNNEL_PID" ]; then
       wait "$SSH_TUNNEL_PID" || true
@@ -1137,6 +1173,42 @@ open_tunnel_and_monitor() {
       fi
     fi
 
+    # Pre-reconnect: if /health still answers, the forward is fine -- the
+    # foreground ssh just exited (mux-owned scenario). Don't bother
+    # reconnecting; just clear SSH_TUNNEL_PID and loop, so the next
+    # iteration waits on the monitor instead of trying to wait on a dead pid.
+    if curl -fsS --max-time 2 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
+      log "Foreground ssh exited but /health still responds; mux master owns"
+      log "  the forward. No reconnect needed."
+      SSH_TUNNEL_PID=""
+      # Make sure a monitor is running (the previous one may have exited
+      # along with the fg ssh death-detect branch).
+      if [ -z "${MONITOR_PID:-}" ] || ! kill -0 "${MONITOR_PID:-0}" 2>/dev/null; then
+        spawn_health_monitor "" &
+        MONITOR_PID=$!
+      fi
+      continue
+    fi
+
+    # Apply burst backoff BEFORE attempting a reconnect. If we've reconnected
+    # RECONN_BURST_LIMIT times within RECONN_WINDOW_SEC seconds, sleep a bit
+    # so we don't spam the master / the user / the system log.
+    local now; now="$(date +%s)"
+    if [ "$reconnect_burst_started" -eq 0 ] \
+       || [ $((now - reconnect_burst_started)) -gt "$RECONN_WINDOW_SEC" ]; then
+      reconnect_burst=0
+      reconnect_burst_started="$now"
+    fi
+    if [ "$reconnect_burst" -ge "$RECONN_BURST_LIMIT" ]; then
+      local backoff=$((HEALTH_INTERVAL * 2))
+      warn "Too many silent reconnects in the last ${RECONN_WINDOW_SEC}s"
+      warn "  (${reconnect_burst} attempts); pausing ${backoff}s before retrying."
+      sleep "$backoff"
+      # New burst window after the pause.
+      reconnect_burst=0
+      reconnect_burst_started="$(date +%s)"
+    fi
+
     # Try silent reconnect under MFA mode if the mux master is still alive.
     # Use the local `user` arg (not the global $ANL_USERNAME) so this code
     # path stays correct if invoked from a context that didn't set the global.
@@ -1145,6 +1217,7 @@ open_tunnel_and_monitor() {
       # shellcheck disable=SC2046
       if ssh -O check $(ssh_args "$user" "$node") "${user}@${node}" 2>/dev/null; then
         warn "SSH multiplex master is still alive; attempting silent reconnect..."
+        reconnect_burst=$((reconnect_burst + 1))
         # shellcheck disable=SC2046
         ssh -N -L "${PROXY_PORT}:localhost:${PROXY_PORT}" \
             $(ssh_args "$user" "$node") \
@@ -1163,32 +1236,30 @@ open_tunnel_and_monitor() {
           rc_ok=1
         fi
         if [ "$rc_ok" -eq 1 ]; then
-          ok "Reconnected silently via SSH multiplex master (pid=${SSH_TUNNEL_PID})."
+          # Apply the same B16 mux-owned check as the first-spawn block: if
+          # the foreground ssh has already exited but /health still answers,
+          # the master is doing the work. Clearing SSH_TUNNEL_PID lets the
+          # next loop iteration wait on the monitor instead of immediately
+          # returning from `wait <dead-pid>` and spinning.
+          if ! kill -0 "$SSH_TUNNEL_PID" 2>/dev/null; then
+            ok "Reconnected silently; mux master owns the new forward."
+            SSH_TUNNEL_PID=""
+          else
+            ok "Reconnected silently via SSH multiplex master (pid=${SSH_TUNNEL_PID})."
+          fi
           reconnected=1
-          # Restart the monitor in the background since the previous one exited.
-          if [ -n "${MONITOR_PID:-}" ] && ! kill -0 "$MONITOR_PID" 2>/dev/null; then
-            (
-              fail=0
-              while sleep "$HEALTH_INTERVAL"; do
-                if curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
-                  fail=0
-                else
-                  fail=$((fail+1))
-                  warn "Health check failed (${fail}/${HEALTH_FAIL_THRESHOLD})."
-                  if [ "$fail" -ge "$HEALTH_FAIL_THRESHOLD" ]; then
-                    notify_user "argo-proxy tunnel" "Lost connection to ${node}:${PROXY_PORT}."
-                    fail=0
-                  fi
-                fi
-                if ! kill -0 "$SSH_TUNNEL_PID" 2>/dev/null; then exit 0; fi
-              done
-            ) &
+          # Restart the monitor if the previous one exited.
+          if [ -z "${MONITOR_PID:-}" ] || ! kill -0 "${MONITOR_PID:-0}" 2>/dev/null; then
+            spawn_health_monitor "$SSH_TUNNEL_PID" &
             MONITOR_PID=$!
           fi
         else
           warn "Silent reconnect did not become healthy in 10s; bailing."
           # Make sure we don't leak the failed reconnect ssh.
-          kill "$SSH_TUNNEL_PID" 2>/dev/null || true
+          if [ -n "$SSH_TUNNEL_PID" ]; then
+            kill "$SSH_TUNNEL_PID" 2>/dev/null || true
+          fi
+          SSH_TUNNEL_PID=""
           notify_user "argo-proxy tunnel" "Silent reconnect failed. Run: bash $0 client"
         fi
       else
@@ -1202,7 +1273,8 @@ open_tunnel_and_monitor() {
     if [ "$reconnected" -eq 0 ]; then
       break
     fi
-    # Loop back to wait on the new SSH_TUNNEL_PID.
+    # Loop back to wait on the new SSH_TUNNEL_PID (or the monitor, if the
+    # mux-owned check above cleared the pid).
   done
 
   cleanup_local
