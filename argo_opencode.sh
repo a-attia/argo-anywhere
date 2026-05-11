@@ -1222,9 +1222,25 @@ pick_node() {
     working=("${ANL_NODES[@]}")
   fi
 
-  # Default = cached node if it's in the (working) list, else first entry.
+  # Default selection precedence:
+  #   1. If we're ON a compute node and any entry in ANL_NODES resolves
+  #      to this host (i.e. picking it would trigger the on-node short-
+  #      circuit), default to that entry. Smoothest UX for the user
+  #      who's logged into a node and just wants to use the local
+  #      argo-proxy.
+  #   2. Else, the cached node (if it's still in the working list).
+  #   3. Else, the first entry.
   default="${working[0]}"
-  if [ -f "$NODE_CACHE" ]; then
+  if [ "$(on_anl_compute_node)" = "yes" ]; then
+    for node in "${working[@]}"; do
+      if host_is_target "$node"; then
+        default="$node"
+        break
+      fi
+    done
+  fi
+  if [ "$default" = "${working[0]}" ] && [ -f "$NODE_CACHE" ]; then
+    # No on-node match (or none required); fall back to cache.
     cached="$(cat "$NODE_CACHE")"
     for node in "${working[@]}"; do
       [ "$node" = "$cached" ] && default="$cached" && break
@@ -2362,15 +2378,78 @@ EOF
 }
 
 mode_server() {
+  # Resolve identity (username + port) from one of three sources, in order:
+  #   1. env / canonical (set by 'client' over SSH; never missing in that
+  #      path) and/or legacy ANL_USERNAME / PROXY_PORT for backward compat
+  #   2. existing ~/.config/argoproxy/config.yaml -- the most authoritative
+  #      answer for "what argo-proxy is already configured to be"
+  #   3. ~/.config/argo_opencode/user (script's cache) for the username,
+  #      $PROXY_PORT_DEFAULT for the port
+  #
+  # If we ended up resolving from (2) or (3) (i.e. neither env had a value
+  # to begin with), the user invoked us standalone -- which is a real
+  # supported workflow ("leave a proxy on this node for any client to
+  # reach"). Show what we resolved and ask for confirmation before
+  # starting anything.
+
+  # Capture whether env had values BEFORE we start filling defaults, so
+  # we can decide later whether to prompt.
+  local user_was_in_env="${ARGO_OPENCODE_USER:+1}"
+  local port_was_in_env="${ARGO_OPENCODE_PORT:+1}"
+
   # Canonical names; fall back to legacy aliases for one cycle so direct
   # 'bash argo_opencode.sh server' invocations don't break for anyone who
   # was setting ANL_USERNAME/PROXY_PORT manually.
   : "${ARGO_OPENCODE_USER:=${ANL_USERNAME:-}}"
   : "${ARGO_OPENCODE_PORT:=${PROXY_PORT:-}}"
+
+  # Source 2: ~/.config/argoproxy/config.yaml
+  if [ -z "${ARGO_OPENCODE_USER:-}" ] || [ -z "${ARGO_OPENCODE_PORT:-}" ]; then
+    local cfg="${HOME}/.config/argoproxy/config.yaml"
+    if [ -f "$cfg" ]; then
+      if [ -z "${ARGO_OPENCODE_USER:-}" ]; then
+        ARGO_OPENCODE_USER="$(awk -F'"' '/^[[:space:]]*user:/{print $2; exit}' "$cfg" 2>/dev/null)"
+      fi
+      if [ -z "${ARGO_OPENCODE_PORT:-}" ]; then
+        ARGO_OPENCODE_PORT="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+/{print $2; exit}' "$cfg" 2>/dev/null)"
+      fi
+    fi
+  fi
+
+  # Source 3: cache + defaults
+  if [ -z "${ARGO_OPENCODE_USER:-}" ] && [ -f "$USER_CACHE" ]; then
+    ARGO_OPENCODE_USER="$(cat "$USER_CACHE" 2>/dev/null)"
+  fi
+  if [ -z "${ARGO_OPENCODE_USER:-}" ]; then
+    ARGO_OPENCODE_USER="$(id -un 2>/dev/null)"
+  fi
+  if [ -z "${ARGO_OPENCODE_PORT:-}" ]; then
+    ARGO_OPENCODE_PORT="$PROXY_PORT_DEFAULT"
+  fi
+
   ANL_USERNAME="${ARGO_OPENCODE_USER}"
   PROXY_PORT="${ARGO_OPENCODE_PORT}"
-  : "${ANL_USERNAME:?ARGO_OPENCODE_USER must be set when invoking server mode}"
-  : "${PROXY_PORT:?ARGO_OPENCODE_PORT must be set when invoking server mode}"
+  : "${ANL_USERNAME:?could not resolve ARGO_OPENCODE_USER from env, ~/.config/argoproxy/config.yaml, or cache; pass it explicitly}"
+  : "${PROXY_PORT:?could not resolve ARGO_OPENCODE_PORT; pass it explicitly}"
+
+  # If neither was in env, the user invoked us standalone. Show what we
+  # found and ask for confirmation before doing any work. -y skips the
+  # prompt for non-interactive use.
+  if [ -z "$user_was_in_env" ] && [ -z "$port_was_in_env" ]; then
+    log "Standalone server mode (no env vars from client; resolved from"
+    log "  config + defaults):"
+    log "  user : ${ANL_USERNAME}"
+    log "  port : ${PROXY_PORT}"
+    if [ "${CLEAN_ASSUME_YES:-0}" = 1 ]; then
+      log "Proceeding (-y / --yes given)."
+    else
+      local reply; reply="$(ask "Proceed? [Y/n]:" "Y")"
+      case "$reply" in
+        ''|y|Y|yes|YES|Yes) ;;
+        *) die "Aborted at standalone-server confirmation step." ;;
+      esac
+    fi
+  fi
 
   # If we haven't already, re-invoke ourselves with stdout+stderr piped through
   # tee so the bootstrap log captures everything. Avoids process substitution
