@@ -4,12 +4,15 @@
 # Self-contained orchestrator that lets Argonne users run OpenCode against
 # argo-proxy from anywhere (inside or outside the ANL network).
 #
-# Modes:
+# Subcommands (run `argo_opencode.sh help` for the full guide):
 #   argo_opencode.sh client          # default; runs the laptop-side flow
 #   argo_opencode.sh server          # runs on the ANL compute node (auto-invoked)
 #   argo_opencode.sh status          # check tunnel + remote proxy health
 #   argo_opencode.sh stop            # tear down the local tunnel
-#   argo_opencode.sh -h | --help
+#   argo_opencode.sh update-models   # refresh OpenCode model list from /v1/models
+#   argo_opencode.sh clean           # remove every artifact this script created
+#   argo_opencode.sh help            # long-form guide
+#   argo_opencode.sh -h | --help     # short usage
 #
 # Distribution: https://github.com/a-attia/argo-opencode
 # Users (latest):
@@ -1854,11 +1857,19 @@ render_summary() {
   else
     lines+=("Models available    : (unknown -- proxy unreachable)")
   fi
+  # Without jq the configured-models extraction is best-effort (works on the
+  # standard one-key-per-line config style this script writes; misbehaves on
+  # minified JSON). Annotate the row so users know to install jq if the
+  # numbers look off.
+  local cfg_qual=""
+  if ! command -v jq >/dev/null 2>&1; then
+    cfg_qual="  (counts approximate; install jq for exact)"
+  fi
   if [ "$SUM_CFG_COUNT" -gt 0 ]; then
     if [ "$SUM_MODELS_OK" -eq 1 ]; then
-      lines+=("Models configured   : ${SUM_CFG_COUNT} in opencode config (${SUM_CFG_AVAIL_COUNT} reachable)")
+      lines+=("Models configured   : ${SUM_CFG_COUNT} in opencode config (${SUM_CFG_AVAIL_COUNT} reachable)${cfg_qual}")
     else
-      lines+=("Models configured   : ${SUM_CFG_COUNT} in opencode config (reachability unknown)")
+      lines+=("Models configured   : ${SUM_CFG_COUNT} in opencode config (reachability unknown)${cfg_qual}")
     fi
     if [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ]; then
       local orphan_str="${SUM_CFG_ORPHAN_COUNT} configured but NOT in /v1/models: ${SUM_CFG_ORPHAN_LIST}"
@@ -2630,7 +2641,7 @@ compute node, regardless of whether you are inside or outside the ANL network.
 Two roles, one file:
   * client mode (laptop): bootstraps OpenCode + config, picks an ANL node,
     pushes a copy of this script to it, exec's it remotely as 'server', then
-    opens an SSH local-forward (port ${PROXY_PORT}) and monitors it.
+    opens an SSH local-forward (port ${PROXY_PORT_DEFAULT}, by default) and monitors it.
   * server mode (ANL compute node): creates a Python venv at ${VENV_PATH},
     installs argo-proxy if missing, writes ~/.config/argoproxy/config.yaml,
     and starts \`argo-proxy serve\` inside screen (preferred), tmux, or nohup.
@@ -2682,7 +2693,7 @@ ANL compute node (after first run):
   screen session: '${SCREEN_SESSION}'             where argo-proxy serve runs
 
 Network path while running:
-  laptop:${PROXY_PORT}  --SSH-->  ${ANL_JUMP}  --SSH-->  <node>:${PROXY_PORT}  -->  argo-proxy
+  laptop:${PROXY_PORT_DEFAULT}  --SSH-->  ${ANL_JUMP}  --SSH-->  <node>:${PROXY_PORT_DEFAULT}  -->  argo-proxy
 
 CONFIG: WHAT IF SOMETHING ALREADY EXISTS
 ----------------------------------------
@@ -2789,7 +2800,7 @@ Legacy (still honored, prints a one-time deprecation warning):
 NOTIFICATIONS WHEN THE TUNNEL BREAKS
 ------------------------------------
 While 'client' is in the foreground, a background loop polls
-http://localhost:${PROXY_PORT}/health every ${HEALTH_INTERVAL}s. After ${HEALTH_FAIL_THRESHOLD} consecutive
+http://localhost:<port>/health every ${HEALTH_INTERVAL}s. After ${HEALTH_FAIL_THRESHOLD} consecutive
 failures, you'll see:
   * a loud red message on stderr + terminal bell
   * macOS: 'osascript' notification banner
@@ -2805,7 +2816,7 @@ Check what's happening locally and remotely (via the tunnel):
 
 List models the proxy is exposing:
   ARGO_OPENCODE_SHOW_MODELS=1 bash ${script_name} status   # gated dump
-  curl -s http://localhost:${PROXY_PORT}/v1/models | jq .   # raw
+  curl -s http://localhost:<port>/v1/models | jq .   # raw  (<port> = your tunnel port)
 
 Refresh the model list in your OpenCode config from the live proxy:
   bash ${script_name} update-models
@@ -2864,9 +2875,9 @@ TROUBLESHOOTING
     Edit ANL_NODES at the top of the script and re-run. With --no-jump:
       ssh <user>@compute-01.cels.anl.gov true
 
-"Port ${PROXY_PORT} is already in use locally"
+"Port <port> is already in use locally"
     Another tunnel (or anything else) is bound to that port. Find and kill:
-      lsof -nPi :${PROXY_PORT} -sTCP:LISTEN
+      lsof -nPi :<port> -sTCP:LISTEN
       bash ${script_name} stop
     Or pick a different port for this run:
       bash ${script_name} --port <new_port> client
@@ -2889,7 +2900,7 @@ TROUBLESHOOTING
     Common causes: pip install of argo-proxy failed (network/proxy on the
     node), screen/tmux missing, port already bound by a stale process.
 
-"Lost connection to <node>:${PROXY_PORT}" notification
+"Lost connection to <node>:<port>" notification
     Either the SSH tunnel dropped (laptop/network) or argo-proxy died on the
     node. Check 'status' first; if local tunnel is fine but the proxy is gone,
     just re-run 'client' -- the server mode is idempotent.
