@@ -1908,11 +1908,26 @@ ensure_or_reuse_tunnel() {
 # and the caller should bail out without further tunnel work).
 
 # _client_common_setup: shared front-half of mode_client and mode_tunnel.
-# Echoes the selected node hostname, OR echoes empty string if the on-node
-# short-circuit fired (caller should run setup steps and return without
-# starting a tunnel). The caller passes a flag indicating whether OpenCode
-# config writing is desired in the short-circuit branch (mode_client wants
-# it, mode_tunnel does not).
+#
+# IMPORTANT: callers must invoke this DIRECTLY (NOT via $()/command
+# substitution). The function mutates several script-level globals
+# (ANL_USERNAME, ARGO_OPENCODE_USER, ARGO_OPENCODE_NO_JUMP,
+# ARGO_OPENCODE_NO_MFA, possibly PROXY_PORT and SKIP_OPENCODE_CONFIG_WRITE,
+# plus _PICKED_NODE as the return value). Calling it inside `$( )` would
+# run it in a subshell where those mutations evaporate when the subshell
+# exits, leaving the parent with unbound globals -- which used to manifest
+# as "ANL_USERNAME: unbound variable" errors when the parent then tried
+# to use them.
+#
+# The "return value" is _PICKED_NODE: set to the selected node hostname
+# on the standard remote-tunnel path, or set to empty string to signal
+# the on-node short-circuit fired (caller should bail out without further
+# tunnel work).
+#
+# The caller passes a flag indicating whether OpenCode config writing is
+# desired in the short-circuit branch (mode_client wants it, mode_tunnel
+# does not).
+_PICKED_NODE=""
 _client_common_setup() {
   local with_opencode_setup="${1:-1}"
   ANL_USERNAME="$(resolve_username)"
@@ -2017,11 +2032,11 @@ EOF
     log "  with Authorization: Bearer ${ANL_USERNAME}"
     log "(no foreground tunnel to keep alive; argo-proxy stays running under"
     log "  screen/tmux/nohup; use '$(basename "$0") clean' to stop everything.)"
-    echo ""  # signal short-circuit
+    _PICKED_NODE=""  # signal short-circuit (caller should bail out)
     return 0
   fi
 
-  echo "$node"
+  _PICKED_NODE="$node"
 }
 
 # mode_tunnel: open the SSH tunnel (or local proxy on a compute node) and
@@ -2029,10 +2044,14 @@ EOF
 # managing multiple clients themselves, or for keeping a tunnel alive across
 # multiple terminal sessions where each one configures a different client.
 mode_tunnel() {
-  local node
-  node="$(_client_common_setup 0)"
-  # Empty == on-node short-circuit fired and we're done.
-  [ -z "$node" ] && return 0
+  # Call directly (NOT via $()): _client_common_setup mutates several
+  # script-level globals (ANL_USERNAME, ARGO_OPENCODE_USER, the auto-defaulted
+  # NO_JUMP/NO_MFA env, possibly PROXY_PORT). A subshell capture would make
+  # those mutations vanish and trip 'unbound variable' here. The "return"
+  # value is _PICKED_NODE: empty signals the on-node short-circuit fired.
+  _client_common_setup 0
+  [ -z "$_PICKED_NODE" ] && return 0
+  local node="$_PICKED_NODE"
 
   # ensure_or_reuse_tunnel handles all the collision detection (local
   # self-reuse, remote multi-user prompt) and on success either opens a
@@ -2053,10 +2072,10 @@ mode_tunnel() {
 }
 
 mode_client() {
-  local node
-  node="$(_client_common_setup 1)"
-  # Empty == on-node short-circuit fired and we're done.
-  [ -z "$node" ] && return 0
+  # Call directly (NOT via $()): see comment in mode_tunnel for why.
+  _client_common_setup 1
+  [ -z "$_PICKED_NODE" ] && return 0
+  local node="$_PICKED_NODE"
 
   # Standard remote-tunnel flow:
   #   1. ensure_or_reuse_tunnel handles bootstrap + tunnel (or reuses an
