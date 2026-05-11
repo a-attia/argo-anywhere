@@ -178,6 +178,35 @@ To handle this gracefully, the script:
   This makes "I want to add another client to my running tunnel" a natural
   workflow once Phase 3+ adds non-OpenCode clients.
 
+### Caveat: load-balanced node aliases and orphan argo-proxies
+
+The user-facing names in `ANL_NODES` (`compute-01.cels.anl.gov`, etc.)
+are **DNS aliases** that CELS resolves internally to one of several
+physical hosts (`compute-XXX-Y`). Two consequences worth knowing:
+
+- **Successive `client` runs may land on different physical hosts.**
+  If today's run picks `compute-01` and lands on `compute-386-01`, and
+  tomorrow's run on the same `compute-01` lands on `compute-742-03`,
+  yesterday's argo-proxy keeps running on `compute-386-01` — orphaned
+  but harmless. Over time these accumulate. The script can't reliably
+  clean them up because it doesn't know the alias-to-physical mapping.
+
+- **Periodic manual cleanup is the recommended mitigation.** From a
+  shell on whichever physical host you happen to be on:
+  ```sh
+  ssh <user>@<physical-host> 'pkill -u <user> -f "argo-proxy serve"'
+  ```
+  Or simply `bash argo_opencode.sh clean` whenever you've definitively
+  finished with a node — that handles the current physical host's
+  argo-proxy via the screen session. Orphans on other physical hosts
+  remain.
+
+- **The on-node short-circuit** (running `client` directly on a compute
+  node) recognizes load-balanced aliases by resolving the picked
+  hostname to its IPs and intersecting with the local interface IPs
+  — so picking `compute-01` while logged into `compute-386-01` (where
+  the alias includes you) correctly skips the SSH tunnel.
+
 ## Tunnel monitoring and reconnect
 
 While `client` is in the foreground, a background loop polls
