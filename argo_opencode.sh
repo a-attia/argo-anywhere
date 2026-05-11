@@ -168,14 +168,25 @@ ask()  { local p="$1" def="${2:-}" reply; printf '%s%s%s ' "$C_YLW" "$p" "$C_OFF
 # ============================================================================
 # Prefer Unicode if the terminal looks UTF-8 capable, else ASCII.
 # Set ARGO_BOX_STYLE=ascii or =unicode to force.
+#
+# IMPORTANT: the TTY test ([ -t 1 ]) MUST run in the script's main shell,
+# not inside `$(detect_box_style)`. Command substitution rewires the
+# subshell's stdout to a pipe so the parent can capture the result, which
+# means [ -t 1 ] is always false inside `$(...)`. Asking the function
+# itself was the original implementation and silently disabled the
+# Unicode branch even on real terminals -- the script always fell back to
+# ASCII. We now snapshot the parent's TTY status into _STDOUT_IS_TTY
+# first, and detect_box_style reads that.
+if [ -t 1 ]; then _STDOUT_IS_TTY=1; else _STDOUT_IS_TTY=0; fi
 detect_box_style() {
   case "${ARGO_BOX_STYLE:-}" in
     ascii)   echo ascii; return ;;
     unicode) echo unicode; return ;;
   esac
-  # Heuristic: locale advertises UTF-8 AND we're on a TTY.
-  if [ -t 1 ] && printf '%s' "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" \
-       | grep -qiE 'utf-?8'; then
+  # Heuristic: locale advertises UTF-8 AND the script's stdout is a TTY.
+  if [ "${_STDOUT_IS_TTY:-0}" = 1 ] \
+     && printf '%s' "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" \
+        | grep -qiE 'utf-?8'; then
     echo unicode
   else
     echo ascii
