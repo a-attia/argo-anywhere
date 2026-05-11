@@ -2951,21 +2951,38 @@ mode_status() {
 }
 
 mode_stop() {
-  log "Killing local processes listening on :${PROXY_PORT}..."
+  # mode_stop kills whatever process is bound to the resolved port locally.
+  # On a laptop that's the SSH tunnel (intended use); the warning at the
+  # bottom correctly notes that argo-proxy on the remote node survives.
+  #
+  # On a compute node, however, the process bound to PROXY_PORT IS
+  # argo-proxy itself. Killing it has much bigger blast radius than killing
+  # a tunnel: it breaks every client pointed at this host on this port,
+  # including any laptop with an active tunnel here. The original warning
+  # text was simply wrong in that case ("does NOT stop argo-proxy" -- yes
+  # it just did). Use local_tunnel_status to detect the situation and
+  # branch appropriately.
   local pids
   pids="$(lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null || true)"
   if [ -z "$pids" ]; then
+    log "Nothing listening on :${PROXY_PORT}; nothing to stop locally."
     ok "Nothing to stop locally."
-  else
-    echo "$pids" | xargs -n1 kill 2>/dev/null || true
-    sleep 1
-    echo "$pids" | xargs -n1 -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
-    ok "Killed: ${pids//$'\n'/ }"
+    return 0
   fi
-  warn "Note: this does NOT stop argo-proxy on the ANL node. To stop it remotely,"
-  warn "  use the launcher actually used by 'server' mode (screen is preferred,"
-  warn "  tmux is the next fallback, then nohup):"
-  cat >&2 <<EOF
+
+  local lstatus; lstatus="$(local_tunnel_status "$PROXY_PORT")"
+  case "$lstatus" in
+    ours-healthy|ours-unhealthy)
+      # Listener is an SSH tunnel we own. The classic laptop case.
+      log "Killing local SSH tunnel listening on :${PROXY_PORT}..."
+      echo "$pids" | xargs -n1 kill 2>/dev/null || true
+      sleep 1
+      echo "$pids" | xargs -n1 -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
+      ok "Killed: ${pids//$'\n'/ }"
+      warn "Note: this does NOT stop argo-proxy on the ANL node. To stop it"
+      warn "  remotely, use the launcher actually used by 'server' mode"
+      warn "  (screen is preferred, tmux is the next fallback, then nohup):"
+      cat >&2 <<EOF
   # if started under screen (default when available):
   ssh -J <user>@${ANL_JUMP} <user>@<node> 'screen -S ${SCREEN_SESSION} -X quit'
   # if started under tmux:
@@ -2974,6 +2991,56 @@ mode_stop() {
   ssh -J <user>@${ANL_JUMP} <user>@<node> 'pkill -f "argo-proxy serve"'
   # or just use 'clean' to do all of the above + tear down local state.
 EOF
+      ;;
+    external-healthy|other-or-broken)
+      # Listener is NOT an SSH tunnel. Most likely argo-proxy itself
+      # (the on-compute-node case). Confirm before killing because the
+      # blast radius is "all clients pointed at this host on this port",
+      # not just "this user's tunnel."
+      warn "On this host, port ${PROXY_PORT} is NOT held by an SSH tunnel."
+      warn "  The listener (pid ${pids//$'\n'/ }) is most likely argo-proxy itself."
+      warn "  Killing it will break:"
+      warn "    * any client (opencode, claudecode, ...) pointed at this host:port"
+      warn "    * any laptop whose SSH tunnel forwards to this host:port"
+      warn "    * any other user pointing at this host:port"
+      warn "  This is different from the usual 'stop the local SSH tunnel'"
+      warn "  meaning of 'stop' (which is a no-op for the underlying argo-proxy)."
+
+      if [ "${CLEAN_ASSUME_YES:-0}" = 1 ]; then
+        log "Proceeding (-y / --yes given)."
+      else
+        local reply; reply="$(ask "Kill the listener anyway? [y/N]:" "n")"
+        case "$reply" in
+          y|Y|yes|YES|Yes) ;;
+          *) die "Aborted." ;;
+        esac
+      fi
+
+      log "Killing listener on :${PROXY_PORT}..."
+      echo "$pids" | xargs -n1 kill 2>/dev/null || true
+      sleep 1
+      echo "$pids" | xargs -n1 -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
+      ok "Killed: ${pids//$'\n'/ }"
+      warn "Note: the screen/tmux session that hosted argo-proxy may still"
+      warn "  exist (now empty). To tear it down too:"
+      cat >&2 <<EOF
+  screen -S ${SCREEN_SESSION} -X quit 2>/dev/null
+  tmux kill-session -t ${SCREEN_SESSION} 2>/dev/null
+  # or use 'clean' for the full local + remote tear-down.
+EOF
+      ;;
+    *)
+      # Fallback (e.g. lsof returned a pid but local_tunnel_status couldn't
+      # classify it). Just kill what's there with the legacy warning.
+      log "Killing local processes listening on :${PROXY_PORT}..."
+      echo "$pids" | xargs -n1 kill 2>/dev/null || true
+      sleep 1
+      echo "$pids" | xargs -n1 -I{} sh -c 'kill -0 {} 2>/dev/null && kill -9 {} || true'
+      ok "Killed: ${pids//$'\n'/ }"
+      warn "Note: if the killed process was argo-proxy itself (not an SSH tunnel),"
+      warn "  any other client pointed at this host:port has just lost its proxy."
+      ;;
+  esac
 }
 
 # ============================================================================
