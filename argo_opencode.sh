@@ -922,8 +922,35 @@ ensure_opencode_installed() {
       die "Unsupported OS for automatic install. Install OpenCode manually then re-run."
       ;;
   esac
-  command -v opencode >/dev/null 2>&1 || die "OpenCode install reported success but binary not on PATH."
-  ok "OpenCode installed."
+
+  # The upstream Linux installer (and the brew fallback path on a macOS
+  # without /usr/local/bin on PATH) drops the binary at $HOME/.opencode/bin
+  # and modifies ~/.bashrc / ~/.zshrc to extend PATH. Our running shell
+  # doesn't re-source the shell rc files, so `command -v opencode` would
+  # immediately fail right after a successful install.
+  #
+  # Mitigate by prepending the installer's known location to PATH for the
+  # rest of THIS script invocation. The user's interactive shells will
+  # pick up the rc-file change naturally on next login. If the binary
+  # really isn't there after install, fall through to the die() with a
+  # message that points at the actual recovery action.
+  if ! command -v opencode >/dev/null 2>&1; then
+    if [ -x "${HOME}/.opencode/bin/opencode" ]; then
+      log "Installer placed binary at ~/.opencode/bin/opencode but the new"
+      log "  PATH only takes effect in fresh shells. Prepending it for this run."
+      PATH="${HOME}/.opencode/bin:${PATH}"
+      export PATH
+    fi
+  fi
+
+  if ! command -v opencode >/dev/null 2>&1; then
+    err "OpenCode install reported success but the binary is not on PATH and"
+    err "  was not found at the standard location (~/.opencode/bin/opencode)."
+    err "  Try opening a new shell (or 'source ~/.bashrc' / 'source ~/.zshrc')"
+    err "  and re-running this script."
+    die "Cannot continue without a runnable opencode binary."
+  fi
+  ok "OpenCode installed: $(command -v opencode)"
 }
 
 # ----------------------------------------------------------------------------
