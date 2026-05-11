@@ -1708,10 +1708,26 @@ gather_summary() {
   SUM_CFG_COUNT=0; SUM_CFG_AVAIL_COUNT=0
   SUM_CFG_ORPHAN_COUNT=0; SUM_CFG_ORPHAN_LIST=""
 
-  # Listener (lsof exits 1 when nothing matches; '|| true' keeps pipefail happy)
+  # Listener (lsof exits 1 when nothing matches; '|| true' keeps pipefail happy).
+  #
+  # ssh -L on a dual-stack host produces TWO rows for the same listener: an
+  # IPv6 row (NAME column shows '[::1]:PORT') and an IPv4 row ('127.0.0.1:PORT'),
+  # both owned by the same pid. lsof prints them in arbitrary order. Prefer
+  # the IPv4 row for SUM_LISTENER_BIND because:
+  #   * 'localhost' resolves to 127.0.0.1 first on most laptops, so curl(1)
+  #     and OpenCode actually talk to the IPv4 socket;
+  #   * users debugging the displayed bind address with `lsof -nPi :PORT` see
+  #     the same family the rest of the script's docs reference.
+  # If only an IPv6 row is present we fall back to it.
+  local lsof_out
+  lsof_out="$( { lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN 2>/dev/null || true; } )"
   local lsof_line
-  lsof_line="$( { lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN 2>/dev/null || true; } \
-                 | awk 'NR==2{print $2" "$9; exit}')"
+  lsof_line="$(printf '%s\n' "$lsof_out" \
+                 | awk 'NR>1 && $5=="IPv4" {print $2" "$9; exit}')"
+  if [ -z "$lsof_line" ]; then
+    lsof_line="$(printf '%s\n' "$lsof_out" \
+                   | awk 'NR>1 {print $2" "$9; exit}')"
+  fi
   if [ -n "$lsof_line" ]; then
     SUM_LISTENER_OK=1
     SUM_LISTENER_PID="${lsof_line%% *}"
