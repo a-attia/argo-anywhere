@@ -1210,7 +1210,14 @@ open_tunnel_and_monitor() {
 # ============================================================================
 mode_client() {
   ANL_USERNAME="$(resolve_username)"
-  export ANL_USERNAME ARGO_OPENCODE_USER="$ANL_USERNAME"
+  # Set both names as script-level globals (NOT exported). Later code in this
+  # process reads them as shell variables (e.g. write_opencode_config,
+  # write_argoproxy_config), and remote_bootstrap explicitly passes them on
+  # the ssh command line rather than relying on env inheritance. Exporting
+  # would leak the Argonne username into any child process the user spawns
+  # from the same shell session, which is surprising when the laptop's $USER
+  # differs from the Argonne username (the common case).
+  ARGO_OPENCODE_USER="$ANL_USERNAME"
   log "Using ANL username: ${ANL_USERNAME}"
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
