@@ -141,7 +141,9 @@ bash argo_opencode.sh status
 ARGO_OPENCODE_SHOW_MODELS=1 bash argo_opencode.sh status
 
 # Refresh the OpenCode model list from the live proxy
-bash argo_opencode.sh update-models
+bash argo_opencode.sh update-models                  # interactive: prompts per-orphan
+bash argo_opencode.sh update-models --keep-orphans   # add new; keep all stale entries
+bash argo_opencode.sh update-models --drop-orphans   # add new; drop all stale entries
 
 # Tear down only the local tunnel
 bash argo_opencode.sh stop

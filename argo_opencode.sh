@@ -2013,8 +2013,26 @@ render_summary() {
   # Next-step hint
   lines+=("")
   if [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$SUM_MODELS_OK" -eq 1 ]; then
-    if [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ]; then
-      lines+=("Next step           : run '$(basename "$0") update-models' to refresh stale entries,")
+    # When the proxy is healthy, surface model-config drift so the user knows
+    # exactly which axis update-models would change. Three independent axes:
+    #   * orphans          : in config, NOT in /v1/models (would be reviewed for removal)
+    #   * unconfigured     : in /v1/models, NOT in config (would be added)
+    #   * neither          : in sync; just go run opencode
+    local missing=0
+    if [ "$SUM_MODEL_UNIQ_COUNT" -gt 0 ]; then
+      missing=$((SUM_MODEL_UNIQ_COUNT - SUM_CFG_AVAIL_COUNT))
+      [ "$missing" -lt 0 ] && missing=0
+    fi
+    if [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ] || [ "$missing" -gt 0 ]; then
+      local hint=""
+      if [ "$missing" -gt 0 ] && [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ]; then
+        hint="add ${missing} new and review ${SUM_CFG_ORPHAN_COUNT} orphan(s)"
+      elif [ "$missing" -gt 0 ]; then
+        hint="add ${missing} new model(s)"
+      else
+        hint="review ${SUM_CFG_ORPHAN_COUNT} orphan(s)"
+      fi
+      lines+=("Next step           : run '$(basename "$0") update-models' to ${hint},")
       lines+=("                      then 'opencode' in another terminal")
     else
       lines+=("Next step           : run  'opencode'  in another terminal")
@@ -2166,13 +2184,128 @@ mode_update_models() {
   removed="$(jq -rn --argjson o "$old_models_block" --argjson n "$new_models_block" \
     '($o | keys) - ($n | keys) | join(", ")')"
   if [ -n "$added"   ]; then log "Will ADD:    ${added}";   fi
-  if [ -n "$removed" ]; then log "Will REMOVE: ${removed}"; fi
+  if [ -n "$removed" ]; then log "Orphans (in config but NOT in /v1/models): ${removed}"; fi
   if [ -z "$added" ] && [ -z "$removed" ]; then
     log "Configured models already match /v1/models."
   fi
 
-  # Stash the new models block in a global so the writer closure can find it
-  # (handle_config_file invokes the writer once for diff and again on overwrite).
+  # ---- Orphan handling -------------------------------------------------
+  # Models in the user's config that no longer appear in /v1/models. The
+  # writer below blindly replaces .provider.argo.models with $new, so any
+  # orphan is dropped unless we explicitly merge it back in.
+  #
+  # Three policies, in order of precedence:
+  #   1. KEEP_ORPHANS=1 (--keep-orphans / ARGO_OPENCODE_KEEP_ORPHANS) -> keep all
+  #   2. DROP_ORPHANS=1 (--drop-orphans / ARGO_OPENCODE_DROP_ORPHANS) -> drop all
+  #   3. interactive: per-orphan prompt with bulk-decision shortcuts
+  if [ -n "$removed" ]; then
+    # Build a JSON array of orphan keys to KEEP. Empty == drop all.
+    local keep_array='[]'
+    local policy="prompt"
+    if [ "${KEEP_ORPHANS:-${ARGO_OPENCODE_KEEP_ORPHANS:-0}}" = 1 ]; then
+      policy="keep"
+    elif [ "${DROP_ORPHANS:-${ARGO_OPENCODE_DROP_ORPHANS:-0}}" = 1 ]; then
+      policy="drop"
+    fi
+
+    case "$policy" in
+      keep)
+        keep_array="$(jq -n --argjson o "$old_models_block" --argjson n "$new_models_block" \
+          '($o | keys) - ($n | keys)')"
+        log "Keeping all $(printf '%s' "$keep_array" | jq 'length') orphan(s) (--keep-orphans)."
+        ;;
+      drop)
+        keep_array='[]'
+        warn "Dropping all $(jq -rn --argjson o "$old_models_block" --argjson n "$new_models_block" \
+          '($o | keys) - ($n | keys) | length') orphan(s) (--drop-orphans)."
+        ;;
+      prompt)
+        # Build a bash array of orphan names. We avoid the natural
+        # `while read … done <<< "$orphans"` loop because `ask` (called
+        # inside the loop) does its own `read`, which would consume the
+        # herestring instead of stdin and silently advance the loop. With
+        # an array iterator the loop body's stdin stays the user's TTY.
+        local orphan_names_raw; orphan_names_raw="$(jq -rn \
+          --argjson o "$old_models_block" --argjson n "$new_models_block" \
+          '($o | keys) - ($n | keys) | .[]')"
+        local orphan_arr=() name
+        while IFS= read -r name; do
+          [ -n "$name" ] && orphan_arr+=("$name")
+        done <<< "$orphan_names_raw"
+        local orphan_total="${#orphan_arr[@]}"
+
+        echo >&2
+        warn "${orphan_total} orphan model(s) found (in your config but not served by /v1/models):"
+        local i=1 friendly
+        for name in "${orphan_arr[@]}"; do
+          # Show the friendly 'name' field too, if present in the OLD config.
+          friendly="$(jq -r --arg k "$name" '.[$k].name // $k' <<< "$old_models_block")"
+          if [ "$friendly" != "$name" ]; then
+            printf '  %d) %-30s  (display name: %s)\n' "$i" "$name" "$friendly" >&2
+          else
+            printf '  %d) %s\n' "$i" "$name" >&2
+          fi
+          i=$((i+1))
+        done
+
+        cat >&2 <<EOF
+
+  For each orphan you can [k]eep or [d]rop. Bulk shortcuts:
+    [K] keep ALL remaining orphans   [D] drop ALL remaining orphans
+    [a] abort update-models entirely
+EOF
+        # Build the keep list. Default per-orphan choice is [k]eep, so an
+        # accidental Enter doesn't lose a model.
+        local keep_list=""
+        local bulk=""  # set to "keep" or "drop" once user picks K or D
+        i=1
+        for name in "${orphan_arr[@]}"; do
+          if [ "$bulk" = "keep" ]; then
+            keep_list="${keep_list}${name}"$'\n'
+            log "  ${name}: keeping (bulk)"
+          elif [ "$bulk" = "drop" ]; then
+            log "  ${name}: dropping (bulk)"
+          else
+            local choice
+            choice="$(ask "  ${i}/${orphan_total} ${name} [k/d/K/D/a, default=keep]:" "k")"
+            case "$choice" in
+              k|"") keep_list="${keep_list}${name}"$'\n'; log "    -> keeping" ;;
+              d)    log "    -> dropping" ;;
+              K)    bulk="keep"; keep_list="${keep_list}${name}"$'\n'
+                    log "    -> keeping ALL remaining" ;;
+              D)    bulk="drop"; log "    -> dropping ALL remaining" ;;
+              a|A)  die "Aborted at orphan-review step." ;;
+              *)    warn "    unrecognized: '${choice}'; treating as [k]eep"
+                    keep_list="${keep_list}${name}"$'\n' ;;
+            esac
+          fi
+          i=$((i+1))
+        done
+
+        # Convert keep_list (newline-delimited) to a JSON array.
+        if [ -n "$keep_list" ]; then
+          keep_array="$(printf '%s' "$keep_list" | sed '/^$/d' | jq -R . | jq -s .)"
+        else
+          keep_array='[]'
+        fi
+        local kept_n; kept_n="$(printf '%s' "$keep_array" | jq 'length')"
+        local dropped_n=$((orphan_total - kept_n))
+        log "Orphan review: keeping ${kept_n}, dropping ${dropped_n}."
+        ;;
+    esac
+
+    # Splice kept orphans (with their original config entries) into the
+    # new models block before passing to the writer.
+    new_models_block="$(jq -n \
+      --argjson new "$new_models_block" \
+      --argjson old "$old_models_block" \
+      --argjson keep "$keep_array" \
+      '$new + ($old | with_entries(select(.key as $k | $keep | index($k))))')"
+  fi
+
+  # Stash the (possibly orphan-augmented) new models block in a global so
+  # the writer closure can find it (handle_config_file invokes the writer
+  # once for diff and again on overwrite).
   ARGO_NEW_MODELS_BLOCK="$new_models_block"
   ARGO_SOURCE_CFG="$cfg"
   # shellcheck disable=SC2329  # called indirectly via "$writer" in handle_config_file
@@ -2622,6 +2755,7 @@ usage() {
 Usage: $(basename "$0") [SUBCOMMAND] [--user NAME] [--node HOST] [--port N]
                           [--no-jump] [--no-mfa] [--probe-nodes]
                           [--force-reinstall]
+                          [--keep-orphans | --drop-orphans]
                           [--dry-run] [--local-only] [-y]
                           [--purge | --purge-backups]
 
@@ -2641,6 +2775,9 @@ Subcommands:
                   live /v1/models endpoint. Preserves everything else in the
                   config; uses the same [k]/[b]/[d]/[m]/[a] confirmation flow
                   as other config writes. Requires jq.
+                  Models present in the config but absent from /v1/models
+                  ('orphans') prompt per-model unless --keep-orphans /
+                  --drop-orphans is passed.
   stop            Kill the local SSH tunnel listening on the resolved port.
                   Does NOT touch the remote argo-proxy session.
   clean           Remove every artifact this script created (local + remote).
@@ -2686,6 +2823,15 @@ Options:
   --force-reinstall    Wipe the server-side venv (\$HOME/agovenv on the ANL
                        node) and rebuild from scratch. Use after a broken
                        upgrade. Canonical env: ARGO_OPENCODE_FORCE_REINSTALL.
+
+  Flags below apply to 'update-models':
+  --keep-orphans       Skip the per-orphan prompt; keep ALL models in the
+                       config that are no longer in /v1/models.
+                       Canonical env: ARGO_OPENCODE_KEEP_ORPHANS=1.
+  --drop-orphans       Skip the per-orphan prompt; drop ALL models in the
+                       config that are no longer in /v1/models.
+                       Canonical env: ARGO_OPENCODE_DROP_ORPHANS=1.
+                       (Mutually exclusive with --keep-orphans.)
 
   Flags below apply to 'clean':
   --dry-run            Print what would be deleted; change nothing.
@@ -2873,6 +3019,8 @@ Canonical (preferred):
                                  use 'yes' for indefinite, 'no' to disable).
   ARGO_OPENCODE_SHOW_MODELS=1    'status' dumps the full /v1/models list
   ARGO_OPENCODE_FORCE_REINSTALL=1 server mode wipes \$HOME/agovenv first
+  ARGO_OPENCODE_KEEP_ORPHANS=1   update-models keeps ALL orphaned config models
+  ARGO_OPENCODE_DROP_ORPHANS=1   update-models drops ALL orphaned config models
   ARGO_BOX_STYLE=ascii|unicode   override the box-drawing heuristic
 
 Legacy (still honored, prints a one-time deprecation warning):
@@ -3045,6 +3193,10 @@ main() {
         ARGO_OPENCODE_NO_MFA=1; shift ;;
       --probe-nodes)
         PROBE_NODES=1; shift ;;
+      --keep-orphans)
+        KEEP_ORPHANS=1; shift ;;
+      --drop-orphans)
+        DROP_ORPHANS=1; shift ;;
       --dry-run)        CLEAN_DRY_RUN=1; shift ;;
       --local-only)     CLEAN_LOCAL_ONLY=1; shift ;;
       --yes|-y)         CLEAN_ASSUME_YES=1; shift ;;
@@ -3056,6 +3208,14 @@ main() {
     esac
   done
   [ -n "$mode" ] || mode="client"
+
+  # --keep-orphans and --drop-orphans are mutually exclusive (and both
+  # only meaningful for update-models). Reject the combination early so
+  # the user gets a clear error rather than the silent precedence rule
+  # in mode_update_models (keep wins).
+  if [ "${KEEP_ORPHANS:-0}" = 1 ] && [ "${DROP_ORPHANS:-0}" = 1 ]; then
+    die "--keep-orphans and --drop-orphans cannot be combined."
+  fi
 
   # Resolve the port once, here, before any mode runs.
   resolve_port
