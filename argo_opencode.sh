@@ -220,15 +220,30 @@ repeat_str() {
 
 # print_summary_box <title> <verdict-color> <verdict-text> <line1> <line2> ...
 # Each subsequent arg is one body line (may contain ANSI codes).
+#
+# Section headers: any body-line argument starting with the literal sentinel
+# "__SECTION__:" is rendered as a labeled section break:
+#   1. a thin horizontal rule (BOX_ML + BOX_MH... + BOX_MR), then
+#   2. a row containing the section name (text after the prefix) in C_BLU.
+# Subsequent rows in that section are rendered as ordinary body lines.
+# The first section header is preceded by the verdict separator only (no
+# duplicate rule). Plain (non-sentinel) lines render exactly as before, so
+# callers that don't use sections (e.g. mode_clean's plan box) are
+# unaffected.
 print_summary_box() {
   local title="$1" vcolor="$2" verdict="$3"; shift 3
   local lines=("$@")
+  local _SECT_PREFIX='__SECTION__:'
 
   # Compute interior width = max of (title, verdict, all body lines), capped.
+  # Section-header rows contribute their LABEL width (without the sentinel).
   local maxw=0 w line
   w="$(visible_width "$title")"; [ "$w" -gt "$maxw" ] && maxw="$w"
   w="$(visible_width "$verdict")"; [ "$w" -gt "$maxw" ] && maxw="$w"
   for line in "${lines[@]}"; do
+    case "$line" in
+      "${_SECT_PREFIX}"*) line="${line#${_SECT_PREFIX}}" ;;
+    esac
     w="$(visible_width "$line")"; [ "$w" -gt "$maxw" ] && maxw="$w"
   done
   # Pad: 1 space on each side inside the box.
@@ -267,16 +282,39 @@ print_summary_box() {
       "$C_DIM" "$BOX_V$C_OFF"
   }
 
+  # Helper: emit a thin-rule row (mbar between BOX_ML/BOX_MR).
+  _bx_rule() {
+    printf '%s%s%s%s%s\n' "$C_DIM" "$BOX_ML" "$mbar" "$BOX_MR" "$C_OFF" >&2
+  }
+
   # Top border + title row
   printf '%s%s%s%s%s\n' "$C_DIM" "$BOX_TL" "$hbar" "$BOX_TR" "$C_OFF" >&2
   _bx_line "$title" "$C_BLU" >&2
   # Verdict row, separated by a thin rule
-  printf '%s%s%s%s%s\n' "$C_DIM" "$BOX_ML" "$mbar" "$BOX_MR" "$C_OFF" >&2
+  _bx_rule
   _bx_line "$verdict" "$vcolor" >&2
-  # Body rows
+  # Body rows. Always prefix with a thin rule (separates verdict from body).
+  # For each section header we also print a rule, EXCEPT when it is the very
+  # first body row -- the verdict-to-body rule already provides the visual
+  # break in that case.
   if [ "${#lines[@]}" -gt 0 ]; then
-    printf '%s%s%s%s%s\n' "$C_DIM" "$BOX_ML" "$mbar" "$BOX_MR" "$C_OFF" >&2
-    for line in "${lines[@]}"; do _bx_line "$line" "" >&2; done
+    _bx_rule
+    local first_body=1
+    for line in "${lines[@]}"; do
+      case "$line" in
+        "${_SECT_PREFIX}"*)
+          local label="${line#${_SECT_PREFIX}}"
+          if [ "$first_body" -ne 1 ]; then
+            _bx_rule
+          fi
+          _bx_line "$label" "$C_BLU" >&2
+          ;;
+        *)
+          _bx_line "$line" "" >&2
+          ;;
+      esac
+      first_body=0
+    done
   fi
   # Bottom border
   printf '%s%s%s%s%s\n' "$C_DIM" "$BOX_BL" "$hbar" "$BOX_BR" "$C_OFF" >&2
@@ -1910,17 +1948,22 @@ render_summary() {
     vcolor="$C_RED"
   fi
 
-  # Body lines
+  # Body lines, organized into named sections. print_summary_box recognizes
+  # any line beginning with "__SECTION__:" as a section break; everything
+  # below it (until the next sentinel or end) belongs to that section.
+  # Within a section we drop the redundant noun prefix from row labels
+  # (e.g. inside "Models", "Available" instead of "Models available").
   local lines=()
 
-  # Connection block
+  # ---- Section: Connection -------------------------------------------------
+  lines+=("__SECTION__:Connection")
   local listener_str
   if [ "$SUM_LISTENER_OK" -eq 1 ]; then
     listener_str="pid ${SUM_LISTENER_PID} bound to ${SUM_LISTENER_BIND}"
   else
     listener_str="(no local listener)"
   fi
-  lines+=("Local listener      : ${listener_str}")
+  lines+=("Local listener   : ${listener_str}")
 
   local health_str
   if [ "$SUM_HEALTH_OK" -eq 1 ]; then
@@ -1928,17 +1971,26 @@ render_summary() {
   else
     health_str="UNREACHABLE on http://localhost:${PROXY_PORT}/health"
   fi
-  lines+=("Proxy health        : ${health_str}")
+  lines+=("Proxy /health    : ${health_str}")
 
-  # --- Models subsection ---------------------------------------------------
+  if [ -n "$SUM_LISTENER_PID" ]; then
+    local uptime_str
+    uptime_str="$(ps -o etime= -p "$SUM_LISTENER_PID" 2>/dev/null | awk '{$1=$1;print}' || true)"
+    if [ -n "$uptime_str" ]; then
+      lines+=("Tunnel uptime    : ${uptime_str}  (HH:MM:SS or DD-HH:MM:SS)")
+    fi
+  fi
+
+  # ---- Section: Models -----------------------------------------------------
+  lines+=("__SECTION__:Models")
   if [ "$SUM_MODELS_OK" -eq 1 ]; then
-    local avail_str="${SUM_MODEL_COUNT} available at /v1/models"
+    local avail_str="${SUM_MODEL_COUNT} at /v1/models"
     if [ -n "$SUM_MODEL_SAMPLE" ]; then
       avail_str="${avail_str}  (e.g. ${SUM_MODEL_SAMPLE}, ...)"
     fi
-    lines+=("Models available    : ${avail_str}")
+    lines+=("Available        : ${avail_str}")
   else
-    lines+=("Models available    : (unknown -- proxy unreachable)")
+    lines+=("Available        : (unknown -- proxy unreachable)")
   fi
   # Without jq the configured-models extraction is best-effort (works on the
   # standard one-key-per-line config style this script writes; misbehaves on
@@ -1950,14 +2002,14 @@ render_summary() {
   fi
   if [ "$SUM_CFG_COUNT" -gt 0 ]; then
     if [ "$SUM_MODELS_OK" -eq 1 ]; then
-      lines+=("Models configured   : ${SUM_CFG_COUNT} in opencode config (${SUM_CFG_AVAIL_COUNT} reachable)${cfg_qual}")
+      lines+=("Configured       : ${SUM_CFG_COUNT} in opencode config (${SUM_CFG_AVAIL_COUNT} reachable)${cfg_qual}")
     else
-      lines+=("Models configured   : ${SUM_CFG_COUNT} in opencode config (reachability unknown)${cfg_qual}")
+      lines+=("Configured       : ${SUM_CFG_COUNT} in opencode config (reachability unknown)${cfg_qual}")
     fi
     if [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ]; then
-      local orphan_str="${SUM_CFG_ORPHAN_COUNT} configured but NOT in /v1/models: ${SUM_CFG_ORPHAN_LIST}"
-      lines+=("Models orphaned     : ${orphan_str}")
-      lines+=("                      (run '$(basename "$0") update-models' to refresh)")
+      lines+=("Orphaned         : ${SUM_CFG_ORPHAN_COUNT} configured but NOT in /v1/models")
+      lines+=("                   list: ${SUM_CFG_ORPHAN_LIST}")
+      lines+=("                   (run '$(basename "$0") update-models' to review)")
     fi
     # Hint: there are reachable chat models (unique by internal_name, no
     # embeddings) the user has not added to opencode yet. The math here mirrors
@@ -1965,53 +2017,45 @@ render_summary() {
     if [ "$SUM_MODELS_OK" -eq 1 ]; then
       local missing=$((SUM_MODEL_UNIQ_COUNT - SUM_CFG_AVAIL_COUNT))
       if [ "$missing" -gt 0 ]; then
-        lines+=("Models unconfigured : ${missing} reachable chat model(s) not in opencode config")
-        lines+=("                      (run '$(basename "$0") update-models' to add them all)")
+        lines+=("Unconfigured     : ${missing} reachable chat model(s) not in opencode config")
+        lines+=("                   (run '$(basename "$0") update-models' to add them)")
       fi
     fi
   else
-    lines+=("Models configured   : 0 in opencode config")
-    lines+=("                      (run '$(basename "$0") update-models' to populate)")
+    lines+=("Configured       : 0 in opencode config")
+    lines+=("                   (run '$(basename "$0") update-models' to populate)")
   fi
 
-  # Tunnel uptime (if we have a pid)
-  if [ -n "$SUM_LISTENER_PID" ]; then
-    local uptime_str
-    uptime_str="$(ps -o etime= -p "$SUM_LISTENER_PID" 2>/dev/null | awk '{$1=$1;print}' || true)"
-    if [ -n "$uptime_str" ]; then
-      lines+=("Tunnel uptime       : ${uptime_str}  (HH:MM:SS or DD-HH:MM:SS)")
-    fi
-  fi
-
-  # Configuration block
-  lines+=("")
-  lines+=("Configured port     : ${PROXY_PORT}")
-  lines+=("Jump host           : ${ANL_JUMP}")
+  # ---- Section: Configuration ----------------------------------------------
+  lines+=("__SECTION__:Configuration")
+  lines+=("Port             : ${PROXY_PORT}")
+  lines+=("Jump host        : ${ANL_JUMP}")
   # Only show cached identity rows when something is actually cached.
   # Use if/then so a failed test doesn't kill the function under set -e.
   local have_user=0 have_node=0
   if [ "$cached_user" != "(unset)" ]; then have_user=1; fi
   if [ "$cached_node" != "(unset)" ]; then have_node=1; fi
-  if [ "$have_user" -eq 1 ]; then lines+=("Cached username     : ${cached_user}"); fi
-  if [ "$have_node" -eq 1 ]; then lines+=("Cached node         : ${cached_node}"); fi
+  if [ "$have_user" -eq 1 ]; then lines+=("Cached username  : ${cached_user}"); fi
+  if [ "$have_node" -eq 1 ]; then lines+=("Cached node      : ${cached_node}"); fi
   if [ "$have_user" -eq 0 ] && [ "$have_node" -eq 0 ]; then
-    lines+=("Cached identity     : (none yet -- run '$(basename "$0") client' to set)")
+    lines+=("Cached identity  : (none yet -- run '$(basename "$0") client' to set)")
   fi
 
-  # Paths block: only the OpenCode config is always relevant. The state dir
-  # and the remote log path are only meaningful once 'client' has run, so
-  # suppress them when there is nothing real to point at.
-  lines+=("")
-  lines+=("OpenCode config     : ${HOME}/.config/opencode/config.json")
+  # ---- Section: Paths ------------------------------------------------------
+  # Only the OpenCode config is always relevant. The state dir and the
+  # remote log path are only meaningful once 'client' has run, so suppress
+  # them when there is nothing real to point at.
+  lines+=("__SECTION__:Paths")
+  lines+=("OpenCode config  : ${HOME}/.config/opencode/config.json")
   if [ -d "$STATE_DIR" ] || [ "$have_user" -eq 1 ] || [ "$have_node" -eq 1 ]; then
-    lines+=("Script state dir    : ${STATE_DIR}")
+    lines+=("Script state dir : ${STATE_DIR}")
   fi
   if [ "$have_user" -eq 1 ] && [ "$have_node" -eq 1 ]; then
-    lines+=("Remote bootstrap log: ${cached_user}@${cached_node}:~/${REMOTE_LOG}")
+    lines+=("Remote bootstrap : ${cached_user}@${cached_node}:~/${REMOTE_LOG}")
   fi
 
-  # Next-step hint
-  lines+=("")
+  # ---- Section: Next step --------------------------------------------------
+  lines+=("__SECTION__:Next step")
   if [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$SUM_MODELS_OK" -eq 1 ]; then
     # When the proxy is healthy, surface model-config drift so the user knows
     # exactly which axis update-models would change. Three independent axes:
@@ -2032,22 +2076,23 @@ render_summary() {
       else
         hint="review ${SUM_CFG_ORPHAN_COUNT} orphan(s)"
       fi
-      lines+=("Next step           : run '$(basename "$0") update-models' to ${hint},")
-      lines+=("                      then 'opencode' in another terminal")
+      lines+=("Run '$(basename "$0") update-models' to ${hint},")
+      lines+=("then 'opencode' in another terminal.")
     else
-      lines+=("Next step           : run  'opencode'  in another terminal")
+      lines+=("Run  'opencode'  in another terminal.")
     fi
   elif [ "$SUM_LISTENER_OK" -eq 0 ]; then
-    lines+=("Next step           : start the tunnel with  '$(basename "$0") client'")
+    lines+=("Start the tunnel with  '$(basename "$0") client'.")
   elif [ "$SUM_HEALTH_OK" -eq 0 ]; then
     if [ "$cached_node" != "(unset)" ] && [ "$cached_user" != "(unset)" ]; then
-      lines+=("Next step           : ssh -J ${cached_user}@${ANL_JUMP} ${cached_user}@${cached_node} \\")
-      lines+=("                        'tail -n 80 ~/${REMOTE_LOG}'")
+      lines+=("Inspect the remote bootstrap log:")
+      lines+=("  ssh -J ${cached_user}@${ANL_JUMP} ${cached_user}@${cached_node} \\")
+      lines+=("    'tail -n 80 ~/${REMOTE_LOG}'")
     else
-      lines+=("Next step           : check the remote argo-proxy log on the compute node")
+      lines+=("Check the remote argo-proxy log on the compute node.")
     fi
   else
-    lines+=("Next step           : check argo-proxy logs on the compute node")
+    lines+=("Check argo-proxy logs on the compute node.")
   fi
 
   echo >&2
