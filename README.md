@@ -43,6 +43,7 @@ a compute node. Subsequent runs reuse the cached values.
 | Subcommand | What it does |
 |---|---|
 | `client` (default) | Full laptop-side flow: install + config + tunnel + monitor |
+| `tunnel` | Same as `client` but does NOT install or configure any client; just brings up the tunnel |
 | `server` | Auto-invoked on the ANL compute node by `client` |
 | `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL) |
 | `update-models` | Refresh the OpenCode model list from the live `/v1/models` |
@@ -134,6 +135,48 @@ bash argo_opencode.sh server   # starts argo-proxy under screen, returns
 Other clients on other machines can then point at this proxy via their
 own SSH `-L` forward, or via `argo_opencode.sh client --node compute-XX`
 from those machines.
+
+## Sharing a compute node with other users
+
+Each user runs their own argo-proxy instance on the compute node — the
+proxy is per-user, listening on `127.0.0.1:<port>`, and your config + auth
+travel with it. Two users **can** share a compute node, but they cannot
+share the same port: whoever binds first wins, and the other gets refused.
+
+To handle this gracefully, the script:
+
+- **Detects port collisions before bootstrap.** Before `client` ssh's into
+  the node to start argo-proxy, it probes `127.0.0.1:<port>` on the node
+  and identifies the owner. If it's you, the script reuses; if it's someone
+  else, you're prompted:
+
+  ```
+  [warn] Port 64742 on compute-01 is in use by another user
+         (pid 12345, owned by 'alice'; you are 'aattia').
+
+         Two users can't share an argo-proxy on the same port; each needs
+         their own. Options:
+           [n] next free port  -- probe a range and use the first free one
+           [p] pick a port    -- I'll type a number (1024-65535)
+           [r] retry          -- maybe 'alice' just stopped; check again
+           [a] abort
+    Your choice [n/p/r/a, default=n]:
+  ```
+
+- **`--auto-port`** (or `ARGO_OPENCODE_AUTO_PORT=1`) skips the prompt and
+  auto-picks the next free port. After picking, the existing OpenCode
+  config-migration prompt fires so you can choose to make the new port
+  sticky (recommended) or use it for one run only.
+
+- **`--port-range LO-HI`** overrides the default search range (defaults to
+  `64742`-`64842`). Use it if your environment reserves a different range
+  for ad-hoc services.
+
+- **Local self-collision** (you re-run `client` while a tunnel is already
+  up from a previous invocation): the script detects the existing healthy
+  tunnel and reuses it instead of erroring, then proceeds to client setup.
+  This makes "I want to add another client to my running tunnel" a natural
+  workflow once Phase 3+ adds non-OpenCode clients.
 
 ## Tunnel monitoring and reconnect
 

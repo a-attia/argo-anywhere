@@ -3752,6 +3752,49 @@ cluster login node) can then point at the proxy via their own SSH -L
 forward, or via 'argo_opencode.sh client --node compute-XX' from those
 machines.
 
+SHARING A COMPUTE NODE WITH OTHER USERS
+---------------------------------------
+Each user runs their own argo-proxy on the picked compute node, listening
+on 127.0.0.1:<port>. Two users can share the node, but they cannot share
+a port: whoever binds first wins. Before bootstrap, 'client' (and
+'tunnel') probes the picked port on the node and identifies its owner:
+
+  * port is free                 -> proceed normally
+  * port is held by YOUR user    -> reuse the existing argo-proxy
+  * port is held by ANOTHER user -> prompt for collision resolution:
+        [n] next free port  -- probe a range, use the first free one
+        [p] pick a port    -- read a number (1024-65535)
+        [r] retry          -- maybe they just stopped; check again
+        [a] abort
+
+Non-interactive collision handling:
+  --auto-port  /  ARGO_OPENCODE_AUTO_PORT=1
+        skip the prompt; auto-pick the next free port. Triggers the
+        existing OpenCode-config migration prompt for confirmation.
+  --port-range LO-HI  /  ARGO_OPENCODE_PORT_RANGE=LO-HI
+        range for [n] and --auto-port. Default: 64742-64842.
+
+Local self-collision (re-running 'client' while a tunnel is already up):
+detected automatically; the existing healthy tunnel is reused, and the
+script proceeds straight to client setup. This makes 'I want to add
+another client to my running tunnel' a natural workflow once Phase 3+
+adds non-OpenCode clients.
+
+TUNNEL-ONLY MODE
+----------------
+'argo_opencode.sh tunnel' is the same as 'client' minus the OpenCode
+install + config. It just brings up the tunnel (or local proxy on a
+compute node) and blocks. Useful when you:
+
+  * manage your own client configs and don't want the script touching
+    ~/.config/opencode/config.json;
+  * want a tunnel running while configuring multiple clients in
+    other terminals;
+  * are prototyping with a custom HTTP client that needs the /v1
+    endpoint reachable.
+
+The tunnel-up message reminds you of the URL and bearer-token convention.
+
 PORT POLICY
 -----------
 The port is resolved at startup from these sources, in order:
@@ -3792,6 +3835,12 @@ Canonical (preferred):
   ARGO_OPENCODE_FORCE_REINSTALL=1 server mode wipes \$HOME/agovenv first
   ARGO_OPENCODE_KEEP_ORPHANS=1   update-models keeps ALL orphaned config models
   ARGO_OPENCODE_DROP_ORPHANS=1   update-models drops ALL orphaned config models
+  ARGO_OPENCODE_AUTO_PORT=1      on remote-port collision, auto-pick the next
+                                 free port instead of prompting (alternative
+                                 to --auto-port)
+  ARGO_OPENCODE_PORT_RANGE=LO-HI port range for --auto-port and the [n]ext-
+                                 free-port choice (default
+                                 PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100)
   ARGO_BOX_STYLE=ascii|unicode   override the box-drawing heuristic
 
 Legacy (still honored, prints a one-time deprecation warning):
