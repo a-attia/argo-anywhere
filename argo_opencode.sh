@@ -549,6 +549,78 @@ mfa_enabled() {
   return 0
 }
 
+# ----------------------------------------------------------------------------
+# SSH attempt tracker
+# ----------------------------------------------------------------------------
+# ANL/CELS networks are monitored by CSPO (Cyber Security Program Office),
+# which blocks IPs that produce too many failed SSH authentication attempts
+# in a short window. On a shared compute node (where many users share the
+# same outbound IP) one user with a broken SSH agent can get the WHOLE node
+# IP blocked, locking out everyone else. Common triggers from this script:
+#   * SSH agent went away mid-session (laptop closed, ssh-add -D, expired
+#     Kerberos ticket)
+#   * --user typed wrong (every retry will fail until corrected)
+#   * the reconnect loop hammering on a flapping network
+#
+# Defense: count consecutive failures; after SSH_FAIL_THRESHOLD, lock out
+# all further SSH attempts in this script invocation and tell the user how
+# to recover. The lock resets on script restart -- by design, the user has
+# to take an action (verify their SSH works manually) before re-running.
+#
+# Scope of tracking: only ssh_reachable and ssh_mux_open count, because
+# they are the unambiguous-failure-detection sites (ssh ... true returns
+# non-zero = failed auth or connect). The tunnel respawn paths in
+# open_tunnel_and_monitor have their own burst-backoff (RECONN_BURST_LIMIT)
+# and the common reconnect path does NOT re-auth (the multiplex master
+# holds the connection), so we don't double-count there.
+SSH_FAIL_THRESHOLD=3
+_SSH_FAIL_COUNT=0
+_SSH_LOCKED=0
+
+# Pre-attempt gate: callers should invoke this before running ssh and skip
+# (return failure) if the lock is set. Returns 0 = ok to attempt, 1 = locked.
+ssh_attempt_pre() {
+  if [ "$_SSH_LOCKED" -eq 1 ]; then
+    return 1
+  fi
+  return 0
+}
+
+# Mark the most recent ssh attempt as successful. Resets the counter so that
+# transient failures (one bad attempt followed by a recovery) don't trip the
+# lock.
+ssh_attempt_ok() {
+  _SSH_FAIL_COUNT=0
+}
+
+# Mark the most recent ssh attempt as a failure. Increments the counter and,
+# if we've now hit the threshold, sets the lock and prints the recovery
+# instructions ONCE (subsequent locked-out attempts are silent at the
+# tracker level; the call sites can still warn if they want).
+ssh_attempt_fail() {
+  _SSH_FAIL_COUNT=$((_SSH_FAIL_COUNT + 1))
+  if [ "$_SSH_FAIL_COUNT" -ge "$SSH_FAIL_THRESHOLD" ] && [ "$_SSH_LOCKED" -ne 1 ]; then
+    _SSH_LOCKED=1
+    err "SSH has failed ${_SSH_FAIL_COUNT} consecutive times."
+    err "Disabling further SSH attempts to prevent CSPO from blocking your IP"
+    err "  (and locking out everyone else sharing this compute node)."
+    err ""
+    err "Common causes:"
+    err "  * Closed laptop while SSH agent forwarding was active (kills the forwarded key)"
+    err "  * Expired Kerberos tickets"
+    err "  * SSH key removed from the agent ('ssh-add -D' earlier)"
+    err "  * Wrong username (--user / ARGO_OPENCODE_USER mismatch)"
+    err ""
+    err "Recovery:"
+    err "  1. Verify your SSH works manually first:"
+    err "       ssh -o ConnectTimeout=5 ${ARGO_OPENCODE_USER:-<user>}@${ANL_JUMP} true"
+    err "     (one Duo prompt is fine; what we want is a clean exit.)"
+    err "  2. If that fails, fix your auth (ssh-add, reconnect agent forwarding,"
+    err "     renew tickets, correct the username, etc.)."
+    err "  3. Re-run $(basename "$0"). The lock resets on restart."
+  fi
+}
+
 # ssh_mux_args : prints the ControlMaster options to splice into ssh/scp.
 # Empty (no args) when MFA mode is off, so legacy behavior is unaffected.
 #
@@ -608,19 +680,33 @@ ssh_args() {
 # (no BatchMode) with a generous timeout; when MFA is off, fall back to the
 # old BatchMode test.
 # Usage: ssh_reachable <user> <host>
+#
+# Tracked by the SSH attempt tracker -- a streak of failures here is the
+# most likely path to a CSPO IP block (broken agent / wrong username).
 ssh_reachable() {
   local user="$1" host="$2"
+  ssh_attempt_pre || return 1
+  local rc=0
   if mfa_enabled; then
     # No BatchMode -- this WILL prompt Duo if no master socket exists yet.
     # ConnectTimeout is per network attempt, not per Duo prompt.
     # Pass $host so ssh_args drops '-J' when host == ANL_JUMP (loop guard).
     # shellcheck disable=SC2046
     ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
-        $(ssh_args "$user" "$host") "${user}@${host}" true 2>/dev/null
+        $(ssh_args "$user" "$host") "${user}@${host}" true 2>/dev/null \
+      || rc=$?
   else
     # shellcheck disable=SC2046
     ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
-        $(ssh_args "$user" "$host") "${user}@${host}" true 2>/dev/null
+        $(ssh_args "$user" "$host") "${user}@${host}" true 2>/dev/null \
+      || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    ssh_attempt_ok
+    return 0
+  else
+    ssh_attempt_fail
+    return "$rc"
   fi
 }
 
@@ -629,16 +715,25 @@ ssh_reachable() {
 # multiple commands so the user gets one prompt up front rather than at a
 # random later moment.
 # Usage: ssh_mux_open <user> <host>
+#
+# Tracked by the SSH attempt tracker (see ssh_attempt_pre/ok/fail). If the
+# tracker is locked, refuse to make the attempt and die with a clear message
+# so the user understands why no Duo prompt fired.
 ssh_mux_open() {
   local user="$1" host="$2"
   mfa_enabled || return 0
+  if ! ssh_attempt_pre; then
+    die "Refusing to open SSH master: too many recent SSH failures (lock active). See above for recovery instructions."
+  fi
   log "Opening multiplexed SSH master to ${user}@${host} (Duo prompt expected once)..."
   # Pass $host so ssh_args knows to drop '-J' when host == ANL_JUMP (loop).
   # shellcheck disable=SC2046
   if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
        $(ssh_args "$user" "$host") "${user}@${host}" true; then
+    ssh_attempt_ok
     ok "  master ready (subsequent SSH calls will reuse this connection)"
   else
+    ssh_attempt_fail
     die "Failed to open multiplexed SSH master to ${user}@${host}."
   fi
 }
@@ -897,11 +992,18 @@ ssh_preflight() {
   fi
 
   log "Testing SSH access to ${user}@${target} (BatchMode, 5s timeout)..."
+  # Tracked by the SSH attempt tracker so a wrong --user / missing key
+  # doesn't get retried into a CSPO IP block. See ssh_attempt_pre/ok/fail.
+  if ! ssh_attempt_pre; then
+    die "Refusing to attempt SSH preflight: too many recent SSH failures (lock active). See above for recovery instructions."
+  fi
   if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
        "${user}@${target}" true 2>/dev/null; then
+    ssh_attempt_ok
     ok "Passwordless SSH to ${target} works."
     return
   fi
+  ssh_attempt_fail
   err "Cannot reach ${user}@${target} without a password."
   cat >&2 <<EOF
 

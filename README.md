@@ -150,6 +150,37 @@ attempts a silent reconnect (no Duo prompt). If reconnects fire too rapidly
 the script can't paper over), it pauses for ~30 s before retrying so it
 doesn't spam the master, your terminal, or system notifications.
 
+## SSH failure protection
+
+ANL/CELS networks are monitored for repeated failed SSH authentications;
+too many failures from one IP trigger a CSPO (Cyber Security) block on
+that IP. On a shared compute node where many users share the same outbound
+IP, one user's broken SSH agent can lock out everyone.
+
+The script defends against this with a simple consecutive-failure counter:
+after **3 consecutive SSH authentication failures**, all further SSH
+attempts in this run are refused, and you'll see a recovery message:
+
+```
+[err ] SSH has failed 3 consecutive times.
+[err ] Disabling further SSH attempts to prevent CSPO from blocking your IP
+[err ]   (and locking out everyone else sharing this compute node).
+[err ]
+[err ] Common causes:
+[err ]   * Closed laptop while SSH agent forwarding was active
+[err ]   * Expired Kerberos tickets
+[err ]   * SSH key removed from the agent ('ssh-add -D' earlier)
+[err ]   * Wrong username (--user / ARGO_OPENCODE_USER mismatch)
+```
+
+Recovery: verify SSH works manually (`ssh <user>@logins.cels.anl.gov true`),
+fix whatever's broken, then re-run the script. The lock resets on restart
+by design — you have to take an action before re-trying so we don't
+silently re-trigger the same failure pattern.
+
+The counter resets on any successful SSH attempt; transient single failures
+followed by a recovery don't accumulate.
+
 ## Port policy
 
 The OpenCode config's `baseURL` is the source of truth. The default port is
