@@ -135,6 +135,48 @@ Use `if/then/fi` and write multi-line remote scripts via temp files
 macOS default. No bash-4 features (no `${var,,}`, no `mapfile`, no
 `declare -A`, no `printf -v` with format reuse, etc.).
 
+### Language policy: bash + inline Python heredocs
+
+The script is bash. When bash is genuinely awkward for a piece of work
+(JSON/YAML/TOML config writing, deep-merging across scopes, anything
+non-trivial with structured data), the standard tool is a Python heredoc
+invoked from bash, *not* a separate `.py` file.
+
+The reference example is `write_argoproxy_config` (around line 1390): bash
+builds the surrounding flow, a `python3 - <<'PYEOF' ... PYEOF` invocation
+handles the YAML merge, args cross the boundary via `sys.argv`, errors
+surface as exit codes the bash side translates to user-facing warnings.
+
+Why this rule and not "rewrite to Python" or "split into multiple files":
+
+- **Single-file distribution is a load-bearing UX property.** Users
+  `curl one .sh -o argo_opencode.sh && bash it`. The same single file is
+  `scp`'d to the compute node and re-exec'd as `server`. Splitting into
+  multiple files (a `lib/*.py` directory, even a single sibling `.py`)
+  breaks both flows.
+- **A full Python rewrite would lose that UX win**, and the work isn't
+  free: the SSH multiplexing, the screen/tmux/nohup launcher, the box
+  drawing, the bash 3.2 quirk handling — all of it would need a
+  faithful re-port with subtle behavior change risk.
+- **Heredocs cap the complexity at "small Python program."** If a
+  heredoc grows past ~50 lines or needs non-stdlib dependencies beyond
+  PyYAML (which is already in the server-side venv), that's a signal to
+  re-evaluate this policy, not to keep growing the heredoc.
+
+Trade-offs we're accepting:
+- No syntax highlighting / linting / unit testing of the Python parts.
+  Mitigate by keeping each heredoc short and self-contained.
+- Variable interpolation across the boundary is by command-line args
+  (with `<<'PYEOF'` to suppress bash interpolation inside the heredoc).
+  This is verbose for many args but explicit, which we want.
+- Python errors surface as exit codes the bash side has to interpret.
+  Use small integer codes (2, 3, 4) consistently within each heredoc;
+  document them in a comment immediately above the heredoc.
+
+If we ever feel the heredoc pain enough to reconsider, the heredocs
+themselves are pre-factored extraction points — moving them to a real
+`.py` file is a mechanical refactor, not a redesign.
+
 ### `clean` subcommand risk tiers
 
 Three risk tiers:
