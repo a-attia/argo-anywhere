@@ -177,6 +177,64 @@ If we ever feel the heredoc pain enough to reconsider, the heredocs
 themselves are pre-factored extraction points — moving them to a real
 `.py` file is a mechanical refactor, not a redesign.
 
+### Multi-client distribution: one file, multiple names
+
+The script supports several AI clients (OpenCode, Claude Code, aider,
+Cursor, generic OpenAI-compatible), but there is only **one** real
+`.sh` file in the repo. Per-client filenames (`argo_claudecode.sh`,
+`argo_aider.sh`, `argo_cursor.sh`, `argo_anywhere.sh`) are **symlinks**
+to `argo_opencode.sh`. GitHub serves symlinks correctly via raw URLs
+(returns the linked content, not a redirect), so users can:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_claudecode.sh -o argo_claudecode.sh
+bash argo_claudecode.sh    # picks Claude Code defaults
+```
+
+without ever knowing the file behind the name is shared.
+
+The script inspects `$0` (its invocation name, basename only) at
+startup and picks a sensible default client per name. Subcommands
+(`setup-claudecode`, `setup-opencode`, `tunnel`, ...) still work for
+power users who want explicit control regardless of the invocation
+name.
+
+Why this shape (and why NOT truly separate per-client scripts):
+
+- **Per-client UX preserved.** Discoverability via filename, sensible
+  defaults per name, per-client filenames in `ps`/log output.
+- **Zero code duplication.** The transport layer (~2500 lines: SSH
+  multiplexing, tunnel monitoring, server bootstrap, state, status,
+  clean) is the same across clients. Truly-separate scripts would
+  require N copies of all of it; one bug fix = N file edits.
+- **Single-file distribution preserved.** Each per-client name is
+  still a single curl. No tarballs, no shared `argo_lib.sh`, no
+  multi-file `scp` to compute nodes.
+- **One source of truth.** Edit `argo_opencode.sh`; every name
+  updates automatically. No drift between copies.
+
+Costs accepted (the "20%" we lose vs truly separate scripts):
+
+- A user who only uses one client still receives a file containing
+  every client's setup code. Harmless dead code from their POV; if
+  they `cat` the script before running, they see ~4500 lines instead
+  of ~1500.
+- Versioning is repo-wide. We can't say "Claude Code support is v2.3
+  stable, OpenCode is v2.0 still in beta" — they're the same file at
+  the same tag.
+
+Maintenance rules:
+
+- The real file MUST be `argo_opencode.sh` (back-compat with the
+  pre-rename era).
+- Symlinks are normal `ln -s` in the repo; commit them as such.
+  `git ls-files --stage` shows symlinks with mode `120000`.
+- New per-client name = new symlink + add an arm to the
+  invocation-name detection block at the top of `main()`.
+- README's "Quick start" gets a per-client row pointing at the right
+  raw URL. Each row's `curl -fsSL …/<name>.sh -o <name>.sh` works
+  independently.
+
 ### `clean` subcommand risk tiers
 
 Three risk tiers:
