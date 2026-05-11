@@ -321,7 +321,7 @@ print_summary_box() {
 }
 
 # ============================================================================
-# SECTION: 5. PLATFORM HELPERS (detect_os, notify_user)
+# SECTION: 5. PLATFORM HELPERS (detect_os, notify_user, this_host_*)
 # ============================================================================
 detect_os() {
   case "$(uname -s)" in
@@ -329,6 +329,69 @@ detect_os() {
     Linux)  echo "linux" ;;
     *)      echo "unknown" ;;
   esac
+}
+
+# this_host_fqdn: best-effort fully-qualified hostname of the local machine.
+# Tries `hostname -f` first (Linux), falls back to `hostname` (macOS doesn't
+# always return an FQDN from `hostname -f`). Used by on_anl_compute_node and
+# host_is_target to decide if we're "already on the node we're trying to
+# reach." Lower-cases the result so comparisons are case-insensitive.
+this_host_fqdn() {
+  local h=""
+  h="$(hostname -f 2>/dev/null || true)"
+  [ -n "$h" ] || h="$(hostname 2>/dev/null || true)"
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
+# on_anl_compute_node: prints 'yes' if the local host appears to be one of
+# our compute nodes, 'no' otherwise. Two independent signals -- either is
+# sufficient:
+#   1. our FQDN matches a name in ANL_NODES (the user's configured list)
+#   2. our FQDN ends in '.cels.anl.gov' (broader catch for nodes the user
+#      didn't explicitly add to ANL_NODES)
+# Cached in a global the first time it's computed because hostname lookups
+# can be slow on stalled-DNS systems.
+_ON_ANL_NODE_CACHE=""
+on_anl_compute_node() {
+  if [ -n "$_ON_ANL_NODE_CACHE" ]; then
+    printf '%s' "$_ON_ANL_NODE_CACHE"; return
+  fi
+  local me; me="$(this_host_fqdn)"
+  local ans="no"
+  if [ -n "$me" ]; then
+    local n
+    for n in "${ANL_NODES[@]:-}"; do
+      if [ "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" = "$me" ]; then
+        ans="yes"; break
+      fi
+    done
+    if [ "$ans" = "no" ]; then
+      case "$me" in
+        *.cels.anl.gov) ans="yes" ;;
+      esac
+    fi
+  fi
+  _ON_ANL_NODE_CACHE="$ans"
+  printf '%s' "$ans"
+}
+
+# host_is_target <hostname>: prints 'yes' if <hostname> matches our local
+# FQDN (or the short-name form). Used to detect "the node the user picked
+# is the node we're already on" -- in which case skipping the SSH tunnel
+# and pointing the client straight at 127.0.0.1:PORT is the right move.
+host_is_target() {
+  local target; target="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  local me; me="$(this_host_fqdn)"
+  [ -n "$me" ] || return 1
+  if [ "$me" = "$target" ]; then return 0; fi
+  # Tolerate short-name vs FQDN mismatch in either direction.
+  case "$me" in
+    "${target}".*) return 0 ;;
+  esac
+  case "$target" in
+    "${me}".*) return 0 ;;
+  esac
+  return 1
 }
 
 notify_user() {
@@ -1352,6 +1415,30 @@ mode_client() {
   log "Using ANL username: ${ANL_USERNAME}"
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
+  # If we appear to be running ON a compute node already, the script's
+  # default assumptions (SSH out via the public jump host, MFA prompt,
+  # tunnel back from a laptop) are wrong. Two adjustments, applied as
+  # opt-out defaults so power users can still override:
+  #   * --no-jump auto-on: from inside the network the jump host is an
+  #     unnecessary extra hop (and may not even be reachable from a node).
+  #   * --no-mfa auto-on:  Duo doesn't fire for intra-site SSH; switching
+  #     off MFA mode skips the multiplex setup we'd never benefit from.
+  # The user can still pass --no-jump/--no-mfa explicitly with the same
+  # effect, or pass --probe-nodes etc. to opt back into the slow path.
+  # The tunnel-to-self short-circuit (sub-case (a)) is handled AFTER node
+  # selection, below.
+  if [ "$(on_anl_compute_node)" = "yes" ]; then
+    if [ -z "${ARGO_OPENCODE_NO_JUMP:-}" ]; then
+      log "Detected ANL compute node ($(this_host_fqdn)); defaulting to --no-jump."
+      log "  (Set ARGO_OPENCODE_NO_JUMP=0 explicitly to keep the jump host.)"
+      ARGO_OPENCODE_NO_JUMP=1
+    fi
+    if [ -z "${ARGO_OPENCODE_NO_MFA:-}" ]; then
+      log "  Defaulting to --no-mfa (intra-site SSH does not trigger Duo)."
+      ARGO_OPENCODE_NO_MFA=1
+    fi
+  fi
+
   # If --port (or ARGO_OPENCODE_PORT) was used and disagrees with config.json,
   # ask the user before mutating their config. Without an explicit override,
   # we already read the port FROM the config, so by definition no mismatch.
@@ -1419,6 +1506,39 @@ EOF
     log "  this run's tunnel is on port ${PROXY_PORT}."
   else
     handle_config_file "${HOME}/.config/opencode/config.json" "OpenCode config" write_opencode_config
+  fi
+
+  # If the picked node IS the host we're already running on, skip the
+  # SSH bootstrap and the tunnel entirely -- they would either fail
+  # (ssh tunnel-to-self collides with the local argo-proxy on the same
+  # port) or be wasteful (an SSH multiplex master to localhost with a
+  # forward to localhost adds latency without functional benefit).
+  # Just run the server-mode bootstrap inline (idempotent: starts
+  # argo-proxy under screen/tmux/nohup if it isn't already up, reuses
+  # any existing healthy instance owned by this user) and verify the
+  # local proxy is reachable before handing off to the user.
+  if host_is_target "$node"; then
+    log "Selected node is this host ($(this_host_fqdn)); skipping SSH tunnel."
+    log "  argo-proxy will be started here directly; no SSH bootstrap needed."
+    # Re-invoke ourselves in server mode (in-process) so the proxy is up.
+    # mode_server is idempotent and uses the same env-var contract as the
+    # remote bootstrap (ARGO_OPENCODE_USER, ARGO_OPENCODE_PORT) which we
+    # set above, so this is the same code path the remote node would run.
+    ARGO_OPENCODE_USER="$ANL_USERNAME" ARGO_OPENCODE_PORT="$PROXY_PORT" mode_server
+    # Verify /health one more time so the user gets a clear final OK.
+    if curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
+      ok "argo-proxy is live at http://localhost:${PROXY_PORT}/v1 (no tunnel needed; this host runs the proxy)."
+    else
+      die "argo-proxy did not become reachable on http://localhost:${PROXY_PORT}/health after server bootstrap."
+    fi
+    gather_summary
+    render_summary
+    log "OpenCode is installed and configured for this proxy.  Run: opencode"
+    log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
+    log "  with Authorization: Bearer ${ANL_USERNAME}"
+    log "(no foreground tunnel to keep alive; argo-proxy stays running under"
+    log "  screen/tmux/nohup; use '$(basename "$0") clean' to stop everything.)"
+    return 0
   fi
 
   remote_bootstrap "$ANL_USERNAME" "$node"
@@ -2812,12 +2932,21 @@ Usage: $(basename "$0") [SUBCOMMAND] [--user NAME] [--node HOST] [--port N]
                           [--purge | --purge-backups]
 
 Subcommands:
-  client          (default) Laptop-side: install OpenCode if needed, write the
-                  OpenCode config, push this script to a chosen ANL compute
-                  node, start argo-proxy there inside screen/tmux, then open
-                  the SSH tunnel and monitor its health in the foreground.
-  server          Runs on the ANL compute node. Auto-invoked by 'client'.
-                  Requires ARGO_OPENCODE_USER and ARGO_OPENCODE_PORT in env.
+  client          (default) Install OpenCode if needed, write the OpenCode
+                  config, push this script to a chosen ANL compute node,
+                  start argo-proxy there inside screen/tmux, then open the
+                  SSH tunnel and monitor its health in the foreground.
+                  If the script detects it is itself running ON an ANL
+                  compute node, --no-jump and --no-mfa are auto-defaulted
+                  (intra-site SSH doesn't need either); if the picked node
+                  is the local host, the SSH tunnel is skipped entirely
+                  and the local argo-proxy is used directly.
+  server          Run argo-proxy here. Auto-invoked by 'client' over SSH on
+                  the picked compute node, but can also be run standalone
+                  from a logged-in shell on a node ('I want to leave a
+                  proxy running on this node for any client to reach').
+                  Requires ARGO_OPENCODE_USER and ARGO_OPENCODE_PORT in env;
+                  these have sensible defaults if invoked from 'client'.
   status          Show local tunnel state and probe the proxy via localhost.
                   Ends with a summary box (ALL GREEN / DEGRADED / FAIL) plus
                   available/configured/orphaned model counts.
@@ -3032,6 +3161,43 @@ To inspect/close sockets manually:
   ls -l ~/.ssh/sockets/argo-opencode-*
   ssh -O exit -o ControlPath=~/.ssh/sockets/argo-opencode-<user>-<host>-<port> dummy
 'clean' also offers to close all our sockets.
+
+RUNNING ON A COMPUTE NODE
+-------------------------
+The 'client' subcommand assumes by default that you are running it from a
+laptop OUTSIDE the ANL network: an SSH tunnel is opened from the laptop
+to a chosen compute node, with the jump host doing the public-internet
+hop and Duo authenticating you. None of that is needed when the script
+itself is already running on a compute node, so the script auto-detects
+that case (FQDN matches a name in ANL_NODES, or ends in .cels.anl.gov)
+and adjusts:
+
+  * --no-jump on by default. From inside the network the jump host is
+    an extra hop you don't need (and may not even be reachable from a
+    compute node). Override with ARGO_OPENCODE_NO_JUMP=0 if you have a
+    setup that genuinely requires the jump.
+  * --no-mfa on by default. Intra-site SSH does not trigger Duo, so
+    the multiplex master setup we'd normally do is wasted effort.
+    Override with ARGO_OPENCODE_NO_MFA=0 if your setup differs.
+  * If the picked node IS the host you are running on (the common
+    "I'm on compute-01 and I want to use OpenCode here" case), the
+    SSH tunnel is skipped entirely. The script invokes its own server
+    bootstrap inline so argo-proxy is up under screen/tmux/nohup, then
+    points the local OpenCode config at http://localhost:<port>/v1.
+    No foreground tunnel runs; argo-proxy keeps serving even after
+    'client' returns. Use 'clean' to stop everything.
+
+If you only want argo-proxy running on a node (no client setup, no
+tunnel), 'server' is the right subcommand:
+
+  ssh <user>@compute-XX.cels.anl.gov
+  bash argo_opencode.sh server   # starts argo-proxy under screen, returns
+
+This is the 'I want to leave a proxy on this node for any of my
+machines/clients to reach' workflow. Other clients (your laptop, a
+cluster login node) can then point at the proxy via their own SSH -L
+forward, or via 'argo_opencode.sh client --node compute-XX' from those
+machines.
 
 PORT POLICY
 -----------

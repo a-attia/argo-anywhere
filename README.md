@@ -105,6 +105,36 @@ not per SSH call. The mux master is opened against the chosen compute node
 
 To turn this off for non-Duo hosts: `--no-mfa` or `ARGO_OPENCODE_NO_MFA=1`.
 
+## Running on a compute node
+
+The default `client` flow assumes you are running the script from a laptop
+*outside* the ANL network. If the script detects it is itself running on
+an ANL compute node (the FQDN matches a name in `ANL_NODES` or ends in
+`.cels.anl.gov`), it adjusts:
+
+- `--no-jump` and `--no-mfa` are auto-defaulted on (intra-site SSH needs
+  neither).
+- If the picked node is the local host, the SSH tunnel is **skipped
+  entirely**: `client` invokes the server-mode bootstrap inline and the
+  local OpenCode config is pointed at `http://localhost:<port>/v1`
+  directly. argo-proxy keeps running under `screen`/`tmux`/`nohup`
+  after `client` returns; use `clean` to stop it.
+
+Override either default with `ARGO_OPENCODE_NO_JUMP=0` or
+`ARGO_OPENCODE_NO_MFA=0` if your setup needs the slow path.
+
+If you only want to leave argo-proxy running on a node (no client
+install, no tunnel), use `server` directly:
+
+```sh
+ssh <user>@compute-XX.cels.anl.gov
+bash argo_opencode.sh server   # starts argo-proxy under screen, returns
+```
+
+Other clients on other machines can then point at this proxy via their
+own SSH `-L` forward, or via `argo_opencode.sh client --node compute-XX`
+from those machines.
+
 ## Tunnel monitoring and reconnect
 
 While `client` is in the foreground, a background loop polls
