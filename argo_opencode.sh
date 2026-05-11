@@ -1272,6 +1272,8 @@ EOF
     printf '    %d) %s%s\n' "$i" "$node" "$marker" >&2
     i=$((i+1))
   done
+  printf '    %s(or type a hostname not in this list to use it directly)%s\n' \
+    "$C_DIM" "$C_OFF" >&2
   if [ "${PROBE_NODES:-0}" != 1 ]; then
     printf '    %s(reachability NOT probed; pass --probe-nodes to test each first)%s\n' \
       "$C_DIM" "$C_OFF" >&2
@@ -1279,13 +1281,39 @@ EOF
 
   local picked
   while :; do
-    local choice; choice="$(ask "Pick a node [1-${#working[@]}, Enter = default]:" "")"
+    local choice
+    choice="$(ask "Pick a node [1-${#working[@]}, hostname, or Enter for default]:" "")"
     if [ -z "$choice" ]; then
+      # Default
       picked="$default"; break
-    elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#working[@]}" ]; then
-      picked="${working[$((choice-1))]}"; break
+    elif [[ "$choice" =~ ^[0-9]+$ ]]; then
+      # Numeric pick: must be in range
+      if [ "$choice" -ge 1 ] && [ "$choice" -le "${#working[@]}" ]; then
+        picked="${working[$((choice-1))]}"; break
+      else
+        warn "Number out of range; pick 1-${#working[@]} or type a hostname."
+        continue
+      fi
+    elif [[ "$choice" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+      # Looks like a hostname. Same handling as --node: warn if not in
+      # ANL_NODES, verify reachability, use it. Equivalent to the
+      # --node-flag path so the user gets the same UX whether they
+      # provided the host on the CLI or typed it interactively.
+      local in_list=0 n
+      for n in "${ANL_NODES[@]:-}"; do
+        [ "$n" = "$choice" ] && in_list=1 && break
+      done
+      [ "$in_list" -eq 1 ] || warn "Typed node '${choice}' is not in ANL_NODES (proceeding anyway)."
+      log "Verifying reachability of '${choice}' $(jump_descr)..."
+      if ssh_reachable "$user" "$choice"; then
+        ok "  reachable: ${choice}"
+        picked="$choice"; break
+      else
+        warn "Could not reach '${choice}' $(jump_descr) as ${user}; pick again."
+        continue
+      fi
     else
-      warn "Invalid choice."
+      warn "Invalid choice. Type a number (1-${#working[@]}), a hostname, or hit Enter."
     fi
   done
 
