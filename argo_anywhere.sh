@@ -197,6 +197,14 @@ PROXY_PORT=""                      # populated by resolve_port() in main()
 VENV_PATH='$HOME/argovenv'         # path on the ANL node (single quotes intentional;
                                    # $HOME is expanded server-side via `eval echo`)
 SCREEN_SESSION="argovproxy"
+# v2.0 renamed agovenv -> argovenv and agovproxy -> argovproxy for naming
+# consistency (see docs/AUDIT_2026-05-12.md, revised D4 inventory). The
+# legacy names below are detected on compute nodes by mode_server (warns
+# the user) and by `clean` (enumerates both for cleanup) so anyone who
+# upgraded from a v1.x install still gets a clean migration path.
+# shellcheck disable=SC2016
+LEGACY_VENV_PATH='$HOME/agovenv'
+LEGACY_SCREEN_SESSION="agovproxy"
 HEALTH_INTERVAL=15                 # seconds between health probes (client-side)
 HEALTH_FAIL_THRESHOLD=3            # consecutive failures before alerting
 
@@ -3414,6 +3422,18 @@ mode_server() {
 
   # 2) venv: optionally wipe, then create or validate.
   local venv; venv="$(eval echo "$VENV_PATH")"
+  local legacy_venv; legacy_venv="$(eval echo "$LEGACY_VENV_PATH")"
+
+  # Legacy v1.x detection: warn if the pre-rename venv ($HOME/agovenv) is
+  # still on disk. Don't auto-migrate -- the user may have a working
+  # argo-proxy in there serving traffic. We just log and let `clean`
+  # remove it (or the user can rm -rf manually).
+  if [ -d "$legacy_venv" ] && [ "$legacy_venv" != "$venv" ]; then
+    warn "Found legacy v1.x venv at ${legacy_venv} (pre-rename name)."
+    warn "  v2.0 uses ${venv}; the old one is unused but still on disk."
+    warn "  To reclaim disk space:  rm -rf ${legacy_venv}"
+    warn "  ('clean' also handles this; this WARN fires once per server bootstrap.)"
+  fi
 
   if [ -n "${ARGO_ANYWHERE_FORCE_REINSTALL:-}" ] && [ -d "$venv" ]; then
     warn "ARGO_ANYWHERE_FORCE_REINSTALL set; removing existing venv at ${venv}..."
@@ -3595,9 +3615,37 @@ mode_server() {
     fi
   fi
 
-  # Past the multi-port check. If a session still exists, treat it as
-  # housekeeping (the process inside it died, e.g. from a previous
-  # 'stop') and clean up calmly before starting fresh.
+  # Legacy v1.x screen/tmux session detection: warn if the pre-rename
+  # session name (agovproxy) is still around. Could be a stale empty
+  # shell OR could still be holding a live argo-proxy from a v1.x run.
+  # Either way, the user needs to know -- we don't auto-kill it because
+  # killing a live argo-proxy would strand any clients still pointed at
+  # it. (`clean` handles cleanup for both names.)
+  case "$launcher" in
+    screen)
+      if screen -ls 2>/dev/null | grep -q "\.${LEGACY_SCREEN_SESSION}\b"; then
+        warn "Found legacy v1.x screen session '${LEGACY_SCREEN_SESSION}' (pre-rename name)."
+        warn "  v2.0 uses '${SCREEN_SESSION}'; the legacy session is NOT touched."
+        warn "  If you want to clean it up:"
+        warn "    screen -S ${LEGACY_SCREEN_SESSION} -X quit"
+        warn "  ('clean' also handles this.)"
+      fi
+      ;;
+    tmux)
+      if tmux has-session -t "${LEGACY_SCREEN_SESSION}" 2>/dev/null; then
+        warn "Found legacy v1.x tmux session '${LEGACY_SCREEN_SESSION}' (pre-rename name)."
+        warn "  v2.0 uses '${SCREEN_SESSION}'; the legacy session is NOT touched."
+        warn "  If you want to clean it up:"
+        warn "    tmux kill-session -t ${LEGACY_SCREEN_SESSION}"
+        warn "  ('clean' also handles this.)"
+      fi
+      ;;
+  esac
+
+  # Past the multi-port + legacy-session checks. If a session by our
+  # CURRENT name still exists, treat it as housekeeping (the process
+  # inside it died, e.g. from a previous 'stop') and clean up calmly
+  # before starting fresh.
   case "$launcher" in
     screen)
       if screen -ls 2>/dev/null | grep -q "\.${SCREEN_SESSION}\b"; then
@@ -4764,32 +4812,46 @@ EOF
     trap "rm -f '${remote_script_file}'" RETURN
     cat > "$remote_script_file" <<'EOS'
 set -u
-: "${SCREEN_SESSION:?}" "${REMOTE_SELF:?}" "${REMOTE_LOG:?}" "${RC:?}" "${DRY:?}"
+: "${SCREEN_SESSION:?}" "${LEGACY_SCREEN_SESSION:?}" \
+  "${REMOTE_SELF:?}" "${REMOTE_LOG:?}" \
+  "${LEGACY_REMOTE_SELF:?}" "${LEGACY_REMOTE_LOG:?}" \
+  "${RC:?}" "${DRY:?}"
 
 _say() { printf '%s\n' "$*" >&2; }
 _rm()  { [ "$DRY" = 1 ] && _say "[dry-run] would remove: $1" || { rm -rf -- "$1" && _say "removed: $1"; }; }
 
-# Kill the screen/tmux session
-if command -v screen >/dev/null 2>&1 && screen -ls 2>/dev/null | grep -q "\.${SCREEN_SESSION}\b"; then
-  if [ "$DRY" = 1 ]; then
-    _say "[dry-run] would kill screen session: $SCREEN_SESSION"
-  else
-    screen -S "$SCREEN_SESSION" -X quit && _say "killed screen session: $SCREEN_SESSION" || _say "screen quit returned non-zero"
+# Kill the screen/tmux session(s). v2.0 enumerates BOTH the current
+# session name AND the pre-rename name (legacy v1.x users get a clean
+# migration; current-name-only users see no extra output because the
+# legacy match is silently skipped when absent).
+_kill_screen() {
+  local sname="$1" tag="$2"
+  if command -v screen >/dev/null 2>&1 && screen -ls 2>/dev/null | grep -q "\.${sname}\b"; then
+    if [ "$DRY" = 1 ]; then
+      _say "[dry-run] would kill ${tag}screen session: $sname"
+    else
+      screen -S "$sname" -X quit && _say "killed ${tag}screen session: $sname" || _say "screen quit returned non-zero (${sname})"
+    fi
   fi
-fi
-if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$SCREEN_SESSION" 2>/dev/null; then
-  if [ "$DRY" = 1 ]; then
-    _say "[dry-run] would kill tmux session: $SCREEN_SESSION"
-  else
-    tmux kill-session -t "$SCREEN_SESSION" && _say "killed tmux session: $SCREEN_SESSION" || true
+  if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$sname" 2>/dev/null; then
+    if [ "$DRY" = 1 ]; then
+      _say "[dry-run] would kill ${tag}tmux session: $sname"
+    else
+      tmux kill-session -t "$sname" && _say "killed ${tag}tmux session: $sname" || true
+    fi
   fi
-fi
+}
+_kill_screen "$SCREEN_SESSION" ""
+_kill_screen "$LEGACY_SCREEN_SESSION" "(legacy v1.x) "
 
-# Safe files
-[ -f "$HOME/$REMOTE_SELF" ] && _rm "$HOME/$REMOTE_SELF"
-[ -f "$HOME/$REMOTE_LOG"  ] && _rm "$HOME/$REMOTE_LOG"
+# Safe files (current names + pre-rename names; both enumerated for v1.x users).
+[ -f "$HOME/$REMOTE_SELF"        ] && _rm "$HOME/$REMOTE_SELF"
+[ -f "$HOME/$REMOTE_LOG"         ] && _rm "$HOME/$REMOTE_LOG"
+[ -f "$HOME/$LEGACY_REMOTE_SELF" ] && _rm "$HOME/$LEGACY_REMOTE_SELF"
+[ -f "$HOME/$LEGACY_REMOTE_LOG"  ] && _rm "$HOME/$LEGACY_REMOTE_LOG"
 [ -f "$HOME/argoproxy.out" ] && _rm "$HOME/argoproxy.out"
 [ -d "$HOME/argovenv"      ] && _rm "$HOME/argovenv"
+[ -d "$HOME/agovenv"       ] && _rm "$HOME/agovenv"   # legacy v1.x venv
 
 # Risky: argo-proxy config
 case "$RC" in
@@ -4811,8 +4873,14 @@ esac
 EOS
 
     # Forward the values we need via env on the ssh command line.
+    # LEGACY_SCREEN_SESSION + LEGACY_REMOTE_SELF + LEGACY_REMOTE_LOG let
+    # the remote cleanup script handle pre-rename v1.x state too (it's a
+    # no-op when the legacy items aren't present).
     local remote_env
-    remote_env="SCREEN_SESSION='${SCREEN_SESSION}' REMOTE_SELF='${REMOTE_SELF}' REMOTE_LOG='${REMOTE_LOG}' RC='${rc_choice}' DRY='${CLEAN_DRY_RUN:-0}'"
+    remote_env="SCREEN_SESSION='${SCREEN_SESSION}' LEGACY_SCREEN_SESSION='${LEGACY_SCREEN_SESSION}' \
+REMOTE_SELF='${REMOTE_SELF}' LEGACY_REMOTE_SELF='${LEGACY_REMOTE_SELF}' \
+REMOTE_LOG='${REMOTE_LOG}' LEGACY_REMOTE_LOG='${LEGACY_REMOTE_LOG}' \
+RC='${rc_choice}' DRY='${CLEAN_DRY_RUN:-0}'"
     # On-node short-circuit: if cached_node refers to this host, the
     # "remote" cleanup is actually local. Run the script directly with
     # bash instead of going through ssh -- avoids a useless SSH hop
