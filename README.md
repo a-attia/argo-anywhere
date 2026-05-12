@@ -21,44 +21,65 @@ run `client`.**
 ## Quick start
 
 The script ships as ONE physical file (`argo_anywhere.sh`) plus per-client
-symlinks; the file inspects its invocation name and picks sensible defaults
-per name. Pick the URL that matches what you want:
+symlinks. The file inspects its invocation name (`$0`) at startup and selects
+the matching client automatically — no flags needed.
 
-| Filename | Default behavior |
+| Filename | Default client |
 |---|---|
-| `argo_anywhere.sh` (canonical) | Interactive picker -- choose your client at startup |
+| `argo_anywhere.sh` (canonical) | Interactive picker — choose at startup |
 | `argo_opencode.sh` (symlink) | [OpenCode](https://opencode.ai/) |
 | `argo_claudecode.sh` (symlink) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) |
 
-Use `vX.Y.Z` instead of `main` in the URL to pin to a release (recommended for
-stability):
+### Installing all clients (recommended)
+
+Download the canonical file once, then create local symlinks. A single
+`curl` command upgrades every name simultaneously.
 
 ```sh
-# OpenCode (pinned to a release):
+# Pin to a release (recommended for stability):
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_anywhere.sh \
+     -o argo_anywhere.sh && chmod +x argo_anywhere.sh
+
+# Create per-client names (same file, no duplication):
+ln -s argo_anywhere.sh argo_opencode.sh
+ln -s argo_anywhere.sh argo_claudecode.sh
+
+# Run:
+bash argo_opencode.sh    # → OpenCode (no picker)
+bash argo_claudecode.sh  # → Claude Code (no picker)
+bash argo_anywhere.sh    # → interactive picker
+
+# Upgrade all three at once:
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_anywhere.sh \
+     -o argo_anywhere.sh
+```
+
+### Installing a single client
+
+If you only need one client, download it by name directly. GitHub follows the
+symlink transparently, so you receive the full `argo_anywhere.sh` content saved
+under the name you chose — `$0` does the rest.
+
+```sh
+# OpenCode only:
 curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_opencode.sh \
-     -o argo_opencode.sh
-bash argo_opencode.sh                # runs 'client' by default
+     -o argo_opencode.sh && chmod +x argo_opencode.sh
+bash argo_opencode.sh
 # ...in another terminal once it says "Tunnel is live":
 opencode
 ```
 
 ```sh
-# Claude Code (pinned to a release):
+# Claude Code only:
 curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_claudecode.sh \
-     -o argo_claudecode.sh
+     -o argo_claudecode.sh && chmod +x argo_claudecode.sh
 bash argo_claudecode.sh
 # ...in another terminal once it says "Tunnel is live":
 claude
 ```
 
-```sh
-# Or download the canonical name and pick at startup:
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_anywhere.sh \
-     -o argo_anywhere.sh
-bash argo_anywhere.sh                # shows the client picker
-```
-
-Or live from `main` (gets you the latest fixes, may move under your feet):
+To track `main` instead of a pinned release (gets the latest fixes, but may
+move under your feet):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh \
@@ -70,16 +91,15 @@ a compute node. Subsequent runs reuse the cached values.
 
 ### Picking a different client without renaming
 
-Three ways:
-
 ```sh
-# 1. The 'setup' subcommand always shows the client picker:
+# The 'setup' subcommand always shows the client picker:
 bash argo_anywhere.sh setup
 
-# 2. argo_anywhere.sh defaults to the picker:
+# argo_anywhere.sh with no subcommand defaults to the picker:
 bash argo_anywhere.sh
 
-# 3. Each per-client name (argo_claudecode.sh, etc.) defaults to that client.
+# Each per-client name (argo_opencode.sh, argo_claudecode.sh, ...)
+# defaults to that client — no picker shown.
 ```
 
 ### Upgrading from before v1.2.0
@@ -288,13 +308,18 @@ chose not to deep-merge it):
 
 `argo_claudecode.sh` writes EITHER the global file OR the project-local
 file (never the committed file — that would force your collaborators to
-also use this proxy). The choice is automatic by default:
+also use this proxy). The choice is automatic by default, checked in order:
 
-- **`~/.claude/settings.json` already has an `env` block** (suggesting you
-  have a personal Anthropic subscription configured globally) → write the
-  **project** scope, so your global Anthropic settings stay intact.
-- **No existing `env` block** → write the **global** scope (smoothest UX
-  for first-time users; Claude Code works from any directory).
+1. **`~/.claude.json` exists** — Claude Code's auth state file, created by
+   `claude auth login`. Its presence means you have a personal Anthropic
+   subscription. Writing `ANTHROPIC_AUTH_TOKEN` to the global
+   `~/.claude/settings.json` would shadow your OAuth token and break all
+   non-proxy Claude Code usage → **project scope** automatically.
+2. **`~/.claude/settings.json` already has an `env` block** — you (or
+   another tool) put env vars in the global file; clobbering it would
+   silently remove them → **project scope** automatically.
+3. **Neither condition** → **global scope** (smoothest UX for first-time
+   users with no prior Claude Code setup).
 
 To force one or the other:
 
@@ -334,14 +359,19 @@ too many failures from one IP trigger a CSPO (Cyber Security) block on
 that IP. On a shared compute node where many users share the same outbound
 IP, one user's broken SSH agent can lock out everyone.
 
-The script defends against this with a simple consecutive-failure counter:
-after **3 consecutive SSH authentication failures**, all further SSH
-attempts in this run are refused, and you'll see a recovery message:
+The script tracks consecutive SSH authentication failures. After **3
+consecutive failures**, it refuses all further SSH attempts and writes a
+**lock file** (`~/.config/argo_anywhere/ssh-fail-lock`) that persists
+across script restarts — so re-running the script immediately after a
+failure doesn't silently accumulate more failures against CSPO's rate
+limiter. You'll see:
 
 ```
 [err ] SSH has failed 3 consecutive times.
 [err ] Disabling further SSH attempts to prevent CSPO from blocking your IP
 [err ]   (and locking out everyone else sharing this compute node).
+[err ]   Lock will auto-expire in 300s, or delete it manually:
+[err ]     rm ~/.config/argo_anywhere/ssh-fail-lock
 [err ]
 [err ] Common causes:
 [err ]   * Closed laptop while SSH agent forwarding was active
@@ -350,13 +380,17 @@ attempts in this run are refused, and you'll see a recovery message:
 [err ]   * Wrong username (--user / ARGO_ANYWHERE_USER mismatch)
 ```
 
-Recovery: verify SSH works manually (`ssh <user>@logins.cels.anl.gov true`),
-fix whatever's broken, then re-run the script. The lock resets on restart
-by design — you have to take an action before re-trying so we don't
-silently re-trigger the same failure pattern.
+**Recovery:**
+1. Verify SSH works manually: `ssh <user>@logins.cels.anl.gov true`
+2. Fix whatever is broken (re-add key, renew tickets, correct username).
+3. Either wait 5 minutes for the lock to auto-expire, or delete it immediately:
+   ```sh
+   rm ~/.config/argo_anywhere/ssh-fail-lock
+   ```
+4. Re-run the script.
 
-The counter resets on any successful SSH attempt; transient single failures
-followed by a recovery don't accumulate.
+The counter resets on any successful SSH attempt, so transient single
+failures followed by a working retry do not accumulate toward the lock.
 
 ## Port policy
 
