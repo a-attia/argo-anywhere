@@ -2326,10 +2326,26 @@ monitor_tunnel_loop() {
   #   2. tracking reconnect attempts in a sliding window and sleeping a
   #      growing backoff if too many fire too fast (defends against the same
   #      pathology under any other root cause).
+  # C7 fix (audit): two reconnect-loop hardenings:
+  #
+  #   (a) The ssh -N -L reconnect now goes through ssh_attempt_pre/ok/fail.
+  #       Previously this path was outside the SSH attempt tracker; under
+  #       sustained network/proxy flapping it could re-auth ~120 times an
+  #       hour without ever incrementing the failure counter.
+  #
+  #   (b) Burst-cap escalates: original code paused 30s after 3 reconnects
+  #       in a 60s window and continued. Now we pause 5min after the first
+  #       burst and STOP reconnecting after 3 burst events (i.e. roughly
+  #       9 attempts spread over 30+ min of degraded operation). Past that
+  #       point the user is notified and the loop exits; they decide
+  #       whether to re-run client manually.
   local reconnect_burst=0          # consecutive reconnects within RECONN_WINDOW_SEC
   local reconnect_burst_started=0  # epoch seconds the current burst started
+  local reconnect_burst_event_count=0   # how many burst events have fired (C7)
   local RECONN_WINDOW_SEC=60
   local RECONN_BURST_LIMIT=3
+  local RECONN_BURST_EVENT_MAX=3        # give up reconnecting after this many bursts
+  local RECONN_PAUSE_SEC=300            # 5 min after a burst (was HEALTH_INTERVAL*2 = 30s)
   while true; do
     if [ -n "$SSH_TUNNEL_PID" ]; then
       wait "$SSH_TUNNEL_PID" || true
@@ -2366,8 +2382,7 @@ monitor_tunnel_loop() {
     fi
 
     # Apply burst backoff BEFORE attempting a reconnect. If we've reconnected
-    # RECONN_BURST_LIMIT times within RECONN_WINDOW_SEC seconds, sleep a bit
-    # so we don't spam the master / the user / the system log.
+    # RECONN_BURST_LIMIT times within RECONN_WINDOW_SEC seconds, escalate.
     local now; now="$(date +%s)"
     if [ "$reconnect_burst_started" -eq 0 ] \
        || [ $((now - reconnect_burst_started)) -gt "$RECONN_WINDOW_SEC" ]; then
@@ -2375,10 +2390,24 @@ monitor_tunnel_loop() {
       reconnect_burst_started="$now"
     fi
     if [ "$reconnect_burst" -ge "$RECONN_BURST_LIMIT" ]; then
-      local backoff=$((HEALTH_INTERVAL * 2))
+      reconnect_burst_event_count=$((reconnect_burst_event_count + 1))
+      # C7 fix: if too many burst events, GIVE UP. The user's
+      # network/proxy is sustained-flapping; we stop hammering it
+      # rather than continuing to attempt and risk CSPO.
+      if [ "$reconnect_burst_event_count" -ge "$RECONN_BURST_EVENT_MAX" ]; then
+        warn "Reconnect loop has fired ${reconnect_burst_event_count} burst events"
+        warn "  (${reconnect_burst} reconnects per burst, ${RECONN_BURST_LIMIT} bursts allowed)."
+        warn "  This indicates sustained network or proxy instability."
+        warn "  Giving up automatic reconnect to prevent CSPO IP block."
+        warn "  Re-run 'bash $0 --cli-tool ${CLI_TOOL_OVERRIDE:-<name>} client' when stable."
+        notify_user "argo-proxy tunnel" \
+          "Reconnect loop gave up after ${reconnect_burst_event_count} burst events. Re-run client manually."
+        break
+      fi
       warn "Too many silent reconnects in the last ${RECONN_WINDOW_SEC}s"
-      warn "  (${reconnect_burst} attempts); pausing ${backoff}s before retrying."
-      sleep "$backoff"
+      warn "  (${reconnect_burst} attempts; burst event ${reconnect_burst_event_count}/${RECONN_BURST_EVENT_MAX});"
+      warn "  pausing ${RECONN_PAUSE_SEC}s (${RECONN_PAUSE_SEC}s = $((RECONN_PAUSE_SEC/60))min) before retrying."
+      sleep "$RECONN_PAUSE_SEC"
       # New burst window after the pause.
       reconnect_burst=0
       reconnect_burst_started="$(date +%s)"
@@ -2389,6 +2418,16 @@ monitor_tunnel_loop() {
     # path stays correct if invoked from a context that didn't set the global.
     local reconnected=0
     if mfa_enabled; then
+      # C7 fix: gate the reconnect on the SSH attempt tracker. If the
+      # CSPO lock is active, refuse to add more attempts; the user
+      # gets the same notification path as a totally-failed reconnect.
+      if ! ssh_attempt_pre; then
+        warn "SSH attempt tracker has locked further attempts; cannot reconnect."
+        warn "  See above for recovery instructions."
+        notify_user "argo-proxy tunnel" \
+          "SSH lock active; tunnel reconnect refused. Fix auth + delete lock to retry."
+        break
+      fi
       # shellcheck disable=SC2046
       if ssh -O check $(ssh_args "$user" "$node") "${user}@${node}" 2>/dev/null; then
         warn "SSH multiplex master is still alive; attempting silent reconnect..."
@@ -2411,6 +2450,8 @@ monitor_tunnel_loop() {
           rc_ok=1
         fi
         if [ "$rc_ok" -eq 1 ]; then
+          # C7 fix: tracker accounting -- successful reconnect.
+          ssh_attempt_ok
           # Apply the same mux-owned-forward check as the first-spawn block:
           # if the foreground ssh has already exited but /health still
           # answers, the master is doing the work. Clearing SSH_TUNNEL_PID
@@ -2429,28 +2470,35 @@ monitor_tunnel_loop() {
             MONITOR_PID=$!
           fi
         else
-          # Reconnect spawned a fresh ssh -N -L but /health didn't come
-          # back. Most likely cause: argo-proxy on the remote node is
-          # down or restarting. The SSH multiplex master is still alive
-          # (we wouldn't be in this branch otherwise), and once the master
-          # has installed the forward it holds it independently of the
-          # foreground client. So the FORWARD itself stays usable; as
-          # soon as something answers /health on the remote side again,
-          # this tunnel resumes serving without the user doing anything.
-          # Reflect that in the message.
-          warn "Reconnect installed the SSH forward but /health is silent."
-          warn "  Most likely argo-proxy on ${node} is down or restarting."
-          warn "  Good news: the SSH multiplex master is still holding the"
-          warn "  forward, so once argo-proxy on ${node} is back, this tunnel"
-          warn "  will resume serving with no action needed from you."
-          warn "  If you need to bring argo-proxy back manually:"
-          warn "    ssh ${user}@${node} 'bash ~/${REMOTE_SELF} server'"
-          warn "  To fully reset the tunnel itself: 'bash $0 client'"
-          # Kill the freshly-spawned ephemeral fg ssh (it just sits there
-          # consuming a pid; the master keeps the forward), and clear our
-          # pid tracking so the next loop iteration waits on the monitor
-          # rather than a dead pid.
-          if [ -n "$SSH_TUNNEL_PID" ]; then
+          # /health didn't come up. Two sub-cases (per C7 audit):
+          #   A. ssh process died early -> SSH-side failure; count toward
+          #      the SSH attempt tracker. Could be auth, ExitOnForwardFailure
+          #      (port collision), or various network errors.
+          #   B. ssh process is alive -> the forward is in place but the
+          #      remote argo-proxy isn't answering. NOT an SSH failure;
+          #      don't count toward the tracker (would falsely punish the
+          #      user for a remote-side outage).
+          if ! kill -0 "$SSH_TUNNEL_PID" 2>/dev/null; then
+            # Sub-case A: ssh died.
+            ssh_attempt_fail
+            warn "Reconnect ssh exited early (forward not installed)."
+            warn "  Likely auth issue or remote port now in use by something else."
+            warn "  See above for SSH attempt tracker state."
+          else
+            # Sub-case B: ssh alive, /health silent.
+            ssh_attempt_ok   # still a successful ssh; mark accordingly
+            warn "Reconnect installed the SSH forward but /health is silent."
+            warn "  Most likely argo-proxy on ${node} is down or restarting."
+            warn "  Good news: the SSH multiplex master is still holding the"
+            warn "  forward, so once argo-proxy on ${node} is back, this tunnel"
+            warn "  will resume serving with no action needed from you."
+            warn "  If you need to bring argo-proxy back manually:"
+            warn "    ssh ${user}@${node} 'bash ~/${REMOTE_SELF} server'"
+            warn "  To fully reset the tunnel itself: 'bash $0 client'"
+            # Kill the freshly-spawned ephemeral fg ssh (it just sits there
+            # consuming a pid; the master keeps the forward), and clear our
+            # pid tracking so the next loop iteration waits on the monitor
+            # rather than a dead pid.
             kill "$SSH_TUNNEL_PID" 2>/dev/null || true
           fi
           SSH_TUNNEL_PID=""
