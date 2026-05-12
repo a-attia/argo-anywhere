@@ -65,6 +65,83 @@ fi
 set -euo pipefail
 
 # ============================================================================
+# C1 fix: self-integrity check (inlined, no function call)
+# ============================================================================
+# Detect corrupted-script-on-disk situations early, before bash hits
+# any of the real script's logic and produces a cryptic error.
+#
+# Why inlined (no function call):
+#   * If the file was truncated mid-function-definition, calling a
+#     function defined later would itself fail. The check has to be
+#     a straight-line block early in the file so it can fire even on
+#     heavily-truncated copies.
+#
+# What we check:
+#   * `$0` resolves to a real file (skip checks for `bash -c`, stdin
+#     pipes, etc. -- those can't have the corruption mode).
+#   * That file is at least 10KB. The real argo_anywhere.sh is >100KB;
+#     anything under 10KB is broken (truncated download, materialised
+#     symlink-as-text, etc.).
+#
+# Why this exists:
+#   * Pre-v2.0 the repo shipped argo_opencode.sh as a git mode-120000
+#     symlink. Cloning with core.symlinks=false (Windows default; some
+#     hardened Linux configs) materialised the symlink as a 16-byte
+#     text file containing the literal string "argo_anywhere.sh".
+#     Running `bash argo_opencode.sh` then tried to execute
+#     "argo_anywhere.sh" as a command on line 1 -- the cryptic
+#     "command not found" was the root cause of "Bug 1" on compute-386-01.
+#   * v2.0 removed all symlinks, so this specific failure mode can't
+#     reproduce from a fresh clone of main. But a user who clones an
+#     OLD commit (`git checkout v1.2.0`) OR has a stale
+#     ~/.argo_opencode.sh on a compute node can still hit it.
+#   * Truncated curl downloads produce a similar symptom.
+#
+# Limitation: when the file is SO tiny (16 bytes / one filename on
+# line 1) that bash dies on line 1 before reaching this check, only
+# documentation can help. UPGRADING.md and the README will surface
+# the recovery procedure.
+case "${0:-}" in
+  bash|sh|-bash|-sh|/bin/bash|/bin/sh|/usr/bin/bash|/usr/bin/sh)
+    : ;; # invoked via shell name; not a path -> skip check
+  *)
+    if [ -f "${0:-}" ]; then
+      _ARGO_SELF_SIZE="$(wc -c < "$0" 2>/dev/null | tr -d '[:space:]' || echo 0)"
+      [ -n "${_ARGO_SELF_SIZE:-}" ] || _ARGO_SELF_SIZE=0
+      if [ "$_ARGO_SELF_SIZE" -lt 10240 ]; then
+        cat >&2 <<EOF
+
+[err ] argo_anywhere.sh: file is suspiciously small (${_ARGO_SELF_SIZE} bytes).
+[err ]
+[err ] The file at "${0}" is only ${_ARGO_SELF_SIZE} bytes; the real
+[err ] argo_anywhere.sh is >100KB. Likely causes:
+[err ]
+[err ]   1. You cloned an old commit (pre-v2.0) where this name was a
+[err ]      git symlink, on a system that materialises symlinks as text
+[err ]      files (Windows default; some hardened Linux). The file's
+[err ]      contents are the symlink's target name, not a real script.
+[err ]      Fix: cd into your clone and run
+[err ]           git checkout main  &&  git pull
+[err ]
+[err ]   2. Your curl was interrupted mid-download, leaving a partial
+[err ]      file. Fix: re-download:
+[err ]           curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh -o argo_anywhere.sh
+[err ]
+[err ]   3. You scp'd a symlink instead of the real file (legacy tools
+[err ]      without -L don't dereference). Fix: re-fetch via curl as
+[err ]      shown above.
+[err ]
+[err ] Refusing to execute a corrupted script.
+
+EOF
+        exit 2
+      fi
+      unset _ARGO_SELF_SIZE
+    fi
+    ;;
+esac
+
+# ============================================================================
 # TABLE OF CONTENTS
 # ============================================================================
 # Sections in order of appearance (grep for "SECTION:" to jump):
