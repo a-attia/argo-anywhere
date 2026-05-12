@@ -86,7 +86,7 @@ set -euo pipefail
 #   11. CONFIG FILE HANDLING     -- handle_config_file (k/b/d/m/a prompt)
 #   12. OPENCODE CONFIG WRITER + INSTALLER -- write_opencode_config,
 #                                   ensure_opencode_installed,
-#                                   setup_opencode_client
+#                                   setup_opencode_cli_tool
 #   13. SSH PREFLIGHT            -- ssh_preflight (jump or first node)
 #   14. NODE PICKER              -- pick_node, --node, --probe-nodes
 #   15. REMOTE BOOTSTRAP         -- scp + ssh to invoke server mode
@@ -208,7 +208,7 @@ LEGACY_STATE_DIR="${HOME}/.config/argo_opencode"
 USER_CACHE="${STATE_DIR}/user"
 NODE_CACHE="${STATE_DIR}/node"
 
-# OpenCode config path (read by us, written by setup_opencode_client +
+# OpenCode config path (read by us, written by setup_opencode_cli_tool +
 # update-models). Centralized constant so future renames touch one site.
 OPENCODE_CONFIG="${HOME}/.config/opencode/config.json"
 
@@ -1343,15 +1343,15 @@ ensure_opencode_installed() {
 # ----------------------------------------------------------------------------
 # OpenCode end-to-end client setup (subsection of 12)
 # ----------------------------------------------------------------------------
-# setup_opencode_client: ensure OpenCode is installed and its config is up to
+# setup_opencode_cli_tool: ensure OpenCode is installed and its config is up to
 # date for the resolved (PROXY_PORT, ANL_USERNAME). Idempotent. Honors the
 # SKIP_OPENCODE_CONFIG_WRITE flag set by mode_client when the user picked [u]
 # at the port-mismatch prompt.
 #
 # This is the "per-client" piece of mode_client, extracted so future per-client
-# setup functions (setup_claudecode_client, setup_aider_client, ...) can sit
+# setup functions (setup_claudecode_cli_tool, setup_aider_cli_tool, ...) can sit
 # next to it as peers and the orchestrator can call any combination.
-setup_opencode_client() {
+setup_opencode_cli_tool() {
   ensure_opencode_installed
   if [ "${SKIP_OPENCODE_CONFIG_WRITE:-0}" = 1 ]; then
     log "Skipping OpenCode config write (--port override + [u] choice)."
@@ -1364,7 +1364,7 @@ setup_opencode_client() {
 
 # ----------------------------------------------------------------------------
 # Claude Code config writer + installer + end-to-end client setup
-# (subsection of 12; peer of setup_opencode_client)
+# (subsection of 12; peer of setup_opencode_cli_tool)
 # ----------------------------------------------------------------------------
 # ensure_claudecode_installed: detect or install the upstream `claude` CLI.
 #
@@ -1578,10 +1578,10 @@ with open(dest_path, "w") as f:
 PYEOF
 }
 
-# setup_claudecode_client: ensure Claude Code is installed and its
+# setup_claudecode_cli_tool: ensure Claude Code is installed and its
 # settings.json is up to date for the resolved (PROXY_PORT, ANL_USERNAME).
 # Idempotent. Picks scope automatically (or honors --scope).
-setup_claudecode_client() {
+setup_claudecode_cli_tool() {
   ensure_claudecode_installed
   claudecode_pick_scope
   handle_config_file "$_CLAUDECODE_SCOPE_PATH" \
@@ -2716,16 +2716,16 @@ ensure_or_reuse_tunnel() {
 # (audit finding C1). Per-tool selection is now exclusively via the
 # --cli-tool flag (commit 2 of v2.0 Phase 1) or the interactive picker.
 #
-# Each supported client provides a function setup_<name>_client() that
+# Each supported client provides a function setup_<name>_cli_tool() that
 # (a) ensures the client binary is installed, (b) writes/updates the
 # client's config to point at our local proxy, and (c) is idempotent.
-# Phase 4 adds setup_aider_client, setup_cursor_client, etc., as peers
+# Phase 4 adds setup_aider_cli_tool, setup_cursor_cli_tool, etc., as peers
 # of the existing per-tool functions.
 #
 # The CLI_TOOLS_AVAILABLE array below is the registry: it lists every
 # supported AI CLI tool in display order, with a label for the interactive
-# picker. Adding a new tool = append a row + write its setup_<name>_client
-# function + add a case arm in do_post_tunnel_for_client.
+# picker. Adding a new tool = append a row + write its setup_<name>_cli_tool
+# function + add a case arm in do_post_tunnel_for_cli_tool.
 #
 # Format per row:  <internal_name>|<human_label>
 # where internal_name is the value users pass to --cli-tool.
@@ -2800,9 +2800,9 @@ EOF
 # callers in this file are updated below to use the new name directly.
 interactive_setup_picker() { interactive_cli_tool_picker "$@"; }
 
-# do_post_tunnel_for_client <client_name>: per-client setup + post-tunnel
+# do_post_tunnel_for_cli_tool <client_name>: per-client setup + post-tunnel
 # messaging. Called by mode_client after the tunnel is up. Dispatches to
-# the right setup_<name>_client function based on the registry. Each
+# the right setup_<name>_cli_tool function based on the registry. Each
 # client's branch is responsible for its own install/config + the tail
 # log message ("Run: <cmd>" / "Open Settings >...").
 #
@@ -2811,11 +2811,11 @@ interactive_setup_picker() { interactive_cli_tool_picker "$@"; }
 # setup -> summary -> monitor) regardless of how many clients we add.
 # Also makes Phase 4 additions (aider/cursor/generic) one-line additions
 # here rather than scattered if-branches.
-do_post_tunnel_for_client() {
+do_post_tunnel_for_cli_tool() {
   local client="$1"
   case "$client" in
     opencode)
-      setup_opencode_client
+      setup_opencode_cli_tool
       gather_summary
       render_summary
       log "OpenCode is installed and configured for this proxy.  Run: opencode"
@@ -2823,7 +2823,7 @@ do_post_tunnel_for_client() {
       log "  with Authorization: Bearer ${ANL_USERNAME}"
       ;;
     claudecode)
-      setup_claudecode_client
+      setup_claudecode_cli_tool
       gather_summary
       render_summary
       log "Claude Code is installed and configured for this proxy."
@@ -2862,7 +2862,7 @@ do_post_tunnel_for_client() {
 # the script's invocation name (default_client_for_invocation), with
 # the interactive picker as the fallback when invoked as
 # argo_anywhere.sh. The actual setup is delegated to
-# do_post_tunnel_for_client which dispatches to setup_<name>_client.
+# do_post_tunnel_for_cli_tool which dispatches to setup_<name>_cli_tool.
 #
 # These two modes share most of their setup. To avoid drift, they share
 # a helper -- _client_common_setup -- that performs identity resolution,
@@ -3003,7 +3003,7 @@ EOF
       die "argo-proxy did not become reachable on http://localhost:${PROXY_PORT}/health after server bootstrap."
     fi
     if [ "$with_opencode_setup" = 1 ]; then
-      setup_opencode_client
+      setup_opencode_cli_tool
     fi
     gather_summary
     render_summary
@@ -3099,13 +3099,13 @@ mode_client() {
   # Standard remote-tunnel flow:
   #   1. ensure_or_reuse_tunnel handles bootstrap + tunnel (or reuses an
   #      existing healthy tunnel; or prompts for collision resolution)
-  #   2. configure the chosen client (do_post_tunnel_for_client dispatches
-  #      to the right setup_<name>_client function and prints its
+  #   2. configure the chosen client (do_post_tunnel_for_cli_tool dispatches
+  #      to the right setup_<name>_cli_tool function and prints its
   #      post-setup messages)
   #   3. block in the foreground monitor + reconnect loop (unless ext-healthy)
   local rc=0
   ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
-  do_post_tunnel_for_client "$chosen_client"
+  do_post_tunnel_for_cli_tool "$chosen_client"
   if [ "$rc" -eq 2 ]; then
     log "(external listener; not entering monitor loop. The proxy is reachable"
     log "  but not managed by this script invocation.)"
@@ -5437,7 +5437,7 @@ main() {
         esac ;;
       --scope)
         # Per-client scope override. Currently consumed only by
-        # setup_claudecode_client (project|global). Future clients may
+        # setup_claudecode_cli_tool (project|global). Future clients may
         # define their own scopes; the parser accepts any string here and
         # leaves validation to the per-client setup function.
         [ -n "${2:-}" ] || die "--scope expects a value (e.g. 'project' or 'global')."
