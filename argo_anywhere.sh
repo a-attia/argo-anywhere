@@ -2509,49 +2509,37 @@ ensure_or_reuse_tunnel() {
 # ============================================================================
 # Multi-client architecture (see AGENTS.md "Multi-client distribution"):
 #
-# The script supports several AI clients (OpenCode today; Claude Code,
-# aider, Cursor, generic OpenAI-compatible to be added). It is shipped as
-# ONE physical file invoked under multiple names via repo symlinks
-# (argo_opencode.sh, argo_claudecode.sh, argo_anywhere.sh, ...). The
-# script inspects $0 at startup and selects a default client based on the
-# invocation name. Subcommands always work explicitly regardless of name.
+# The script supports several AI clients (OpenCode + Claude Code today;
+# aider, Cursor, generic OpenAI-compatible to be added). As of v2.0
+# the script ships as a SINGLE file (argo_anywhere.sh) -- the symlink-
+# per-client distribution from v1.x was removed because cloning the
+# repo with core.symlinks=false (Windows default; some CI configs)
+# materialised the symlinks as text files, breaking on-node bootstrap
+# (audit finding C1). Per-tool selection is now exclusively via the
+# --cli-tool flag (commit 2 of v2.0 Phase 1) or the interactive picker.
 #
 # Each supported client provides a function setup_<name>_client() that
 # (a) ensures the client binary is installed, (b) writes/updates the
 # client's config to point at our local proxy, and (c) is idempotent.
-# Phase 3+ adds setup_claudecode_client, setup_aider_client, etc., as
-# peers of setup_opencode_client.
+# Phase 4 adds setup_aider_client, setup_cursor_client, etc., as peers
+# of the existing per-tool functions.
 #
 # The CLIENTS_AVAILABLE array below is the registry: it lists supported
 # clients in display order, with a label for the interactive picker.
 # Adding a new client = append a row + write its setup_<name>_client
-# function + add a symlink at the repo root.
+# function + add a case arm in do_post_tunnel_for_client.
 CLIENTS_AVAILABLE=(
   "opencode|OpenCode (sst/opencode-style)"
   "claudecode|Claude Code (Anthropic CLI; uses ANTHROPIC_BASE_URL env)"
 )
-# default_client_for_invocation: print the default client name based on
-# the script's invocation name ($0). Empty string means "no default;
-# show the interactive picker." Used by mode_client to decide whether
-# to set up a specific client or invoke the picker.
-default_client_for_invocation() {
-  local name; name="$(basename "${0:-argo_opencode.sh}")"
-  case "$name" in
-    argo_opencode.sh|argo-opencode|argo_opencode) echo "opencode" ;;
-    argo_claudecode.sh|argo-claudecode|argo_claudecode) echo "claudecode" ;;
-    argo_aider.sh|argo-aider|argo_aider) echo "aider" ;;
-    argo_cursor.sh|argo-cursor|argo_cursor) echo "cursor" ;;
-    argo_generic.sh|argo-generic|argo_generic) echo "generic" ;;
-    argo_anywhere.sh|argo-anywhere|argo_anywhere) echo "" ;;
-    *) echo "opencode" ;;  # unknown name -> back-compat default
-  esac
-}
-
 # interactive_setup_picker: show CLIENTS_AVAILABLE as a numbered menu and
 # echo the chosen client name. Empty echo on user-aborts (Enter/empty);
-# loops on invalid input. Used by mode_client when invoked under
-# argo_anywhere.sh (no default client) and by the explicit 'setup'
-# subcommand.
+# loops on invalid input. Used by mode_client when no --cli-tool flag
+# was provided and by the explicit 'setup' subcommand.
+#
+# NOTE: as of v2.0 the script's invocation-name-based default was removed
+# (D1 + D2 in the v2.0 plan). The single canonical filename is
+# argo_anywhere.sh; per-tool selection is via --cli-tool or the picker.
 interactive_setup_picker() {
   cat >&2 <<EOF
 
@@ -2838,26 +2826,26 @@ mode_tunnel() {
 }
 
 mode_client() {
-  # Determine the client to set up. Four sources, in priority order:
-  #   1. FORCE_PICKER=1 (set by the 'setup' subcommand) -> always
-  #      show the interactive picker regardless of invocation name.
-  #   2. CLIENT_OVERRIDE (set by future 'setup <name>' or
-  #      '--client <name>'-style explicit selection; reserved).
-  #   3. default_client_for_invocation (based on $0; e.g.
-  #      argo_claudecode.sh -> "claudecode").
-  #   4. interactive_setup_picker (only reached when invocation default
-  #      is empty, which today means argo_anywhere.sh).
+  # Determine the client to set up. As of v2.0 (D1+D2), client selection
+  # is exclusively explicit:
+  #   1. CLIENT_OVERRIDE (set by --cli-tool flag in main(); commit 2)
+  #   2. interactive_setup_picker (when --cli-tool not supplied OR when
+  #      the 'setup' subcommand forces the picker via FORCE_PICKER=1)
+  #
+  # The pre-v2.0 invocation-name-based default (argo_opencode.sh ->
+  # opencode, etc.) was removed when symlinks were dropped. There is now
+  # ONE canonical filename (argo_anywhere.sh); per-tool selection is
+  # always explicit via flag or picker. See docs/AUDIT_2026-05-12.md.
   local chosen_client=""
   if [ "${FORCE_PICKER:-0}" = 1 ]; then
     chosen_client="$(interactive_setup_picker)"
+  elif [ -n "${CLIENT_OVERRIDE:-}" ]; then
+    chosen_client="$CLIENT_OVERRIDE"
   else
-    chosen_client="${CLIENT_OVERRIDE:-$(default_client_for_invocation)}"
-    if [ -z "$chosen_client" ]; then
-      chosen_client="$(interactive_setup_picker)"
-    fi
+    chosen_client="$(interactive_setup_picker)"
   fi
   if [ -z "$chosen_client" ]; then
-    die "No client picked; aborting."
+    die "No client picked; aborting. Pass --cli-tool <name> or pick from the menu."
   fi
 
   # Call directly (NOT via $()): see comment in mode_tunnel for why.
@@ -4626,18 +4614,17 @@ Subcommands:
                   its config, push this script to a chosen ANL compute
                   node, start argo-proxy there inside screen/tmux, then
                   open the SSH tunnel and monitor its health in the
-                  foreground. The "chosen client" is determined by the
-                  script's invocation name (argo_opencode.sh -> OpenCode,
-                  argo_claudecode.sh -> Claude Code, argo_anywhere.sh ->
-                  interactive picker). If the script detects it is itself
-                  running ON an ANL compute node, --no-jump and --no-mfa
-                  are auto-defaulted (intra-site SSH doesn't need either);
-                  if the picked node is the local host, the SSH tunnel is
-                  skipped entirely and the local argo-proxy is used directly.
+                  foreground. As of v2.0 the AI client must be selected
+                  explicitly: pass --cli-tool <name> to skip the picker,
+                  or invoke 'client' without --cli-tool to be prompted.
+                  If the script detects it is itself running ON an ANL
+                  compute node, --no-jump and --no-mfa are auto-defaulted
+                  (intra-site SSH doesn't need either); if the picked
+                  node is the local host, the SSH tunnel is skipped
+                  entirely and the local argo-proxy is used directly.
   setup           Same as 'client' but ALWAYS shows the interactive client
-                  picker, regardless of invocation name. Useful for power
-                  users to configure a non-default client without having
-                  to rename the script.
+                  picker, even if --cli-tool is set. Useful for one-off
+                  installations of a tool different from your usual.
   tunnel          Same as 'client' but does NOT install or configure any
                   client. Just brings up the tunnel (or local proxy on a
                   compute node) and blocks. Useful for power users who
