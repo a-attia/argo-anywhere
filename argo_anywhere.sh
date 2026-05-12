@@ -2524,29 +2524,55 @@ ensure_or_reuse_tunnel() {
 # Phase 4 adds setup_aider_client, setup_cursor_client, etc., as peers
 # of the existing per-tool functions.
 #
-# The CLIENTS_AVAILABLE array below is the registry: it lists supported
-# clients in display order, with a label for the interactive picker.
-# Adding a new client = append a row + write its setup_<name>_client
+# The CLI_TOOLS_AVAILABLE array below is the registry: it lists every
+# supported AI CLI tool in display order, with a label for the interactive
+# picker. Adding a new tool = append a row + write its setup_<name>_client
 # function + add a case arm in do_post_tunnel_for_client.
-CLIENTS_AVAILABLE=(
+#
+# Format per row:  <internal_name>|<human_label>
+# where internal_name is the value users pass to --cli-tool.
+CLI_TOOLS_AVAILABLE=(
   "opencode|OpenCode (sst/opencode-style)"
   "claudecode|Claude Code (Anthropic CLI; uses ANTHROPIC_BASE_URL env)"
 )
-# interactive_setup_picker: show CLIENTS_AVAILABLE as a numbered menu and
-# echo the chosen client name. Empty echo on user-aborts (Enter/empty);
-# loops on invalid input. Used by mode_client when no --cli-tool flag
-# was provided and by the explicit 'setup' subcommand.
+
+# cli_tool_is_known <name>: returns 0 if <name> is in the registry,
+# 1 otherwise. Used to validate --cli-tool values.
+cli_tool_is_known() {
+  local want="$1" entry name
+  for entry in "${CLI_TOOLS_AVAILABLE[@]}"; do
+    name="${entry%%|*}"
+    [ "$name" = "$want" ] && return 0
+  done
+  return 1
+}
+
+# cli_tool_known_names: prints the comma-separated list of registered
+# tool names, for use in error messages and --help output.
+cli_tool_known_names() {
+  local entry name out=""
+  for entry in "${CLI_TOOLS_AVAILABLE[@]}"; do
+    name="${entry%%|*}"
+    out="${out:+${out}, }${name}"
+  done
+  printf '%s' "$out"
+}
+
+# interactive_cli_tool_picker: show CLI_TOOLS_AVAILABLE as a numbered menu
+# and echo the chosen tool's internal name. Empty echo on user-aborts
+# (Enter/empty); loops on invalid input. Used by mode_client when no
+# --cli-tool flag was provided and by the explicit 'setup' subcommand.
 #
 # NOTE: as of v2.0 the script's invocation-name-based default was removed
 # (D1 + D2 in the v2.0 plan). The single canonical filename is
 # argo_anywhere.sh; per-tool selection is via --cli-tool or the picker.
-interactive_setup_picker() {
+interactive_cli_tool_picker() {
   cat >&2 <<EOF
 
-  Supported AI clients:
+  Supported AI CLI tools:
 EOF
   local i=1 entry name label
-  for entry in "${CLIENTS_AVAILABLE[@]}"; do
+  for entry in "${CLI_TOOLS_AVAILABLE[@]}"; do
     name="${entry%%|*}"
     label="${entry#*|}"
     printf '    %d) %s\n' "$i" "$label" >&2
@@ -2556,21 +2582,25 @@ EOF
 
   while :; do
     local choice
-    choice="$(ask "Pick a client [1-${#CLIENTS_AVAILABLE[@]}, or hit Enter to abort]:" "")"
+    choice="$(ask "Pick a tool [1-${#CLI_TOOLS_AVAILABLE[@]}, or hit Enter to abort]:" "")"
     if [ -z "$choice" ]; then
       echo ""
       return
     fi
     if [[ "$choice" =~ ^[0-9]+$ ]] \
        && [ "$choice" -ge 1 ] \
-       && [ "$choice" -le "${#CLIENTS_AVAILABLE[@]}" ]; then
-      entry="${CLIENTS_AVAILABLE[$((choice-1))]}"
+       && [ "$choice" -le "${#CLI_TOOLS_AVAILABLE[@]}" ]; then
+      entry="${CLI_TOOLS_AVAILABLE[$((choice-1))]}"
       echo "${entry%%|*}"
       return
     fi
-    warn "Invalid choice; pick 1-${#CLIENTS_AVAILABLE[@]} or Enter to abort."
+    warn "Invalid choice; pick 1-${#CLI_TOOLS_AVAILABLE[@]} or Enter to abort."
   done
 }
+
+# Backward-compatibility alias for any future callers; existing internal
+# callers in this file are updated below to use the new name directly.
+interactive_setup_picker() { interactive_cli_tool_picker "$@"; }
 
 # do_post_tunnel_for_client <client_name>: per-client setup + post-tunnel
 # messaging. Called by mode_client after the tunnel is up. Dispatches to
@@ -2793,6 +2823,21 @@ EOF
   _PICKED_NODE="$node"
 }
 
+# mode_list_tools: print the supported AI CLI tools, one per line, in
+# the same format the picker uses. Standalone subcommand so users (and
+# scripts) can introspect the registry without invoking 'client' or
+# 'setup'. Output is intentionally simple (no box drawing) so it's
+# easy to grep/parse.
+mode_list_tools() {
+  printf '%s\n' "Supported AI CLI tools (pass to --cli-tool):"
+  local entry name label
+  for entry in "${CLI_TOOLS_AVAILABLE[@]}"; do
+    name="${entry%%|*}"
+    label="${entry#*|}"
+    printf '  %-12s  %s\n' "$name" "$label"
+  done
+}
+
 # mode_tunnel: open the SSH tunnel (or local proxy on a compute node) and
 # enter the foreground monitor loop. No client setup. Useful for power users
 # managing multiple clients themselves, or for keeping a tunnel alive across
@@ -2826,10 +2871,10 @@ mode_tunnel() {
 }
 
 mode_client() {
-  # Determine the client to set up. As of v2.0 (D1+D2), client selection
+  # Determine the CLI tool to set up. As of v2.0 (D1+D2), tool selection
   # is exclusively explicit:
-  #   1. CLIENT_OVERRIDE (set by --cli-tool flag in main(); commit 2)
-  #   2. interactive_setup_picker (when --cli-tool not supplied OR when
+  #   1. CLI_TOOL_OVERRIDE (set by --cli-tool flag in main())
+  #   2. interactive_cli_tool_picker (when --cli-tool not supplied OR when
   #      the 'setup' subcommand forces the picker via FORCE_PICKER=1)
   #
   # The pre-v2.0 invocation-name-based default (argo_opencode.sh ->
@@ -2838,14 +2883,14 @@ mode_client() {
   # always explicit via flag or picker. See docs/AUDIT_2026-05-12.md.
   local chosen_client=""
   if [ "${FORCE_PICKER:-0}" = 1 ]; then
-    chosen_client="$(interactive_setup_picker)"
-  elif [ -n "${CLIENT_OVERRIDE:-}" ]; then
-    chosen_client="$CLIENT_OVERRIDE"
+    chosen_client="$(interactive_cli_tool_picker)"
+  elif [ -n "${CLI_TOOL_OVERRIDE:-}" ]; then
+    chosen_client="$CLI_TOOL_OVERRIDE"
   else
-    chosen_client="$(interactive_setup_picker)"
+    chosen_client="$(interactive_cli_tool_picker)"
   fi
   if [ -z "$chosen_client" ]; then
-    die "No client picked; aborting. Pass --cli-tool <name> or pick from the menu."
+    die "No CLI tool picked; aborting. Pass --cli-tool <name> or pick from the menu."
   fi
 
   # Call directly (NOT via $()): see comment in mode_tunnel for why.
@@ -4600,7 +4645,8 @@ EOS
 # ============================================================================
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [SUBCOMMAND] [--user NAME] [--node HOST] [--port N]
+Usage: $(basename "$0") [SUBCOMMAND] [--cli-tool NAME]
+                          [--user NAME] [--node HOST] [--port N]
                           [--no-jump] [--no-mfa] [--probe-nodes]
                           [--auto-port] [--port-range LO-HI]
                           [--scope project|global]
@@ -4660,10 +4706,21 @@ Subcommands:
                   to keep the file but drop only its .bak.* siblings).
                   --user / --node override the cached identity for the
                   remote step when no client run has been cached yet.
+  list-tools      Print the registry of supported AI CLI tools (the values
+                  --cli-tool accepts). Output is one line per tool; safe to
+                  grep / parse from scripts.
   help            Print the long-form guide (paths, troubleshooting,
                   customization).
 
 Options:
+  --cli-tool NAME      Pick the AI CLI tool to install/configure. NAME must
+                       be one of the values printed by 'list-tools'. Required
+                       for 'client' to skip the interactive picker; ignored
+                       (with a warning) for subcommands that don't need it
+                       (status/stop/clean/tunnel/server/list-tools/help).
+                       The 'setup' subcommand always uses the picker even
+                       when --cli-tool is set, so users can configure a
+                       different tool without changing their default.
   --user NAME          ANL username override (canonical: ARGO_OPENCODE_USER).
                        Honored by 'client' (skips username prompt) and
                        'clean' (overrides cached username for the remote step).
@@ -5153,11 +5210,24 @@ main() {
   # non-flag, non-known-subcommand token is an error.
   while [ $# -gt 0 ]; do
     case "$1" in
-      client|tunnel|setup|server|status|stop|update-models|clean|help)
+      client|tunnel|setup|server|status|stop|update-models|clean|help|list-tools)
         if [ -n "$mode" ] && [ "$mode" != "$1" ]; then
           die "Conflicting subcommands: '${mode}' and '$1'."
         fi
         mode="$1"; shift ;;
+      --cli-tool)
+        # Per-tool selection (D2). Required for client/setup explicit
+        # selection; warned-but-ignored for subcommands that don't
+        # consume per-tool identity (status/stop/clean/etc.). The
+        # warn-but-ignore behavior is per the user's directive: avoid
+        # erroring on `alias argo='bash argo_anywhere.sh --cli-tool X'`
+        # patterns where the flag is set globally but only some
+        # subcommands need it.
+        [ -n "${2:-}" ] || die "--cli-tool expects a value (one of: $(cli_tool_known_names))."
+        if ! cli_tool_is_known "$2"; then
+          die "--cli-tool: unknown tool '$2'. Known tools: $(cli_tool_known_names)."
+        fi
+        CLI_TOOL_OVERRIDE="$2"; shift 2 ;;
       --user)
         [ -n "${2:-}" ] || die "--user expects a value."
         ARGO_OPENCODE_USER="$2"; shift 2 ;;
@@ -5252,21 +5322,31 @@ main() {
       ;;
   esac
 
+  # Warn when --cli-tool is passed to a subcommand that doesn't consume
+  # it (status/stop/clean/etc.). Keep client/setup silent (they DO use
+  # it). Keep update-models silent for now (it's currently OpenCode-
+  # only; the per-tool dispatch lands later when the registry expands).
+  if [ -n "${CLI_TOOL_OVERRIDE:-}" ]; then
+    case "$mode" in
+      client|setup|update-models) ;;  # consumes --cli-tool
+      *) warn "--cli-tool ignored for subcommand '${mode}' (only used by client/setup/update-models)." ;;
+    esac
+  fi
+
   case "$mode" in
     client)        mode_client ;;
     tunnel)        mode_tunnel ;;
-    # 'setup' is a thin alias for 'client' that always uses the
-    # interactive client picker, regardless of invocation name. So
-    # 'bash argo_opencode.sh setup' shows the picker even though
-    # argo_opencode.sh's default is OpenCode. Useful for power users
-    # to configure a non-default client without renaming the script.
-    setup)         CLIENT_OVERRIDE=""; FORCE_PICKER=1; mode_client ;;
+    # 'setup' is a thin alias for 'client' that ALWAYS shows the
+    # interactive picker, even if --cli-tool was passed. Useful for
+    # one-off installations of a tool different from the user's usual.
+    setup)         CLI_TOOL_OVERRIDE=""; FORCE_PICKER=1; mode_client ;;
     server)        mode_server ;;
     status)        mode_status ;;
     stop)          mode_stop ;;
     update-models) mode_update_models ;;
     clean)         mode_clean ;;
     help)          long_help ;;
+    list-tools)    mode_list_tools ;;
   esac
 }
 
