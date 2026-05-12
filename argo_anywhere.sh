@@ -194,9 +194,9 @@ ANL_JUMP="logins.cels.anl.gov"
 PROXY_PORT_DEFAULT=64742
 PROXY_PORT=""                      # populated by resolve_port() in main()
 # shellcheck disable=SC2016
-VENV_PATH='$HOME/agovenv'          # path on the ANL node (single quotes intentional;
+VENV_PATH='$HOME/argovenv'         # path on the ANL node (single quotes intentional;
                                    # $HOME is expanded server-side via `eval echo`)
-SCREEN_SESSION="agovproxy"
+SCREEN_SESSION="argovproxy"
 HEALTH_INTERVAL=15                 # seconds between health probes (client-side)
 HEALTH_FAIL_THRESHOLD=3            # consecutive failures before alerting
 
@@ -2308,7 +2308,13 @@ monitor_tunnel_loop() {
 local_tunnel_status() {
   local port="$1"
   local pid
-  pid="$(lsof -nPi ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1)"
+  # P1 fix: wrap pipeline in { ...; } || true to swallow SIGPIPE.
+  # Otherwise: lsof writes -> head -n1 closes stdin after first line ->
+  # lsof gets SIGPIPE, exits non-zero -> pipefail makes the pipe
+  # non-zero -> set -e kills the script silently in the assignment.
+  # Same fix applied at line ~2581 (ensure_or_reuse_tunnel) and ~3550
+  # (mode_server's other_argoproxy_port detection).
+  pid="$( { lsof -nPi ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1; } || true )"
   if [ -z "$pid" ]; then
     echo "free"
     return
@@ -2578,7 +2584,10 @@ ensure_or_reuse_tunnel() {
       # user) spawned. We can capture its pid for cleanup_local's trap
       # because it's a process we own end-to-end.
       ok "Found existing healthy tunnel on port ${PROXY_PORT}; reusing."
-      SSH_TUNNEL_PID="$(lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null | head -n1)"
+      # P1 fix: wrap pipeline in { ...; } || true to swallow SIGPIPE
+      # from lsof when head -n1 closes stdin. See local_tunnel_status
+      # for the full explanation.
+      SSH_TUNNEL_PID="$( { lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null | head -n1; } || true )"
       trap cleanup_local EXIT INT TERM
       return 0 ;;
     ours-healthy-mux)
@@ -3547,14 +3556,26 @@ mode_server() {
   # the warning doesn't fire. Slight efficiency cost (we run lsof
   # unconditionally), but correctness everywhere.
   local other_argoproxy_port=""
-  other_argoproxy_port="$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
+  # P1 fix (CRITICAL): wrap the lsof|awk|head pipeline in { ...; } || true.
+  #
+  # Without the wrapper: head -n1 reads its first match and closes stdin.
+  # awk gets SIGPIPE and exits non-zero. With pipefail enabled, the pipe's
+  # exit code becomes non-zero. Under set -e, the assignment to
+  # other_argoproxy_port silently kills mode_server right here -- AFTER
+  # the "argo-proxy config already up to date" log line and BEFORE the
+  # "Starting argo-proxy in screen session" line. Server bootstrap reports
+  # failure with no diagnostic; user retries; same silent-fail loop.
+  #
+  # This was the root cause of the "Bug 2" / "C6" silent-fail reported
+  # on compute-386-01. See docs/AUDIT_2026-05-12.md finding P1.
+  other_argoproxy_port="$( { lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
     | awk -v me="$(id -un)" -v want="$PROXY_PORT" '
         $1 ~ /^argo/ && $3 == me {
           split($9, a, ":");
           p = a[length(a)];
           gsub(/[^0-9]/, "", p);
           if (p != "" && p != want) print p;
-        }' | head -n1)"
+        }' | head -n1; } || true )"
   if [ -n "$other_argoproxy_port" ]; then
     warn "You already have an argo-proxy of yours running on port ${other_argoproxy_port}"
     warn "  on this host. The script supports ONE argo-proxy per user per node"
@@ -4616,7 +4637,7 @@ REMOTE  -  on ${cached_user}@${cached_node} $(jump_descr)
   safe:
     ~/${REMOTE_SELF}                           (pushed copy of this script)
     ~/${REMOTE_LOG}                            (server bootstrap log)
-    \$HOME/agovenv/                            (Python venv we created)
+    \$HOME/argovenv/                           (Python venv we created)
     ~/argoproxy.out                            (only if nohup launcher was used)
     screen/tmux session named '${SCREEN_SESSION}'   (running argo-proxy)
   risky:
@@ -4768,7 +4789,7 @@ fi
 [ -f "$HOME/$REMOTE_SELF" ] && _rm "$HOME/$REMOTE_SELF"
 [ -f "$HOME/$REMOTE_LOG"  ] && _rm "$HOME/$REMOTE_LOG"
 [ -f "$HOME/argoproxy.out" ] && _rm "$HOME/argoproxy.out"
-[ -d "$HOME/agovenv"       ] && _rm "$HOME/agovenv"
+[ -d "$HOME/argovenv"      ] && _rm "$HOME/argovenv"
 
 # Risky: argo-proxy config
 case "$RC" in
@@ -4949,7 +4970,7 @@ Options:
                        list without probing -- under MFA, probing every node
                        could trigger many Duo prompts. With multiplexing on
                        and the master open, --probe-nodes is cheap.
-  --force-reinstall    Wipe the server-side venv (\$HOME/agovenv on the ANL
+  --force-reinstall    Wipe the server-side venv (\$HOME/argovenv on the ANL
                        node) and rebuild from scratch. Use after a broken
                        upgrade. Canonical env: ARGO_ANYWHERE_FORCE_REINSTALL.
   --auto-port          When the resolved port is already in use on the
@@ -5066,7 +5087,7 @@ Laptop:
 ANL compute node (after first run):
   \$HOME/${REMOTE_SELF}                    pushed copy of this script
   \$HOME/${REMOTE_LOG}                     server-mode bootstrap log
-  \$HOME/agovenv/                          Python venv with argo-proxy
+  \$HOME/argovenv/                         Python venv with argo-proxy
   \$HOME/.config/argoproxy/config.yaml     argo-proxy config (port / user)
   screen session: '${SCREEN_SESSION}'             where argo-proxy serve runs
 
@@ -5219,7 +5240,7 @@ Canonical (preferred):
                                  client disconnects (default 3600 = 1 hour;
                                  use 'yes' for indefinite, 'no' to disable).
   ARGO_ANYWHERE_SHOW_MODELS=1    'status' dumps the full /v1/models list
-  ARGO_ANYWHERE_FORCE_REINSTALL=1 server mode wipes \$HOME/agovenv first
+  ARGO_ANYWHERE_FORCE_REINSTALL=1 server mode wipes \$HOME/argovenv first
   ARGO_ANYWHERE_KEEP_ORPHANS=1   update-models keeps ALL orphaned config models
   ARGO_ANYWHERE_DROP_ORPHANS=1   update-models drops ALL orphaned config models
   ARGO_ANYWHERE_AUTO_PORT=1      on remote-port collision, auto-pick the next
@@ -5293,7 +5314,7 @@ Reset the cached username / node:
   rm -f ${HOME}/.config/argo_anywhere/{user,node}
 
 Update argo-proxy on the node (script reinstalls only on first install):
-  ssh -J <user>@${ANL_JUMP} <user>@<node> '~/agovenv/bin/argo-proxy update install'
+  ssh -J <user>@${ANL_JUMP} <user>@<node> '~/argovenv/bin/argo-proxy update install'
 
 TROUBLESHOOTING
 ---------------
