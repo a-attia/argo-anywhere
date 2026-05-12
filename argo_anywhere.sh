@@ -1,26 +1,37 @@
 #!/usr/bin/env bash
-# argo_opencode.sh
+# argo_anywhere.sh -- the canonical (and only) orchestrator file.
 #
-# Self-contained orchestrator that lets Argonne users run OpenCode against
-# argo-proxy from anywhere (inside or outside the ANL network).
+# Self-contained orchestrator that lets Argonne users run AI coding CLI
+# tools (OpenCode, Claude Code, ...) against argo-proxy from anywhere
+# (inside or outside the ANL network).
 #
-# Subcommands (run `argo_opencode.sh help` for the full guide):
-#   argo_opencode.sh client          # default; runs the laptop-side flow
-#   argo_opencode.sh server          # runs on the ANL compute node (auto-invoked)
-#   argo_opencode.sh status          # check tunnel + remote proxy health
-#   argo_opencode.sh stop            # tear down the local tunnel
-#   argo_opencode.sh update-models   # refresh OpenCode model list from /v1/models
-#   argo_opencode.sh clean           # remove every artifact this script created
-#   argo_opencode.sh help            # long-form guide
-#   argo_opencode.sh -h | --help     # short usage
+# As of v2.0 the script is shipped as a SINGLE file. Per-tool selection is
+# explicit via --cli-tool <name> or the interactive picker. The pre-v2.0
+# argo_opencode.sh / argo_claudecode.sh symlink-based UX was removed (it
+# broke under git core.symlinks=false and on filesystems that don't
+# preserve symlinks). See docs/AUDIT_2026-05-12.md for the rationale.
 #
-# Distribution: https://github.com/a-attia/argo-opencode
+# Subcommands (run `argo_anywhere.sh help` for the full guide):
+#   argo_anywhere.sh client --cli-tool NAME  # install + tunnel + monitor
+#   argo_anywhere.sh setup                   # picker + install + tunnel
+#   argo_anywhere.sh tunnel                  # tunnel only (no install)
+#   argo_anywhere.sh server                  # runs on the ANL compute node
+#   argo_anywhere.sh status                  # check tunnel + proxy health
+#   argo_anywhere.sh stop                    # tear down the local tunnel
+#   argo_anywhere.sh update-models           # refresh OpenCode model list
+#   argo_anywhere.sh clean                   # remove every artifact created
+#   argo_anywhere.sh list-tools              # print supported --cli-tool values
+#   argo_anywhere.sh help                    # long-form guide
+#   argo_anywhere.sh -h | --help             # short usage
+#
+# Distribution: https://github.com/a-attia/argo-opencode  (repo name kept;
+# rename was script-internal, not org/repo).
 # Users (latest):
-#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_opencode.sh -o argo_opencode.sh
-#   bash argo_opencode.sh
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh -o argo_anywhere.sh
+#   bash argo_anywhere.sh
 # Users (pinned to a release tag, recommended for stability):
-#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/argo_opencode.sh -o argo_opencode.sh
-#   bash argo_opencode.sh
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v2.0.0/argo_anywhere.sh -o argo_anywhere.sh
+#   bash argo_anywhere.sh
 #
 # Author: Ahmed Attia (attia@anl.gov)
 # License: same as the surrounding repo.
@@ -41,7 +52,7 @@
 #      under a clean, non-POSIX `bash`.
 #
 # Bug history: without the POSIXLY_CORRECT branch above (the "macOS-sh-is-
-# bash-in-POSIX-mode" bug), `sh argo_opencode.sh` on macOS ran as far as
+# bash-in-POSIX-mode" bug), `sh argo_anywhere.sh` on macOS ran as far as
 # opening the tunnel before bombing on `<(...)` in gather_summary. The
 # re-exec now happens before any non-POSIX construct can be parsed.
 if [ -z "${BASH_VERSION:-}" ] || [ -n "${POSIXLY_CORRECT:-}" ]; then
@@ -64,7 +75,7 @@ set -euo pipefail
 #   4.  BOX DRAWING              -- print_summary_box and helpers
 #   5.  PLATFORM HELPERS         -- detect_os, this_host_fqdn, on_anl_compute_node,
 #                                   _my_interface_ips, host_is_target, notify_user
-#   6.  ENV NAMESPACING          -- legacy -> ARGO_OPENCODE_* promotion
+#   6.  ENV NAMESPACING          -- legacy -> ARGO_ANYWHERE_* promotion
 #   7.  PORT RESOLUTION          -- read from config, --port handling
 #   8.  JUMP HOST HANDLING       -- ssh_jump_args, jump_descr
 #   9.  MFA / SSH MULTIPLEXING   -- mfa_enabled, SSH attempt tracker
@@ -104,20 +115,49 @@ set -euo pipefail
 #   * `set -euo pipefail` is on. Be deliberate with ssh/curl/jq exit codes;
 #     wrap with `|| true` where non-zero is expected.
 #   * Port comes from `~/.config/opencode/config.json` baseURL by default.
-#     `--port`/ARGO_OPENCODE_PORT override but prompt before mutating config.
+#     `--port`/ARGO_ANYWHERE_PORT override but prompt before mutating config.
 #   * MFA mode (default) opens an SSH ControlMaster; subsequent calls reuse
-#     the socket. Sockets at ~/.ssh/sockets/argo-opencode-*. `clean` closes them.
+#     the socket. Sockets at ~/.ssh/sockets/argo-anywhere-*. `clean` closes
+#     them (and also closes any legacy argo-opencode-* sockets from v1.x).
 # ============================================================================
 
 # ============================================================================
 # SECTION: 1. LEGACY ENV SNAPSHOT
 # ============================================================================
 # Capture inherited env-var values BEFORE the user-editable config block
-# (re)assigns the same names. Promotion to ARGO_OPENCODE_* happens later in
-# the script, but it must read the inherited values, not the defaults.
+# (re)assigns the same names. Promotion to ARGO_ANYWHERE_* happens later
+# in the script, but it must read the inherited values, not the defaults.
+#
+# Two generations of legacy names are honored, in oldest-to-newest order:
+#
+#   1. Pre-namespace (oldest): PROXY_PORT, ANL_USERNAME, SHOW_MODELS.
+#      Honored as deprecated aliases of the canonical ARGO_ANYWHERE_*
+#      names with a one-time WARN per stale var per run.
+#
+#   2. Pre-rename (v1.x era; "argo_opencode" naming): ARGO_ANYWHERE_<X>
+#      for every X used by the script. Honored as deprecated aliases of
+#      ARGO_ANYWHERE_<X>. Same one-time WARN behavior.
+#
+# Direct user code that exports either generation in shell rc files keeps
+# working; the user just sees a one-line WARN on the first script run
+# after upgrading. Section 6 does the actual promotion.
 _legacy_PROXY_PORT="${PROXY_PORT:-}"
 _legacy_ANL_USERNAME="${ANL_USERNAME:-}"
 _legacy_SHOW_MODELS="${SHOW_MODELS:-}"
+# Pre-rename ARGO_ANYWHERE_* snapshot.
+_legacy_ARGO_OPENCODE_USER="${ARGO_OPENCODE_USER:-}"
+_legacy_ARGO_OPENCODE_PORT="${ARGO_OPENCODE_PORT:-}"
+_legacy_ARGO_OPENCODE_NODE="${ARGO_OPENCODE_NODE:-}"
+_legacy_ARGO_OPENCODE_NO_JUMP="${ARGO_OPENCODE_NO_JUMP:-}"
+_legacy_ARGO_OPENCODE_NO_MFA="${ARGO_OPENCODE_NO_MFA:-}"
+_legacy_ARGO_OPENCODE_FORCE_REINSTALL="${ARGO_OPENCODE_FORCE_REINSTALL:-}"
+_legacy_ARGO_OPENCODE_SHOW_MODELS="${ARGO_OPENCODE_SHOW_MODELS:-}"
+_legacy_ARGO_OPENCODE_CONTROL_PERSIST="${ARGO_OPENCODE_CONTROL_PERSIST:-}"
+_legacy_ARGO_OPENCODE_AUTO_PORT="${ARGO_OPENCODE_AUTO_PORT:-}"
+_legacy_ARGO_OPENCODE_PORT_RANGE="${ARGO_OPENCODE_PORT_RANGE:-}"
+_legacy_ARGO_OPENCODE_KEEP_ORPHANS="${ARGO_OPENCODE_KEEP_ORPHANS:-}"
+_legacy_ARGO_OPENCODE_DROP_ORPHANS="${ARGO_OPENCODE_DROP_ORPHANS:-}"
+_legacy_ARGO_OPENCODE_LOGGING="${ARGO_OPENCODE_LOGGING:-}"
 
 # ============================================================================
 # SECTION: 2. USER-EDITABLE CONFIG
@@ -147,7 +187,7 @@ ANL_NODES=(
 ANL_JUMP="logins.cels.anl.gov"
 # Default port used only when no other source resolves one. Resolution order:
 #   1. --port CLI flag            (one-shot override; offers to migrate config)
-#   2. ARGO_OPENCODE_PORT env var (canonical override)
+#   2. ARGO_ANYWHERE_PORT env var (canonical override)
 #   3. PROXY_PORT env var         (deprecated alias; warns once)
 #   4. baseURL in ~/.config/opencode/config.json   (the source of truth)
 #   5. PROXY_PORT_DEFAULT below   (used only on first install)
@@ -160,8 +200,11 @@ SCREEN_SESSION="agovproxy"
 HEALTH_INTERVAL=15                 # seconds between health probes (client-side)
 HEALTH_FAIL_THRESHOLD=3            # consecutive failures before alerting
 
-# Local state directory (laptop side)
-STATE_DIR="${HOME}/.config/argo_opencode"
+# Local state directory (laptop side). Canonical name as of v2.0 is
+# argo_anywhere; the legacy argo_opencode dir is migrated automatically
+# at startup (see migrate_state_dir at the bottom of section 5).
+STATE_DIR="${HOME}/.config/argo_anywhere"
+LEGACY_STATE_DIR="${HOME}/.config/argo_opencode"
 USER_CACHE="${STATE_DIR}/user"
 NODE_CACHE="${STATE_DIR}/node"
 
@@ -183,9 +226,13 @@ OPENCODE_CONFIG="${HOME}/.config/opencode/config.json"
 CLAUDECODE_GLOBAL_CONFIG="${HOME}/.claude/settings.json"
 CLAUDECODE_PROJECT_CONFIG="./.claude/settings.local.json"
 
-# Remote paths (compute node side)
-REMOTE_SELF=".argo_opencode.sh"
-REMOTE_LOG=".argo_opencode.server.log"
+# Remote paths (compute node side). Canonical name as of v2.0 is
+# argo_anywhere; legacy .argo_opencode.* files are removed by `clean`
+# (which enumerates BOTH old and new names).
+REMOTE_SELF=".argo_anywhere.sh"
+REMOTE_LOG=".argo_anywhere.server.log"
+LEGACY_REMOTE_SELF=".argo_opencode.sh"
+LEGACY_REMOTE_LOG=".argo_opencode.server.log"
 
 # ============================================================================
 # SECTION: 3. PRETTY PRINTING (colors + log/ok/warn/err/die/ask)
@@ -197,7 +244,7 @@ else
   C_RED=""; C_GRN=""; C_YLW=""; C_BLU=""; C_DIM=""; C_OFF=""
 fi
 
-log()  { printf '%s[argo_opencode]%s %s\n' "$C_BLU" "$C_OFF" "$*" >&2; }
+log()  { printf '%s[argo_anywhere]%s %s\n' "$C_BLU" "$C_OFF" "$*" >&2; }
 ok()   { printf '%s[ ok ]%s %s\n' "$C_GRN" "$C_OFF" "$*" >&2; }
 warn() { printf '%s[warn]%s %s\n' "$C_YLW" "$C_OFF" "$*" >&2; }
 err()  { printf '%s[err ]%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; }
@@ -546,12 +593,124 @@ notify_user() {
   esac
 }
 
+# migrate_state_dir: one-shot migration of the laptop state directory from
+# the v1.x location (~/.config/argo_opencode/) to the v2.0 location
+# (~/.config/argo_anywhere/). Idempotent: if the new dir already exists,
+# do nothing; if neither exists, do nothing (first-ever install on this
+# machine; the cache will be created on demand).
+#
+# Per directive D3: the script DOES NOT auto-migrate by default. It
+# DETECTS the legacy state and refuses to proceed, printing the exact
+# rm/mv commands the user should run manually. This avoids the failure
+# mode where a script-driven migration silently changes user state.
+#
+# Returns:
+#   0   no legacy state OR new state already present (no migration needed)
+#   non-zero  legacy state detected; the function has printed instructions
+#             and the caller should die.
+detect_legacy_state_and_block() {
+  local has_legacy=0
+  local legacy_items=()
+
+  if [ -d "$LEGACY_STATE_DIR" ]; then
+    has_legacy=1
+    legacy_items+=("$LEGACY_STATE_DIR  (cached username/node from v1.x)")
+  fi
+
+  # Legacy mux sockets on the laptop. Only pre-v2.0 prefix; the v2.0
+  # prefix (argo-anywhere-*) is current-state.
+  if [ -d "$SSH_MUX_DIR" ]; then
+    local sock found_legacy_socket=0
+    for sock in "$SSH_MUX_DIR"/argo-opencode-*; do
+      [ -e "$sock" ] || continue
+      found_legacy_socket=1
+      break
+    done
+    if [ "$found_legacy_socket" = 1 ]; then
+      has_legacy=1
+      legacy_items+=("${SSH_MUX_DIR}/argo-opencode-*  (SSH multiplex sockets from v1.x)")
+    fi
+  fi
+
+  # Pre-v2.0 env vars. These are the ones the user might have exported
+  # in .bashrc/.zshrc; we don't auto-promote them silently (section 6
+  # already promotes + warns), but we surface them here as part of the
+  # cleanup ladder so the user knows to remove their stale exports.
+  local var stale_envs=()
+  for var in ARGO_OPENCODE_USER ARGO_OPENCODE_PORT ARGO_OPENCODE_NODE \
+             ARGO_OPENCODE_NO_JUMP ARGO_OPENCODE_NO_MFA \
+             ARGO_OPENCODE_FORCE_REINSTALL ARGO_OPENCODE_SHOW_MODELS \
+             ARGO_OPENCODE_CONTROL_PERSIST ARGO_OPENCODE_AUTO_PORT \
+             ARGO_OPENCODE_PORT_RANGE ARGO_OPENCODE_KEEP_ORPHANS \
+             ARGO_OPENCODE_DROP_ORPHANS; do
+    eval "[ -n \"\${${var}:-}\" ]" && stale_envs+=("$var")
+  done
+  if [ "${#stale_envs[@]}" -gt 0 ]; then
+    has_legacy=1
+    legacy_items+=("env vars: ${stale_envs[*]}  (still honored, but rename to ARGO_ANYWHERE_*)")
+  fi
+
+  if [ "$has_legacy" -eq 0 ]; then
+    return 0
+  fi
+
+  cat >&2 <<EOF
+
+${C_YLW}========================================================================${C_OFF}
+${C_YLW}LEGACY v1.x STATE DETECTED ON THIS MACHINE${C_OFF}
+${C_YLW}========================================================================${C_OFF}
+
+This script is v2.0+ (argo_anywhere). It detected leftover state from a
+previous v1.x install (argo_opencode):
+
+EOF
+  local item
+  for item in "${legacy_items[@]}"; do
+    printf '  %s%s%s\n' "$C_YLW" "$item" "$C_OFF" >&2
+  done
+  cat >&2 <<EOF
+
+${C_YLW}Per the v2.0 upgrade policy, the script REFUSES to run with legacy
+state present.${C_OFF} You must clean up first. See UPGRADING.md in the repo
+for the full ladder (minimal / moderate / aggressive). The minimal cleanup
+that gets you running is:
+
+${C_GRN}  # 1. Migrate the state cache (preserves your cached username/node):
+  mv ${LEGACY_STATE_DIR} ${STATE_DIR}
+
+  # 2. Close any v1.x SSH multiplex sockets:
+  rm -f ${SSH_MUX_DIR}/argo-opencode-*
+
+  # 3. (If you have ARGO_OPENCODE_* env vars in .bashrc/.zshrc):
+  #    Rename them to ARGO_ANYWHERE_*. The script also honors the old
+  #    names with a one-time deprecation warning per session, but
+  #    cleaning them up now removes the warnings.${C_OFF}
+
+After cleanup, re-run this script. If you'd rather wipe everything
+and start fresh, see the 'aggressive' cleanup in UPGRADING.md.
+
+EOF
+  return 1
+}
+
 # ============================================================================
-# SECTION: 6. ENV NAMESPACING (legacy -> ARGO_OPENCODE_* promotion)
+# SECTION: 6. ENV NAMESPACING (legacy -> ARGO_ANYWHERE_* promotion)
 # ============================================================================
-# Legacy names PROXY_PORT, ANL_USERNAME, SHOW_MODELS keep working with a
-# one-time deprecation warning. Canonical names are ARGO_OPENCODE_PORT,
-# ARGO_OPENCODE_USER, ARGO_OPENCODE_SHOW_MODELS.
+# Two generations of legacy names keep working with a one-time deprecation
+# warning each (snapshotted in section 1 BEFORE the user-editable config
+# block can reassign them, so promotion sees the inherited values):
+#
+#   Pre-namespace (oldest):
+#     PROXY_PORT     -> ARGO_ANYWHERE_PORT
+#     ANL_USERNAME   -> ARGO_ANYWHERE_USER
+#     SHOW_MODELS    -> ARGO_ANYWHERE_SHOW_MODELS
+#
+#   Pre-rename (v1.x era; "argo_opencode" naming):
+#     ARGO_OPENCODE_<X>  -> ARGO_ANYWHERE_<X>   (every X used by the script)
+#
+# Canonical names as of v2.0 are ARGO_ANYWHERE_*. Direct user code that
+# exports ARGO_OPENCODE_* in shell rc files keeps working; the user just
+# sees a one-line WARN per stale var on the first script run after upgrade.
 _legacy_warned=""
 _warn_legacy_env() {
   local old="$1" new="$2"
@@ -559,21 +718,54 @@ _warn_legacy_env() {
   _legacy_warned="${_legacy_warned} ${old}"
   warn "env var '${old}' is deprecated; use '${new}' instead (still honored for now)"
 }
-# Promote inherited legacy values (snapshotted at top of file) into canonical
-# slots, but only if the canonical name isn't already set explicitly.
-[ -z "${ARGO_OPENCODE_USER:-}"        ] && [ -n "$_legacy_ANL_USERNAME" ] && \
-  { _warn_legacy_env ANL_USERNAME ARGO_OPENCODE_USER; ARGO_OPENCODE_USER="$_legacy_ANL_USERNAME"; }
-[ -z "${ARGO_OPENCODE_PORT:-}"        ] && [ -n "$_legacy_PROXY_PORT"   ] && \
-  { _warn_legacy_env PROXY_PORT ARGO_OPENCODE_PORT; ARGO_OPENCODE_PORT="$_legacy_PROXY_PORT"; }
-[ -z "${ARGO_OPENCODE_SHOW_MODELS:-}" ] && [ -n "$_legacy_SHOW_MODELS"  ] && \
-  { _warn_legacy_env SHOW_MODELS ARGO_OPENCODE_SHOW_MODELS; ARGO_OPENCODE_SHOW_MODELS="$_legacy_SHOW_MODELS"; }
+
+# Promote pre-namespace inherited values (snapshotted in section 1) into
+# canonical slots, but only if the canonical name isn't already set explicitly.
+[ -z "${ARGO_ANYWHERE_USER:-}"        ] && [ -n "$_legacy_ANL_USERNAME" ] && \
+  { _warn_legacy_env ANL_USERNAME ARGO_ANYWHERE_USER; ARGO_ANYWHERE_USER="$_legacy_ANL_USERNAME"; }
+[ -z "${ARGO_ANYWHERE_PORT:-}"        ] && [ -n "$_legacy_PROXY_PORT"   ] && \
+  { _warn_legacy_env PROXY_PORT ARGO_ANYWHERE_PORT; ARGO_ANYWHERE_PORT="$_legacy_PROXY_PORT"; }
+[ -z "${ARGO_ANYWHERE_SHOW_MODELS:-}" ] && [ -n "$_legacy_SHOW_MODELS"  ] && \
+  { _warn_legacy_env SHOW_MODELS ARGO_ANYWHERE_SHOW_MODELS; ARGO_ANYWHERE_SHOW_MODELS="$_legacy_SHOW_MODELS"; }
+
+# Promote pre-rename ARGO_OPENCODE_* inherited values into canonical slots.
+# Same precedence rule: only fill the canonical slot if it wasn't set
+# explicitly. The pre-rename names are honored here even when the user has
+# already migrated some vars to ARGO_ANYWHERE_*; only the un-migrated ones
+# trigger the WARN.
+[ -z "${ARGO_ANYWHERE_USER:-}"             ] && [ -n "$_legacy_ARGO_OPENCODE_USER" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_USER ARGO_ANYWHERE_USER; ARGO_ANYWHERE_USER="$_legacy_ARGO_OPENCODE_USER"; }
+[ -z "${ARGO_ANYWHERE_PORT:-}"             ] && [ -n "$_legacy_ARGO_OPENCODE_PORT" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_PORT ARGO_ANYWHERE_PORT; ARGO_ANYWHERE_PORT="$_legacy_ARGO_OPENCODE_PORT"; }
+[ -z "${ARGO_ANYWHERE_NODE:-}"             ] && [ -n "$_legacy_ARGO_OPENCODE_NODE" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_NODE ARGO_ANYWHERE_NODE; ARGO_ANYWHERE_NODE="$_legacy_ARGO_OPENCODE_NODE"; }
+[ -z "${ARGO_ANYWHERE_NO_JUMP:-}"          ] && [ -n "$_legacy_ARGO_OPENCODE_NO_JUMP" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_NO_JUMP ARGO_ANYWHERE_NO_JUMP; ARGO_ANYWHERE_NO_JUMP="$_legacy_ARGO_OPENCODE_NO_JUMP"; }
+[ -z "${ARGO_ANYWHERE_NO_MFA:-}"           ] && [ -n "$_legacy_ARGO_OPENCODE_NO_MFA" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_NO_MFA ARGO_ANYWHERE_NO_MFA; ARGO_ANYWHERE_NO_MFA="$_legacy_ARGO_OPENCODE_NO_MFA"; }
+[ -z "${ARGO_ANYWHERE_FORCE_REINSTALL:-}"  ] && [ -n "$_legacy_ARGO_OPENCODE_FORCE_REINSTALL" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_FORCE_REINSTALL ARGO_ANYWHERE_FORCE_REINSTALL; ARGO_ANYWHERE_FORCE_REINSTALL="$_legacy_ARGO_OPENCODE_FORCE_REINSTALL"; }
+[ -z "${ARGO_ANYWHERE_SHOW_MODELS:-}"      ] && [ -n "$_legacy_ARGO_OPENCODE_SHOW_MODELS" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_SHOW_MODELS ARGO_ANYWHERE_SHOW_MODELS; ARGO_ANYWHERE_SHOW_MODELS="$_legacy_ARGO_OPENCODE_SHOW_MODELS"; }
+[ -z "${ARGO_ANYWHERE_CONTROL_PERSIST:-}"  ] && [ -n "$_legacy_ARGO_OPENCODE_CONTROL_PERSIST" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_CONTROL_PERSIST ARGO_ANYWHERE_CONTROL_PERSIST; ARGO_ANYWHERE_CONTROL_PERSIST="$_legacy_ARGO_OPENCODE_CONTROL_PERSIST"; }
+[ -z "${ARGO_ANYWHERE_AUTO_PORT:-}"        ] && [ -n "$_legacy_ARGO_OPENCODE_AUTO_PORT" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_AUTO_PORT ARGO_ANYWHERE_AUTO_PORT; ARGO_ANYWHERE_AUTO_PORT="$_legacy_ARGO_OPENCODE_AUTO_PORT"; }
+[ -z "${ARGO_ANYWHERE_PORT_RANGE:-}"       ] && [ -n "$_legacy_ARGO_OPENCODE_PORT_RANGE" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_PORT_RANGE ARGO_ANYWHERE_PORT_RANGE; ARGO_ANYWHERE_PORT_RANGE="$_legacy_ARGO_OPENCODE_PORT_RANGE"; }
+[ -z "${ARGO_ANYWHERE_KEEP_ORPHANS:-}"     ] && [ -n "$_legacy_ARGO_OPENCODE_KEEP_ORPHANS" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_KEEP_ORPHANS ARGO_ANYWHERE_KEEP_ORPHANS; ARGO_ANYWHERE_KEEP_ORPHANS="$_legacy_ARGO_OPENCODE_KEEP_ORPHANS"; }
+[ -z "${ARGO_ANYWHERE_DROP_ORPHANS:-}"     ] && [ -n "$_legacy_ARGO_OPENCODE_DROP_ORPHANS" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_DROP_ORPHANS ARGO_ANYWHERE_DROP_ORPHANS; ARGO_ANYWHERE_DROP_ORPHANS="$_legacy_ARGO_OPENCODE_DROP_ORPHANS"; }
+[ -z "${ARGO_ANYWHERE_LOGGING:-}"          ] && [ -n "$_legacy_ARGO_OPENCODE_LOGGING" ] && \
+  { _warn_legacy_env ARGO_OPENCODE_LOGGING ARGO_ANYWHERE_LOGGING; ARGO_ANYWHERE_LOGGING="$_legacy_ARGO_OPENCODE_LOGGING"; }
 
 # ============================================================================
 # SECTION: 7. PORT RESOLUTION (config.json baseURL is the source of truth)
 # ============================================================================
 # resolve_port writes the chosen port into PROXY_PORT (global). Order:
 #   1. PORT_OVERRIDE_CLI         (set by --port flag)
-#   2. ARGO_OPENCODE_PORT env
+#   2. ARGO_ANYWHERE_PORT env
 #   3. baseURL in ~/.config/opencode/config.json
 #   4. PROXY_PORT_DEFAULT
 PORT_OVERRIDE_CLI=""              # set by main() when --port given
@@ -600,8 +792,8 @@ resolve_port() {
   local p=""
   if [ -n "$PORT_OVERRIDE_CLI" ]; then
     p="$PORT_OVERRIDE_CLI"; PORT_SOURCE="--port flag"
-  elif [ -n "${ARGO_OPENCODE_PORT:-}" ]; then
-    p="$ARGO_OPENCODE_PORT"; PORT_SOURCE="ARGO_OPENCODE_PORT env"
+  elif [ -n "${ARGO_ANYWHERE_PORT:-}" ]; then
+    p="$ARGO_ANYWHERE_PORT"; PORT_SOURCE="ARGO_ANYWHERE_PORT env"
   else
     PORT_FROM_CONFIG="$(read_port_from_opencode_config || true)"
     if [ -n "$PORT_FROM_CONFIG" ]; then
@@ -631,7 +823,7 @@ resolve_port() {
 # ============================================================================
 # SECTION: 8. JUMP HOST HANDLING (ssh_jump_args, jump_descr)
 # ============================================================================
-# By default we route via ANL_JUMP. With --no-jump (or ARGO_OPENCODE_NO_JUMP=1)
+# By default we route via ANL_JUMP. With --no-jump (or ARGO_ANYWHERE_NO_JUMP=1)
 # we connect directly -- useful when the user is on the ANL network or has an
 # ~/.ssh/config that already inserts a ProxyJump for the cels.anl.gov hosts.
 #
@@ -649,7 +841,7 @@ resolve_port() {
 # Note: with `set -u`, an unset value becomes empty after expansion -- safe.
 ssh_jump_args() {
   local user="$1" target="${2:-}"
-  if [ "${ARGO_OPENCODE_NO_JUMP:-0}" = 1 ]; then
+  if [ "${ARGO_ANYWHERE_NO_JUMP:-0}" = 1 ]; then
     return
   fi
   if [ -n "$target" ] && [ "$target" = "$ANL_JUMP" ]; then
@@ -660,7 +852,7 @@ ssh_jump_args() {
 
 # Human-readable description for plans/help/error messages.
 jump_descr() {
-  if [ "${ARGO_OPENCODE_NO_JUMP:-0}" = 1 ]; then
+  if [ "${ARGO_ANYWHERE_NO_JUMP:-0}" = 1 ]; then
     echo "(direct, no jump host)"
   else
     echo "via ${ANL_JUMP}"
@@ -681,8 +873,8 @@ jump_descr() {
 # the SAME host go through the existing socket without re-prompting.
 #
 # MFA mode is ON by default (since all CELS access uses Duo). Override:
-#   --no-mfa / ARGO_OPENCODE_NO_MFA=1   -- disable mux, restore BatchMode tests
-#   ARGO_OPENCODE_CONTROL_PERSIST=N     -- seconds after last client to keep
+#   --no-mfa / ARGO_ANYWHERE_NO_MFA=1   -- disable mux, restore BatchMode tests
+#   ARGO_ANYWHERE_CONTROL_PERSIST=N     -- seconds after last client to keep
 #                                          the master alive (default 3600).
 #                                          Use 'yes' for indefinite, 'no' to
 #                                          die when the last client closes.
@@ -690,7 +882,7 @@ SSH_MUX_DIR="${HOME}/.ssh/sockets"
 SSH_MUX_PERSIST_DEFAULT=3600
 
 mfa_enabled() {
-  [ "${ARGO_OPENCODE_NO_MFA:-0}" = 1 ] && return 1
+  [ "${ARGO_ANYWHERE_NO_MFA:-0}" = 1 ] && return 1
   return 0
 }
 
@@ -745,7 +937,7 @@ ssh_attempt_pre() {
       err "SSH failure lock is active (${remaining}s remaining)."
       err "  Too many recent failed SSH attempts; refusing to add more."
       err "  Either wait ${remaining}s and re-run, or verify your SSH manually:"
-      err "    ssh -o ConnectTimeout=5 ${ARGO_OPENCODE_USER:-<user>}@${ANL_JUMP} true"
+      err "    ssh -o ConnectTimeout=5 ${ARGO_ANYWHERE_USER:-<user>}@${ANL_JUMP} true"
       err "  Then delete the lock to unblock immediately:"
       err "    rm ${SSH_FAIL_LOCK_FILE}"
       _SSH_LOCKED=1
@@ -789,11 +981,11 @@ ssh_attempt_fail() {
     err "  * Closed laptop while SSH agent forwarding was active (kills the forwarded key)"
     err "  * Expired Kerberos tickets"
     err "  * SSH key removed from the agent ('ssh-add -D' earlier)"
-    err "  * Wrong username (--user / ARGO_OPENCODE_USER mismatch)"
+    err "  * Wrong username (--user / ARGO_ANYWHERE_USER mismatch)"
     err ""
     err "Recovery:"
     err "  1. Verify your SSH works manually first:"
-    err "       ssh -o ConnectTimeout=5 ${ARGO_OPENCODE_USER:-<user>}@${ANL_JUMP} true"
+    err "       ssh -o ConnectTimeout=5 ${ARGO_ANYWHERE_USER:-<user>}@${ANL_JUMP} true"
     err "     (one Duo prompt is fine; what we want is a clean exit.)"
     err "  2. If that fails, fix your auth (ssh-add, reconnect agent forwarding,"
     err "     renew tickets, correct the username, etc.)."
@@ -819,8 +1011,8 @@ ssh_mux_args() {
   mfa_enabled || return 0
   mkdir -p "$SSH_MUX_DIR"
   chmod 700 "$SSH_MUX_DIR" 2>/dev/null || true
-  local persist="${ARGO_OPENCODE_CONTROL_PERSIST:-$SSH_MUX_PERSIST_DEFAULT}"
-  printf -- '-o ControlMaster=auto -o ControlPath=%s/argo-opencode-%%r-%%h-%%p -o ControlPersist=%s' \
+  local persist="${ARGO_ANYWHERE_CONTROL_PERSIST:-$SSH_MUX_PERSIST_DEFAULT}"
+  printf -- '-o ControlMaster=auto -o ControlPath=%s/argo-anywhere-%%r-%%h-%%p -o ControlPersist=%s' \
     "$SSH_MUX_DIR" "$persist"
 }
 
@@ -828,7 +1020,10 @@ ssh_mux_args() {
 ssh_mux_close_all() {
   local sock
   if [ ! -d "$SSH_MUX_DIR" ]; then return 0; fi
-  for sock in "$SSH_MUX_DIR"/argo-opencode-*; do
+  # Enumerate BOTH the current name (argo-anywhere-*) AND the pre-v2.0
+  # name (argo-opencode-*) so users upgrading from v1.x get their stale
+  # sockets cleaned up too.
+  for sock in "$SSH_MUX_DIR"/argo-anywhere-* "$SSH_MUX_DIR"/argo-opencode-*; do
     [ -S "$sock" ] || continue
     log "  closing mux socket: ${sock}"
     if [ "${CLEAN_DRY_RUN:-0}" = 1 ]; then
@@ -929,11 +1124,11 @@ ssh_mux_open() {
 # SECTION: 10. USERNAME RESOLUTION (resolve_username, cache I/O)
 # ============================================================================
 resolve_username() {
-  # Priority: --user flag (sets ARGO_OPENCODE_USER) > env > cache > prompt.
+  # Priority: --user flag (sets ARGO_ANYWHERE_USER) > env > cache > prompt.
   # ANL_USERNAME is honored as a deprecated alias (warning printed once
-  # at top-level when promoted into ARGO_OPENCODE_USER).
-  if [ -n "${ARGO_OPENCODE_USER:-}" ]; then
-    echo "$ARGO_OPENCODE_USER"; return
+  # at top-level when promoted into ARGO_ANYWHERE_USER).
+  if [ -n "${ARGO_ANYWHERE_USER:-}" ]; then
+    echo "$ARGO_ANYWHERE_USER"; return
   fi
   if [ -f "$USER_CACHE" ]; then
     cat "$USER_CACHE"; return
@@ -945,7 +1140,7 @@ resolve_username() {
     err "Invalid username. Use letters, digits, dot, underscore, hyphen."
   done
   mkdir -p "$STATE_DIR" 2>/dev/null \
-    || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?). Set ARGO_OPENCODE_USER in env to skip caching."
+    || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?). Set ARGO_ANYWHERE_USER in env to skip caching."
   printf '%s\n' "$u" > "$USER_CACHE"
   echo "$u"
 }
@@ -969,7 +1164,7 @@ handle_config_file() {
   fi
 
   # Render the proposed new config to a temp file for diffing.
-  local proposed; proposed="$(mktemp -t argo_opencode.XXXXXX)"
+  local proposed; proposed="$(mktemp -t argo_anywhere.XXXXXX)"
   trap 'rm -f "$proposed"' RETURN
   "$writer" "$proposed"
 
@@ -1014,7 +1209,7 @@ EOF
       m|M)
         if [[ "$target" == *.json ]] && command -v jq >/dev/null 2>&1; then
           # Merge: proposed values win for keys present in proposed.
-          local merged; merged="$(mktemp -t argo_opencode.XXXXXX)"
+          local merged; merged="$(mktemp -t argo_anywhere.XXXXXX)"
           jq -s '.[0] * .[1]' "$target" "$proposed" > "$merged"
           cp "$merged" "$target"; rm -f "$merged"
           ok "Merged proposed keys into existing ${desc}."
@@ -1039,14 +1234,14 @@ EOF
 # Mirrors the maintainer's ~/.config/opencode/config.json, with the username
 # substituted. Uses localhost (not 0.0.0.0) for clarity.
 #
-# The username is taken from the canonical env var ARGO_OPENCODE_USER, with
+# The username is taken from the canonical env var ARGO_ANYWHERE_USER, with
 # legacy ANL_USERNAME as fallback. This writer is invoked indirectly via
 # handle_config_file (which always passes only the destination path), so we
 # can't accept user as a positional arg without changing that contract.
 write_opencode_config() {
   local dest="$1"
-  local user="${ARGO_OPENCODE_USER:-${ANL_USERNAME:-}}"
-  [ -n "$user" ] || die "write_opencode_config: no username available (ARGO_OPENCODE_USER unset)"
+  local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
+  [ -n "$user" ] || die "write_opencode_config: no username available (ARGO_ANYWHERE_USER unset)"
   cat > "$dest" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
@@ -1335,8 +1530,8 @@ PYEOF
 #   2 -> input file unreadable / not valid JSON (we treat as "start fresh")
 write_claudecode_config() {
   local dest="$1"
-  local user="${ARGO_OPENCODE_USER:-${ANL_USERNAME:-}}"
-  [ -n "$user" ] || die "write_claudecode_config: no username available (ARGO_OPENCODE_USER unset)"
+  local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
+  [ -n "$user" ] || die "write_claudecode_config: no username available (ARGO_ANYWHERE_USER unset)"
   command -v python3 >/dev/null 2>&1 \
     || die "write_claudecode_config: python3 is required to merge JSON safely."
 
@@ -1430,13 +1625,13 @@ ssh_preflight() {
     # Caller already picked a node; that's our preflight target regardless
     # of jump-host policy (mux master must be opened against the node).
     target="$node"
-  elif [ "${ARGO_OPENCODE_NO_JUMP:-0}" = 1 ]; then
-    if [ -n "${ARGO_OPENCODE_NODE:-}" ]; then
-      target="$ARGO_OPENCODE_NODE"
+  elif [ "${ARGO_ANYWHERE_NO_JUMP:-0}" = 1 ]; then
+    if [ -n "${ARGO_ANYWHERE_NODE:-}" ]; then
+      target="$ARGO_ANYWHERE_NODE"
     elif [ "${#ANL_NODES[@]}" -gt 0 ]; then
       target="${ANL_NODES[0]}"
     else
-      die "ARGO_OPENCODE_NO_JUMP is set but no node to preflight. Pass --node HOST or fill ANL_NODES."
+      die "ARGO_ANYWHERE_NO_JUMP is set but no node to preflight. Pass --node HOST or fill ANL_NODES."
     fi
   else
     target="$ANL_JUMP"
@@ -1481,10 +1676,10 @@ ssh_preflight() {
     3. ssh ${user}@${target} true   # confirm it works without a password
 
 EOF
-  if [ "${ARGO_OPENCODE_NO_JUMP:-0}" = 1 ]; then
+  if [ "${ARGO_ANYWHERE_NO_JUMP:-0}" = 1 ]; then
     cat >&2 <<EOF
   --no-jump is on, so the script tried ${target} directly. If you actually
-  do need a jump host, drop --no-jump (and ARGO_OPENCODE_NO_JUMP).
+  do need a jump host, drop --no-jump (and ARGO_ANYWHERE_NO_JUMP).
 
 EOF
   else
@@ -1507,11 +1702,11 @@ EOF
 pick_node() {
   local user="$1"
 
-  # --node / ARGO_OPENCODE_NODE: skip the picker entirely. We still verify
+  # --node / ARGO_ANYWHERE_NODE: skip the picker entirely. We still verify
   # reachability so we fail fast with a clear message rather than later in
   # the SSH bootstrap.
-  if [ -n "${ARGO_OPENCODE_NODE:-}" ]; then
-    local req="$ARGO_OPENCODE_NODE"
+  if [ -n "${ARGO_ANYWHERE_NODE:-}" ]; then
+    local req="$ARGO_ANYWHERE_NODE"
     local in_list=0 n
     for n in "${ANL_NODES[@]:-}"; do
       [ "$n" = "$req" ] && in_list=1 && break
@@ -1676,15 +1871,15 @@ remote_bootstrap() {
   scp_opts+=( -q -o StrictHostKeyChecking=accept-new )
   if mfa_enabled; then
     mkdir -p "$SSH_MUX_DIR"; chmod 700 "$SSH_MUX_DIR" 2>/dev/null || true
-    local persist="${ARGO_OPENCODE_CONTROL_PERSIST:-$SSH_MUX_PERSIST_DEFAULT}"
+    local persist="${ARGO_ANYWHERE_CONTROL_PERSIST:-$SSH_MUX_PERSIST_DEFAULT}"
     # Same %r-%h-%p literal tokens as ssh_mux_args (see comment there for why
     # we don't use %C here either). MUST match exactly so scp and ssh share
     # the same master socket for the same destination.
     scp_opts+=( -o ControlMaster=auto
-                -o "ControlPath=${SSH_MUX_DIR}/argo-opencode-%r-%h-%p"
+                -o "ControlPath=${SSH_MUX_DIR}/argo-anywhere-%r-%h-%p"
                 -o "ControlPersist=${persist}" )
   fi
-  if [ "${ARGO_OPENCODE_NO_JUMP:-0}" != 1 ]; then
+  if [ "${ARGO_ANYWHERE_NO_JUMP:-0}" != 1 ]; then
     scp_opts+=( -o "ProxyJump=${user}@${ANL_JUMP}" )
   fi
   # In --no-mfa mode scp opens a new auth session; track it so a broken key
@@ -1703,13 +1898,13 @@ remote_bootstrap() {
   # Forward the canonical env names; --force-reinstall passes through too.
   local force_kv=""
   if [ -n "${FORCE_REINSTALL:-}" ]; then
-    force_kv="ARGO_OPENCODE_FORCE_REINSTALL=1 "
+    force_kv="ARGO_ANYWHERE_FORCE_REINSTALL=1 "
   fi
   ssh_attempt_pre || die "Refusing to run bootstrap: SSH failure lock is active. See above."
   # shellcheck disable=SC2046
   if ssh -o StrictHostKeyChecking=accept-new \
          $(ssh_args "$user" "$node") "${user}@${node}" \
-         "ARGO_OPENCODE_USER='${user}' ARGO_OPENCODE_PORT='${PROXY_PORT}' ${force_kv}bash ~/${REMOTE_SELF} server"; then
+         "ARGO_ANYWHERE_USER='${user}' ARGO_ANYWHERE_PORT='${PROXY_PORT}' ${force_kv}bash ~/${REMOTE_SELF} server"; then
     ssh_attempt_ok
   else
     ssh_attempt_fail
@@ -2139,7 +2334,9 @@ local_tunnel_status() {
   #     same destination may also be using this master; killing it on
   #     cleanup would destroy them too. We must NOT capture this pid
   #     for cleanup_local's trap.
-  #     Detected by: command line shows `ssh: /Users/.../sockets/argo-opencode-... [mux]`.
+  #     Detected by: command line shows `ssh: /Users/.../sockets/argo-{anywhere,opencode}-... [mux]`.
+  #     Both prefixes are matched so users upgrading mid-session don't lose
+  #     mux-detection on their pre-v2.0 master sockets.
   #
   # Combined with the /health check, false positives would require a
   # foreign ssh that ALSO somehow hits a working /health endpoint. Very
@@ -2151,7 +2348,8 @@ local_tunnel_status() {
     *ssh*\ -L\ "${port}:"*)         kind="fg-tunnel" ;;
     *ssh*-L\ "${port}:"*)           kind="fg-tunnel" ;;
     *ssh*-L${port}:*)               kind="fg-tunnel" ;;
-    *ssh:*argo-opencode-*\[mux\]*)  kind="mux" ;;
+    *ssh:*argo-anywhere-*\[mux\]*)  kind="mux" ;;
+    *ssh:*argo-opencode-*\[mux\]*)  kind="mux" ;;  # legacy v1.x
   esac
 
   if [ "$kind" = "fg-tunnel" ] && [ "$healthy" -eq 1 ]; then
@@ -2267,7 +2465,7 @@ prompt_port_collision() {
   cat >&2 <<EOF
 
 [warn] Port ${port} on ${node} is in use by another user
-       (pid ${owner_pid}, owned by '${owner}'; you are '${ARGO_OPENCODE_USER:-${me}}').
+       (pid ${owner_pid}, owned by '${owner}'; you are '${ARGO_ANYWHERE_USER:-${me}}').
 
        Two users can't share an argo-proxy on the same port; each needs
        their own. Options:
@@ -2283,10 +2481,10 @@ EOF
         # Use the configured port range (override via --port-range or env).
         local rstart="$PROXY_PORT_DEFAULT"
         local rend=$((rstart + 100))
-        if [ -n "${ARGO_OPENCODE_PORT_RANGE:-}" ]; then
+        if [ -n "${ARGO_ANYWHERE_PORT_RANGE:-}" ]; then
           # Format: "LO-HI"
-          rstart="${ARGO_OPENCODE_PORT_RANGE%-*}"
-          rend="${ARGO_OPENCODE_PORT_RANGE#*-}"
+          rstart="${ARGO_ANYWHERE_PORT_RANGE%-*}"
+          rend="${ARGO_ANYWHERE_PORT_RANGE#*-}"
         fi
         log "Probing ${node} for a free port in ${rstart}-${rend}..."
         local picked; picked="$(find_next_free_remote_port "$user" "$node" "$rstart" "$rend")"
@@ -2445,13 +2643,13 @@ ensure_or_reuse_tunnel() {
         local owner_pid; owner_pid="${rstatus##*:}"
         local owner; owner="${rstatus%:*}"; owner="${owner#other:}"
         local newport
-        if [ "${AUTO_PORT:-${ARGO_OPENCODE_AUTO_PORT:-0}}" = 1 ]; then
+        if [ "${AUTO_PORT:-${ARGO_ANYWHERE_AUTO_PORT:-0}}" = 1 ]; then
           warn "Port ${PROXY_PORT} on ${node} is taken by '${owner}' (pid ${owner_pid})."
           local rstart="$PROXY_PORT_DEFAULT"
           local rend=$((rstart + 100))
-          if [ -n "${ARGO_OPENCODE_PORT_RANGE:-}" ]; then
-            rstart="${ARGO_OPENCODE_PORT_RANGE%-*}"
-            rend="${ARGO_OPENCODE_PORT_RANGE#*-}"
+          if [ -n "${ARGO_ANYWHERE_PORT_RANGE:-}" ]; then
+            rstart="${ARGO_ANYWHERE_PORT_RANGE%-*}"
+            rend="${ARGO_ANYWHERE_PORT_RANGE#*-}"
           fi
           log "--auto-port: probing ${node} for a free port in ${rstart}-${rend}..."
           newport="$(find_next_free_remote_port "$user" "$node" "$rstart" "$rend")"
@@ -2677,8 +2875,8 @@ do_post_tunnel_for_client() {
 #
 # IMPORTANT: callers must invoke this DIRECTLY (NOT via $()/command
 # substitution). The function mutates several script-level globals
-# (ANL_USERNAME, ARGO_OPENCODE_USER, ARGO_OPENCODE_NO_JUMP,
-# ARGO_OPENCODE_NO_MFA, possibly PROXY_PORT and SKIP_OPENCODE_CONFIG_WRITE,
+# (ANL_USERNAME, ARGO_ANYWHERE_USER, ARGO_ANYWHERE_NO_JUMP,
+# ARGO_ANYWHERE_NO_MFA, possibly PROXY_PORT and SKIP_OPENCODE_CONFIG_WRITE,
 # plus _PICKED_NODE as the return value). Calling it inside `$( )` would
 # run it in a subshell where those mutations evaporate when the subshell
 # exits, leaving the parent with unbound globals -- which used to manifest
@@ -2704,7 +2902,7 @@ _client_common_setup() {
   # would leak the Argonne username into any child process the user spawns
   # from the same shell session, which is surprising when the laptop's $USER
   # differs from the Argonne username (the common case).
-  ARGO_OPENCODE_USER="$ANL_USERNAME"
+  ARGO_ANYWHERE_USER="$ANL_USERNAME"
   log "Using ANL username: ${ANL_USERNAME}"
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
@@ -2717,14 +2915,14 @@ _client_common_setup() {
   #   * --no-mfa auto-on:  Duo doesn't fire for intra-site SSH; switching
   #     off MFA mode skips the multiplex setup we'd never benefit from.
   if [ "$(on_anl_compute_node)" = "yes" ]; then
-    if [ -z "${ARGO_OPENCODE_NO_JUMP:-}" ]; then
+    if [ -z "${ARGO_ANYWHERE_NO_JUMP:-}" ]; then
       log "Detected ANL compute node ($(this_host_fqdn)); defaulting to --no-jump."
-      log "  (Set ARGO_OPENCODE_NO_JUMP=0 explicitly to keep the jump host.)"
-      ARGO_OPENCODE_NO_JUMP=1
+      log "  (Set ARGO_ANYWHERE_NO_JUMP=0 explicitly to keep the jump host.)"
+      ARGO_ANYWHERE_NO_JUMP=1
     fi
-    if [ -z "${ARGO_OPENCODE_NO_MFA:-}" ]; then
+    if [ -z "${ARGO_ANYWHERE_NO_MFA:-}" ]; then
       log "  Defaulting to --no-mfa (intra-site SSH does not trigger Duo)."
-      ARGO_OPENCODE_NO_MFA=1
+      ARGO_ANYWHERE_NO_MFA=1
     fi
   fi
 
@@ -2798,7 +2996,7 @@ EOF
     # exit at the end of mode_server's logging branch would kill the
     # script silently after the bootstrap reuse line, leaving the user
     # at a fresh shell prompt with no client setup performed.
-    _MODE_SERVER_INPROC=1 ARGO_OPENCODE_USER="$ANL_USERNAME" ARGO_OPENCODE_PORT="$PROXY_PORT" mode_server
+    _MODE_SERVER_INPROC=1 ARGO_ANYWHERE_USER="$ANL_USERNAME" ARGO_ANYWHERE_PORT="$PROXY_PORT" mode_server
     if curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
       ok "argo-proxy is live at http://localhost:${PROXY_PORT}/v1 (no tunnel needed; this host runs the proxy)."
     else
@@ -2844,7 +3042,7 @@ mode_list_tools() {
 # multiple terminal sessions where each one configures a different client.
 mode_tunnel() {
   # Call directly (NOT via $()): _client_common_setup mutates several
-  # script-level globals (ANL_USERNAME, ARGO_OPENCODE_USER, the auto-defaulted
+  # script-level globals (ANL_USERNAME, ARGO_ANYWHERE_USER, the auto-defaulted
   # NO_JUMP/NO_MFA env, possibly PROXY_PORT). A subshell capture would make
   # those mutations vanish and trip 'unbound variable' here. The "return"
   # value is _PICKED_NODE: empty signals the on-node short-circuit fired.
@@ -2924,7 +3122,7 @@ mode_client() {
 # listener is OURS before reusing; starts argo-proxy in screen/tmux/nohup.
 
 # argo-proxy YAML config writer (server side). Uses the port and username
-# the client passed in via env (ARGO_OPENCODE_USER / ARGO_OPENCODE_PORT).
+# the client passed in via env (ARGO_ANYWHERE_USER / ARGO_ANYWHERE_PORT).
 # Same writer-contract caveat as write_opencode_config: handle_config_file
 # only passes the dest path, so we resolve the user from env.
 #
@@ -2969,8 +3167,8 @@ mode_client() {
 # explicitly, not rely on $dest.
 write_argoproxy_config() {
   local dest="$1"
-  local user="${ARGO_OPENCODE_USER:-${ANL_USERNAME:-}}"
-  [ -n "$user" ] || die "write_argoproxy_config: no username available (ARGO_OPENCODE_USER unset)"
+  local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
+  [ -n "$user" ] || die "write_argoproxy_config: no username available (ARGO_ANYWHERE_USER unset)"
 
   local real_cfg="${HOME}/.config/argoproxy/config.yaml"
 
@@ -3065,7 +3263,7 @@ mode_server() {
   #      path) and/or legacy ANL_USERNAME / PROXY_PORT for backward compat
   #   2. existing ~/.config/argoproxy/config.yaml -- the most authoritative
   #      answer for "what argo-proxy is already configured to be"
-  #   3. ~/.config/argo_opencode/user (script's cache) for the username,
+  #   3. ~/.config/argo_anywhere/user (script's cache) for the username,
   #      $PROXY_PORT_DEFAULT for the port
   #
   # If we ended up resolving from (2) or (3) (i.e. neither env had a value
@@ -3076,49 +3274,51 @@ mode_server() {
   #
   # Capture whether env had values BEFORE we start filling defaults, so
   # we can decide later whether to prompt. Also gate on the logging
-  # re-exec flag (ARGO_OPENCODE_LOGGING): once we're past the tee
+  # re-exec flag (ARGO_ANYWHERE_LOGGING): once we're past the tee
   # re-exec, the work is being done in a subprocess. Even though we
   # export the resolved values below to suppress the second-pass
   # prompt, this is a belt-and-braces guard against forgetting that
   # contract in some future refactor.
-  local user_was_in_env="${ARGO_OPENCODE_USER:+1}"
-  local port_was_in_env="${ARGO_OPENCODE_PORT:+1}"
-  local already_logged="${ARGO_OPENCODE_LOGGING:+1}"
+  local user_was_in_env="${ARGO_ANYWHERE_USER:+1}"
+  local port_was_in_env="${ARGO_ANYWHERE_PORT:+1}"
+  local already_logged="${ARGO_ANYWHERE_LOGGING:+1}"
 
   # Canonical names; fall back to legacy aliases for one cycle so direct
-  # 'bash argo_opencode.sh server' invocations don't break for anyone who
-  # was setting ANL_USERNAME/PROXY_PORT manually.
-  : "${ARGO_OPENCODE_USER:=${ANL_USERNAME:-}}"
-  : "${ARGO_OPENCODE_PORT:=${PROXY_PORT:-}}"
+  # 'bash argo_anywhere.sh server' invocations don't break for anyone who
+  # was setting ANL_USERNAME/PROXY_PORT manually (or pre-v2 code that set
+  # ARGO_OPENCODE_*, which is also honoured via the legacy promotion in
+  # section 6).
+  : "${ARGO_ANYWHERE_USER:=${ANL_USERNAME:-}}"
+  : "${ARGO_ANYWHERE_PORT:=${PROXY_PORT:-}}"
 
   # Source 2: ~/.config/argoproxy/config.yaml
-  if [ -z "${ARGO_OPENCODE_USER:-}" ] || [ -z "${ARGO_OPENCODE_PORT:-}" ]; then
+  if [ -z "${ARGO_ANYWHERE_USER:-}" ] || [ -z "${ARGO_ANYWHERE_PORT:-}" ]; then
     local cfg="${HOME}/.config/argoproxy/config.yaml"
     if [ -f "$cfg" ]; then
-      if [ -z "${ARGO_OPENCODE_USER:-}" ]; then
-        ARGO_OPENCODE_USER="$(awk -F'"' '/^[[:space:]]*user:/{print $2; exit}' "$cfg" 2>/dev/null)"
+      if [ -z "${ARGO_ANYWHERE_USER:-}" ]; then
+        ARGO_ANYWHERE_USER="$(awk -F'"' '/^[[:space:]]*user:/{print $2; exit}' "$cfg" 2>/dev/null)"
       fi
-      if [ -z "${ARGO_OPENCODE_PORT:-}" ]; then
-        ARGO_OPENCODE_PORT="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+/{print $2; exit}' "$cfg" 2>/dev/null)"
+      if [ -z "${ARGO_ANYWHERE_PORT:-}" ]; then
+        ARGO_ANYWHERE_PORT="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+/{print $2; exit}' "$cfg" 2>/dev/null)"
       fi
     fi
   fi
 
   # Source 3: cache + defaults
-  if [ -z "${ARGO_OPENCODE_USER:-}" ] && [ -f "$USER_CACHE" ]; then
-    ARGO_OPENCODE_USER="$(cat "$USER_CACHE" 2>/dev/null)"
+  if [ -z "${ARGO_ANYWHERE_USER:-}" ] && [ -f "$USER_CACHE" ]; then
+    ARGO_ANYWHERE_USER="$(cat "$USER_CACHE" 2>/dev/null)"
   fi
-  if [ -z "${ARGO_OPENCODE_USER:-}" ]; then
-    ARGO_OPENCODE_USER="$(id -un 2>/dev/null)"
+  if [ -z "${ARGO_ANYWHERE_USER:-}" ]; then
+    ARGO_ANYWHERE_USER="$(id -un 2>/dev/null)"
   fi
-  if [ -z "${ARGO_OPENCODE_PORT:-}" ]; then
-    ARGO_OPENCODE_PORT="$PROXY_PORT_DEFAULT"
+  if [ -z "${ARGO_ANYWHERE_PORT:-}" ]; then
+    ARGO_ANYWHERE_PORT="$PROXY_PORT_DEFAULT"
   fi
 
-  ANL_USERNAME="${ARGO_OPENCODE_USER}"
-  PROXY_PORT="${ARGO_OPENCODE_PORT}"
-  : "${ANL_USERNAME:?could not resolve ARGO_OPENCODE_USER from env, ~/.config/argoproxy/config.yaml, or cache; pass it explicitly}"
-  : "${PROXY_PORT:?could not resolve ARGO_OPENCODE_PORT; pass it explicitly}"
+  ANL_USERNAME="${ARGO_ANYWHERE_USER}"
+  PROXY_PORT="${ARGO_ANYWHERE_PORT}"
+  : "${ANL_USERNAME:?could not resolve ARGO_ANYWHERE_USER from env, ~/.config/argoproxy/config.yaml, or cache; pass it explicitly}"
+  : "${PROXY_PORT:?could not resolve ARGO_ANYWHERE_PORT; pass it explicitly}"
 
   # If neither was in env, the user invoked us standalone. Show what we
   # found and ask for confirmation before doing any work. -y skips the
@@ -3159,25 +3359,25 @@ mode_server() {
   # on the same handle_config_file step, and confuses the log.
   #
   # Fix: drop `exec`, run the pipeline, then either exit (when mode_server
-  # is the script's main mode -- i.e. invoked as `bash argo_opencode.sh
+  # is the script's main mode -- i.e. invoked as `bash argo_anywhere.sh
   # server` over SSH from the laptop) or return (when called in-process
   # from _client_common_setup's on-node short-circuit, where the caller
   # has more work to do after the bootstrap finishes). The signal is
   # the _MODE_SERVER_INPROC global, which the in-process caller sets
   # before invoking us.
   #
-  # We pass ARGO_OPENCODE_USER/PORT to the subprocess via env on the
+  # We pass ARGO_ANYWHERE_USER/PORT to the subprocess via env on the
   # bash command line (NOT via a shell-level export). This narrows the
   # scope: only the tee'd subprocess sees them, not the rest of the
   # parent shell's lifetime. Important when mode_server is called
   # in-process from _client_common_setup -- a top-level export would
   # leak the resolved identity into anything else that ran in this
   # shell after mode_server returns.
-  if [ -z "${ARGO_OPENCODE_LOGGING:-}" ]; then
+  if [ -z "${ARGO_ANYWHERE_LOGGING:-}" ]; then
     mkdir -p "$(dirname "${HOME}/${REMOTE_LOG}")"
-    ARGO_OPENCODE_LOGGING=1 \
-      ARGO_OPENCODE_USER="$ARGO_OPENCODE_USER" \
-      ARGO_OPENCODE_PORT="$ARGO_OPENCODE_PORT" \
+    ARGO_ANYWHERE_LOGGING=1 \
+      ARGO_ANYWHERE_USER="$ARGO_ANYWHERE_USER" \
+      ARGO_ANYWHERE_PORT="$ARGO_ANYWHERE_PORT" \
       bash "$0" server 2>&1 | tee -a "${HOME}/${REMOTE_LOG}"
     local rc="${PIPESTATUS[0]}"
     if [ "${_MODE_SERVER_INPROC:-0}" = 1 ]; then
@@ -3206,8 +3406,8 @@ mode_server() {
   # 2) venv: optionally wipe, then create or validate.
   local venv; venv="$(eval echo "$VENV_PATH")"
 
-  if [ -n "${ARGO_OPENCODE_FORCE_REINSTALL:-}" ] && [ -d "$venv" ]; then
-    warn "ARGO_OPENCODE_FORCE_REINSTALL set; removing existing venv at ${venv}..."
+  if [ -n "${ARGO_ANYWHERE_FORCE_REINSTALL:-}" ] && [ -d "$venv" ]; then
+    warn "ARGO_ANYWHERE_FORCE_REINSTALL set; removing existing venv at ${venv}..."
     rm -rf "$venv"
   fi
 
@@ -3285,7 +3485,7 @@ mode_server() {
   # 5) Already listening on our port? Be paranoid: it might be someone else's
   #    argo-proxy or an unrelated process. Only treat as ours if (a) the
   #    listening pid is owned by us AND (b) /health responds AND (c) the
-  #    config.yaml's user matches ARGO_OPENCODE_USER.
+  #    config.yaml's user matches ARGO_ANYWHERE_USER.
   local listener_pid=""
   listener_pid="$( { lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null || true; } | head -n1)"
   if [ -n "$listener_pid" ]; then
@@ -3301,7 +3501,7 @@ mode_server() {
       # Compare against the Argonne username we were told to serve, NOT the
       # OS account name -- on shared compute nodes a single OS user could
       # in principle have run argo-proxy under multiple Argonne identities.
-      local want_user="${ARGO_OPENCODE_USER:-${ANL_USERNAME:-}}"
+      local want_user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
       local cfg_user
       cfg_user="$(awk -F'"' '/^[[:space:]]*user:/{print $2; exit}' \
                    "${HOME}/.config/argoproxy/config.yaml" 2>/dev/null)"
@@ -3807,7 +4007,7 @@ render_summary() {
   fi
 
   echo >&2
-  print_summary_box "argo_opencode  --  status summary" "$vcolor" "$verdict" "${lines[@]}"
+  print_summary_box "argo_anywhere  --  status summary" "$vcolor" "$verdict" "${lines[@]}"
 }
 
 # ============================================================================
@@ -3832,11 +4032,11 @@ mode_status() {
 
   if [ "$SUM_HEALTH_OK" -eq 1 ]; then
     log "/v1/models: ${SUM_MODEL_COUNT} model(s) available."
-    if [ "${ARGO_OPENCODE_SHOW_MODELS:-0}" = "1" ]; then
+    if [ "${ARGO_ANYWHERE_SHOW_MODELS:-0}" = "1" ]; then
       curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/v1/models" 2>/dev/null \
         | (command -v jq >/dev/null 2>&1 && jq . || cat) || true
     else
-      log "  (rerun with: ARGO_OPENCODE_SHOW_MODELS=1 bash $(basename "$0") status   to see the full list)"
+      log "  (rerun with: ARGO_ANYWHERE_SHOW_MODELS=1 bash $(basename "$0") status   to see the full list)"
     fi
   fi
 
@@ -4043,16 +4243,16 @@ mode_update_models() {
   # orphan is dropped unless we explicitly merge it back in.
   #
   # Three policies, in order of precedence:
-  #   1. KEEP_ORPHANS=1 (--keep-orphans / ARGO_OPENCODE_KEEP_ORPHANS) -> keep all
-  #   2. DROP_ORPHANS=1 (--drop-orphans / ARGO_OPENCODE_DROP_ORPHANS) -> drop all
+  #   1. KEEP_ORPHANS=1 (--keep-orphans / ARGO_ANYWHERE_KEEP_ORPHANS) -> keep all
+  #   2. DROP_ORPHANS=1 (--drop-orphans / ARGO_ANYWHERE_DROP_ORPHANS) -> drop all
   #   3. interactive: per-orphan prompt with bulk-decision shortcuts
   if [ -n "$removed" ]; then
     # Build a JSON array of orphan keys to KEEP. Empty == drop all.
     local keep_array='[]'
     local policy="prompt"
-    if [ "${KEEP_ORPHANS:-${ARGO_OPENCODE_KEEP_ORPHANS:-0}}" = 1 ]; then
+    if [ "${KEEP_ORPHANS:-${ARGO_ANYWHERE_KEEP_ORPHANS:-0}}" = 1 ]; then
       policy="keep"
-    elif [ "${DROP_ORPHANS:-${ARGO_OPENCODE_DROP_ORPHANS:-0}}" = 1 ]; then
+    elif [ "${DROP_ORPHANS:-${ARGO_ANYWHERE_DROP_ORPHANS:-0}}" = 1 ]; then
       policy="drop"
     fi
 
@@ -4319,28 +4519,28 @@ EOF
 # ============================================================================
 mode_clean() {
   # Resolve user/node for the remote step, with this precedence:
-  #   --user / ARGO_OPENCODE_USER  >  cached value in STATE_DIR
-  #   --node / ARGO_OPENCODE_NODE  >  cached value in STATE_DIR
+  #   --user / ARGO_ANYWHERE_USER  >  cached value in STATE_DIR
+  #   --node / ARGO_ANYWHERE_NODE  >  cached value in STATE_DIR
   # Both can be empty if we have nothing to go on -- remote step is then
   # honestly skipped.
   local cached_user="" cached_node=""
-  if [ -n "${ARGO_OPENCODE_USER:-}" ]; then
-    cached_user="$ARGO_OPENCODE_USER"
+  if [ -n "${ARGO_ANYWHERE_USER:-}" ]; then
+    cached_user="$ARGO_ANYWHERE_USER"
   elif [ -f "$USER_CACHE" ]; then
     cached_user="$(cat "$USER_CACHE")"
   fi
-  if [ -n "${ARGO_OPENCODE_NODE:-}" ]; then
-    cached_node="$ARGO_OPENCODE_NODE"
+  if [ -n "${ARGO_ANYWHERE_NODE:-}" ]; then
+    cached_node="$ARGO_ANYWHERE_NODE"
   elif [ -f "$NODE_CACHE" ]; then
     cached_node="$(cat "$NODE_CACHE")"
   fi
   # Mark whether each value came from CLI/env vs the cache (for the plan box).
   local user_src node_src
-  if   [ -n "${ARGO_OPENCODE_USER:-}" ];      then user_src="(--user/env)"
+  if   [ -n "${ARGO_ANYWHERE_USER:-}" ];      then user_src="(--user/env)"
   elif [ -f "$USER_CACHE" ];                  then user_src="(cache)"
   else                                             user_src=""
   fi
-  if   [ -n "${ARGO_OPENCODE_NODE:-}" ];      then node_src="(--node/env)"
+  if   [ -n "${ARGO_ANYWHERE_NODE:-}" ];      then node_src="(--node/env)"
   elif [ -f "$NODE_CACHE" ];                  then node_src="(cache)"
   else                                             node_src=""
   fi
@@ -4366,7 +4566,7 @@ mode_clean() {
   else                                            risky_policy="prompt per file"
   fi
 
-  print_summary_box "argo_opencode  --  clean plan" "$C_YLW" \
+  print_summary_box "argo_anywhere  --  clean plan" "$C_YLW" \
     "Will remove items below; risky items handled per policy." \
     "Mode: $( [ "${CLEAN_DRY_RUN:-0}" = 1 ] && echo 'DRY RUN (no changes)' || echo 'LIVE' )" \
     "Local-only: $( [ "${CLEAN_LOCAL_ONLY:-0}" = 1 ] && echo yes || echo no )" \
@@ -4388,13 +4588,15 @@ mode_clean() {
   local mux_count=0
   if [ -d "$SSH_MUX_DIR" ]; then
     # shellcheck disable=SC2012
-    mux_count="$( { ls -1 "${SSH_MUX_DIR}"/argo-opencode-* 2>/dev/null || true; } | wc -l | tr -d ' ')"
+    # Count BOTH current and pre-v2.0 prefixes so the clean plan reflects
+    # what ssh_mux_close_all() will actually close.
+    mux_count="$( { ls -1 "${SSH_MUX_DIR}"/argo-anywhere-* "${SSH_MUX_DIR}"/argo-opencode-* 2>/dev/null || true; } | wc -l | tr -d ' ')"
   fi
 
   cat >&2 <<EOF
 
 LOCAL  -  safe (fully owned by this script)
-  ~/.config/argo_opencode/                     $( [ -d "$STATE_DIR" ] && echo "(present)" || echo "(absent)" )
+  ~/.config/argo_anywhere/                     $( [ -d "$STATE_DIR" ] && echo "(present)" || echo "(absent)" )
   Local SSH tunnel pid on :${PROXY_PORT}                $( [ -n "$listener_pid" ] && echo "(pid ${listener_pid})" || echo "(none)" )
   SSH multiplex sockets in ${SSH_MUX_DIR}/  $( [ "$mux_count" -gt 0 ] && echo "(${mux_count} present)" || echo "(none)" )
 
@@ -4497,7 +4699,7 @@ EOF
 
   # Remote
   if [ "${CLEAN_LOCAL_ONLY:-0}" != 1 ] && [ -n "$cached_user" ] && [ -n "$cached_node" ]; then
-    export ARGO_OPENCODE_USER="$cached_user"
+    export ARGO_ANYWHERE_USER="$cached_user"
     log "Reaching ${cached_user}@${cached_node} for remote cleanup..."
 
     # Decide what to do with the remote risky file (~/.config/argoproxy/config.yaml).
@@ -4536,7 +4738,7 @@ EOF
     # parser quirk that reports phantom unbound-variable errors with
     # `set -u` for that pattern. Writing to a file sidesteps the issue.
     local remote_script_file
-    remote_script_file="$(mktemp -t argo_opencode_remote.XXXXXX)"
+    remote_script_file="$(mktemp -t argo_anywhere_remote.XXXXXX)"
     # shellcheck disable=SC2064
     trap "rm -f '${remote_script_file}'" RETURN
     cat > "$remote_script_file" <<'EOS'
@@ -4680,12 +4882,12 @@ Subcommands:
                   the picked compute node, but can also be run standalone
                   from a logged-in shell on a node ('I want to leave a
                   proxy running on this node for any client to reach').
-                  Requires ARGO_OPENCODE_USER and ARGO_OPENCODE_PORT in env;
+                  Requires ARGO_ANYWHERE_USER and ARGO_ANYWHERE_PORT in env;
                   these have sensible defaults if invoked from 'client'.
   status          Show local tunnel state and probe the proxy via localhost.
                   Ends with a summary box (ALL GREEN / DEGRADED / FAIL) plus
                   available/configured/orphaned model counts.
-                  Set ARGO_OPENCODE_SHOW_MODELS=1 to also dump the full
+                  Set ARGO_ANYWHERE_SHOW_MODELS=1 to also dump the full
                   /v1/models response.
   update-models   Refresh ~/.config/opencode/config.json's model list from the
                   live /v1/models endpoint. Preserves everything else in the
@@ -4721,27 +4923,27 @@ Options:
                        The 'setup' subcommand always uses the picker even
                        when --cli-tool is set, so users can configure a
                        different tool without changing their default.
-  --user NAME          ANL username override (canonical: ARGO_OPENCODE_USER).
+  --user NAME          ANL username override (canonical: ARGO_ANYWHERE_USER).
                        Honored by 'client' (skips username prompt) and
                        'clean' (overrides cached username for the remote step).
   --node HOST          Compute-node override. 'client' skips the picker and
                        uses HOST directly (fails fast if unreachable). 'clean'
                        targets HOST for the remote cleanup step instead of
-                       the cached node. Canonical env: ARGO_OPENCODE_NODE.
+                       the cached node. Canonical env: ARGO_ANYWHERE_NODE.
                        Warns if HOST is not in the script's ANL_NODES list.
   --port N             Port override for THIS run only. If it disagrees with
                        ~/.config/opencode/config.json, you'll be asked whether
                        to migrate the config or use the config's port instead.
-                       Canonical env: ARGO_OPENCODE_PORT.
+                       Canonical env: ARGO_ANYWHERE_PORT.
   --no-jump            Skip the jump host (${ANL_JUMP}); SSH directly
                        to the compute node. Useful when you're on the ANL
                        network or your ~/.ssh/config already inserts a
                        ProxyJump for cels.anl.gov hosts.
-                       Canonical env: ARGO_OPENCODE_NO_JUMP=1.
+                       Canonical env: ARGO_ANYWHERE_NO_JUMP=1.
   --no-mfa             Disable Duo/MFA-aware behavior (SSH multiplexing).
                        The script defaults to MFA mode because all CELS access
                        is Duo-protected. Use --no-mfa for hosts that don't
-                       use Duo. Canonical env: ARGO_OPENCODE_NO_MFA=1.
+                       use Duo. Canonical env: ARGO_ANYWHERE_NO_MFA=1.
   --probe-nodes        Probe each ANL_NODE for reachability before showing
                        the picker. By default the picker shows the static
                        list without probing -- under MFA, probing every node
@@ -4749,18 +4951,18 @@ Options:
                        and the master open, --probe-nodes is cheap.
   --force-reinstall    Wipe the server-side venv (\$HOME/agovenv on the ANL
                        node) and rebuild from scratch. Use after a broken
-                       upgrade. Canonical env: ARGO_OPENCODE_FORCE_REINSTALL.
+                       upgrade. Canonical env: ARGO_ANYWHERE_FORCE_REINSTALL.
   --auto-port          When the resolved port is already in use on the
                        picked compute node by ANOTHER user, automatically
                        probe a range and pick the first free port (instead
                        of prompting interactively). Sticky: triggers the
                        same OpenCode-config migration prompt as a manual
                        --port override would. Canonical env:
-                       ARGO_OPENCODE_AUTO_PORT=1.
+                       ARGO_ANYWHERE_AUTO_PORT=1.
   --port-range LO-HI   Override the port range for --auto-port and the
                        interactive [n]ext-free-port choice. Default:
                        PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100.
-                       Canonical env: ARGO_OPENCODE_PORT_RANGE=LO-HI.
+                       Canonical env: ARGO_ANYWHERE_PORT_RANGE=LO-HI.
   --scope project|global  Per-client scope override. Currently consumed
                        only by Claude Code setup:
                          project -> ./.claude/settings.local.json (per-repo;
@@ -4774,10 +4976,10 @@ Options:
   Flags below apply to 'update-models':
   --keep-orphans       Skip the per-orphan prompt; keep ALL models in the
                        config that are no longer in /v1/models.
-                       Canonical env: ARGO_OPENCODE_KEEP_ORPHANS=1.
+                       Canonical env: ARGO_ANYWHERE_KEEP_ORPHANS=1.
   --drop-orphans       Skip the per-orphan prompt; drop ALL models in the
                        config that are no longer in /v1/models.
-                       Canonical env: ARGO_OPENCODE_DROP_ORPHANS=1.
+                       Canonical env: ARGO_ANYWHERE_DROP_ORPHANS=1.
                        (Mutually exclusive with --keep-orphans.)
 
   Flags below apply to 'clean':
@@ -4795,7 +4997,7 @@ Options:
   -h, --help           Short usage (this text).
 
 Port policy: the OpenCode config's baseURL is the source of truth. By default
-  the script reads the port from there. --port and ARGO_OPENCODE_PORT override
+  the script reads the port from there. --port and ARGO_ANYWHERE_PORT override
   for one run; you'll be prompted before any change to config.json.
 
 Tip: run \`bash $(basename "$0") help\` for the full guide.
@@ -4857,8 +5059,8 @@ ANL compute node:
 WHERE THINGS LIVE
 -----------------
 Laptop:
-  ${HOME}/.config/argo_opencode/user      cached ANL username
-  ${HOME}/.config/argo_opencode/node      last-used compute node
+  ${HOME}/.config/argo_anywhere/user      cached ANL username
+  ${HOME}/.config/argo_anywhere/node      last-used compute node
   ${HOME}/.config/opencode/config.json    OpenCode config (this script writes it)
 
 ANL compute node (after first run):
@@ -4908,10 +5110,10 @@ SSH ControlMaster connection multiplexing:
     ssh/scp to that same compute-XX through the same ProxyJump.
   * On the FIRST SSH call to the picked node (the preflight, or the
     --node reachability check), one Duo prompt fires. The master
-    connection is parked at:  ~/.ssh/sockets/argo-opencode-<user>-<host>-<port>
+    connection is parked at:  ~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>
   * Every subsequent SSH/SCP call to the same node within the same script
     run reuses the master and never prompts.
-  * After all clients disconnect, the master lingers for ARGO_OPENCODE_CONTROL_PERSIST
+  * After all clients disconnect, the master lingers for ARGO_ANYWHERE_CONTROL_PERSIST
     seconds (default 3600 = 1 hour). Re-running 'status', 'update-models',
     'clean', or 'client' within that window also avoids a fresh Duo prompt.
   * --probe-nodes opens a separate master per node it tests (each is a
@@ -4922,10 +5124,10 @@ monitor attempts a silent reconnect through the existing socket. If the
 master is also gone, you'll be notified to re-run 'client' (which is when a
 new Duo prompt happens).
 
-To turn this off (for non-Duo hosts):  --no-mfa  or  ARGO_OPENCODE_NO_MFA=1
+To turn this off (for non-Duo hosts):  --no-mfa  or  ARGO_ANYWHERE_NO_MFA=1
 To inspect/close sockets manually:
-  ls -l ~/.ssh/sockets/argo-opencode-*
-  ssh -O exit -o ControlPath=~/.ssh/sockets/argo-opencode-<user>-<host>-<port> dummy
+  ls -l ~/.ssh/sockets/argo-anywhere-*
+  ssh -O exit -o ControlPath=~/.ssh/sockets/argo-anywhere-<user>-<host>-<port> dummy
 'clean' also offers to close all our sockets.
 
 RUNNING ON A COMPUTE NODE
@@ -4940,11 +5142,11 @@ and adjusts:
 
   * --no-jump on by default. From inside the network the jump host is
     an extra hop you don't need (and may not even be reachable from a
-    compute node). Override with ARGO_OPENCODE_NO_JUMP=0 if you have a
+    compute node). Override with ARGO_ANYWHERE_NO_JUMP=0 if you have a
     setup that genuinely requires the jump.
   * --no-mfa on by default. Intra-site SSH does not trigger Duo, so
     the multiplex master setup we'd normally do is wasted effort.
-    Override with ARGO_OPENCODE_NO_MFA=0 if your setup differs.
+    Override with ARGO_ANYWHERE_NO_MFA=0 if your setup differs.
   * If the picked node IS the host you are running on (the common
     "I'm on compute-01 and I want to use OpenCode here" case), the
     SSH tunnel is skipped entirely. The script invokes its own server
@@ -4957,53 +5159,17 @@ If you only want argo-proxy running on a node (no client setup, no
 tunnel), 'server' is the right subcommand:
 
   ssh <user>@compute-XX.cels.anl.gov
-  bash argo_opencode.sh server   # starts argo-proxy under screen, returns
+  bash argo_anywhere.sh server   # starts argo-proxy under screen, returns
 
 This is the 'I want to leave a proxy on this node for any of my
 machines/clients to reach' workflow. Other clients (your laptop, a
 cluster login node) can then point at the proxy via their own SSH -L
-forward, or via 'argo_opencode.sh client --node compute-XX' from those
-machines.
-
-When invoked standalone (without env vars from 'client'), 'server'
-resolves your username and port from local sources (in order:
-~/.config/argoproxy/config.yaml, ~/.config/argo_opencode/user, then
-'id -un' as a last resort for username, PROXY_PORT_DEFAULT for port).
-It then shows you the resolved values and asks "Proceed? [Y/n]:"
-before doing any work. Pass -y / --yes to skip the prompt for
-non-interactive use (e.g. systemd unit, launchd plist, cron job).
-
-SHARING A COMPUTE NODE WITH OTHER USERS
----------------------------------------
-Each user runs their own argo-proxy on the picked compute node, listening
-on 127.0.0.1:<port>. Two users can share the node, but they cannot share
-a port: whoever binds first wins. Before bootstrap, 'client' (and
-'tunnel') probes the picked port on the node and identifies its owner:
-
-  * port is free                 -> proceed normally
-  * port is held by YOUR user    -> reuse the existing argo-proxy
-  * port is held by ANOTHER user -> prompt for collision resolution:
-        [n] next free port  -- probe a range, use the first free one
-        [p] pick a port    -- read a number (1024-65535)
-        [r] retry          -- maybe they just stopped; check again
-        [a] abort
-
-Non-interactive collision handling:
-  --auto-port  /  ARGO_OPENCODE_AUTO_PORT=1
-        skip the prompt; auto-pick the next free port. Triggers the
-        existing OpenCode-config migration prompt for confirmation.
-  --port-range LO-HI  /  ARGO_OPENCODE_PORT_RANGE=LO-HI
-        range for [n] and --auto-port. Default: 64742-64842.
-
-Local self-collision (re-running 'client' while a tunnel is already up):
-detected automatically; the existing healthy tunnel is reused, and the
-script proceeds straight to client setup. This makes 'I want to add
-another client to my running tunnel' a natural workflow once Phase 3+
-adds non-OpenCode clients.
+forward, or via 'argo_anywhere.sh client --cli-tool NAME --node compute-XX'
+from those machines.
 
 TUNNEL-ONLY MODE
 ----------------
-'argo_opencode.sh tunnel' is the same as 'client' minus the OpenCode
+'argo_anywhere.sh tunnel' is the same as 'client' minus the AI CLI tool
 install + config. It just brings up the tunnel (or local proxy on a
 compute node) and blocks. Useful when you:
 
@@ -5020,7 +5186,7 @@ PORT POLICY
 -----------
 The port is resolved at startup from these sources, in order:
   1. --port N                        (CLI flag, this run only)
-  2. ARGO_OPENCODE_PORT env var
+  2. ARGO_ANYWHERE_PORT env var
   3. baseURL in ~/.config/opencode/config.json   (the source of truth)
   4. PROXY_PORT_DEFAULT (=${PROXY_PORT_DEFAULT})        (built-in fallback)
 
@@ -5044,30 +5210,30 @@ When to use --port:
 ENVIRONMENT VARIABLES
 ---------------------
 Canonical (preferred):
-  ARGO_OPENCODE_USER             ANL username (alternative to --user)
-  ARGO_OPENCODE_NODE             compute node hostname (alternative to --node)
-  ARGO_OPENCODE_PORT             port (alternative to --port)
-  ARGO_OPENCODE_NO_JUMP=1        skip the jump host (alternative to --no-jump)
-  ARGO_OPENCODE_NO_MFA=1         disable SSH multiplexing (--no-mfa)
-  ARGO_OPENCODE_CONTROL_PERSIST=N seconds the SSH master stays after the last
+  ARGO_ANYWHERE_USER             ANL username (alternative to --user)
+  ARGO_ANYWHERE_NODE             compute node hostname (alternative to --node)
+  ARGO_ANYWHERE_PORT             port (alternative to --port)
+  ARGO_ANYWHERE_NO_JUMP=1        skip the jump host (alternative to --no-jump)
+  ARGO_ANYWHERE_NO_MFA=1         disable SSH multiplexing (--no-mfa)
+  ARGO_ANYWHERE_CONTROL_PERSIST=N seconds the SSH master stays after the last
                                  client disconnects (default 3600 = 1 hour;
                                  use 'yes' for indefinite, 'no' to disable).
-  ARGO_OPENCODE_SHOW_MODELS=1    'status' dumps the full /v1/models list
-  ARGO_OPENCODE_FORCE_REINSTALL=1 server mode wipes \$HOME/agovenv first
-  ARGO_OPENCODE_KEEP_ORPHANS=1   update-models keeps ALL orphaned config models
-  ARGO_OPENCODE_DROP_ORPHANS=1   update-models drops ALL orphaned config models
-  ARGO_OPENCODE_AUTO_PORT=1      on remote-port collision, auto-pick the next
+  ARGO_ANYWHERE_SHOW_MODELS=1    'status' dumps the full /v1/models list
+  ARGO_ANYWHERE_FORCE_REINSTALL=1 server mode wipes \$HOME/agovenv first
+  ARGO_ANYWHERE_KEEP_ORPHANS=1   update-models keeps ALL orphaned config models
+  ARGO_ANYWHERE_DROP_ORPHANS=1   update-models drops ALL orphaned config models
+  ARGO_ANYWHERE_AUTO_PORT=1      on remote-port collision, auto-pick the next
                                  free port instead of prompting (alternative
                                  to --auto-port)
-  ARGO_OPENCODE_PORT_RANGE=LO-HI port range for --auto-port and the [n]ext-
+  ARGO_ANYWHERE_PORT_RANGE=LO-HI port range for --auto-port and the [n]ext-
                                  free-port choice (default
                                  PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100)
   ARGO_BOX_STYLE=ascii|unicode   override the box-drawing heuristic
 
 Legacy (still honored, prints a one-time deprecation warning):
-  ANL_USERNAME    -> ARGO_OPENCODE_USER
-  PROXY_PORT      -> ARGO_OPENCODE_PORT
-  SHOW_MODELS     -> ARGO_OPENCODE_SHOW_MODELS
+  ANL_USERNAME    -> ARGO_ANYWHERE_USER
+  PROXY_PORT      -> ARGO_ANYWHERE_PORT
+  SHOW_MODELS     -> ARGO_ANYWHERE_SHOW_MODELS
 
 NOTIFICATIONS WHEN THE TUNNEL BREAKS
 ------------------------------------
@@ -5087,7 +5253,7 @@ Check what's happening locally and remotely (via the tunnel):
   bash ${script_name} status
 
 List models the proxy is exposing:
-  ARGO_OPENCODE_SHOW_MODELS=1 bash ${script_name} status   # gated dump
+  ARGO_ANYWHERE_SHOW_MODELS=1 bash ${script_name} status   # gated dump
   curl -s http://localhost:<port>/v1/models | jq .   # raw  (<port> = your tunnel port)
 
 Refresh the model list in your OpenCode config from the live proxy:
@@ -5124,7 +5290,7 @@ Force a different ANL username for one run:
   bash ${script_name} client --user jdoe
 
 Reset the cached username / node:
-  rm -f ${HOME}/.config/argo_opencode/{user,node}
+  rm -f ${HOME}/.config/argo_anywhere/{user,node}
 
 Update argo-proxy on the node (script reinstalls only on first install):
   ssh -J <user>@${ANL_JUMP} <user>@<node> '~/agovenv/bin/argo-proxy update install'
@@ -5198,7 +5364,7 @@ The OpenCode config uses your ANL (Argonne) username as a pseudo-API-key
 cryptographic sense). This is the SAME username you use to SSH into ANL
 hosts (logins.cels.anl.gov etc.) -- it has nothing to do with your laptop's
 local OS account name (\$USER), which may be entirely different. The script
-asks for it on first run and caches it at ~/.config/argo_opencode/user.
+asks for it on first run and caches it at ~/.config/argo_anywhere/user.
 The proxy is reached over loopback inside the SSH tunnel, so HTTP is fine.
 Do not "fix" the URL to https:// -- it will break.
 EOF
@@ -5230,21 +5396,21 @@ main() {
         CLI_TOOL_OVERRIDE="$2"; shift 2 ;;
       --user)
         [ -n "${2:-}" ] || die "--user expects a value."
-        ARGO_OPENCODE_USER="$2"; shift 2 ;;
+        ARGO_ANYWHERE_USER="$2"; shift 2 ;;
       --node)
         [ -n "${2:-}" ] || die "--node expects a value."
-        ARGO_OPENCODE_NODE="$2"; shift 2 ;;
+        ARGO_ANYWHERE_NODE="$2"; shift 2 ;;
       --port)
         case "${2:-}" in
           ''|*[!0-9]*) die "--port expects a numeric value (got '${2:-}')." ;;
         esac
         PORT_OVERRIDE_CLI="$2"; shift 2 ;;
       --force-reinstall)
-        FORCE_REINSTALL=1; export ARGO_OPENCODE_FORCE_REINSTALL=1; shift ;;
+        FORCE_REINSTALL=1; export ARGO_ANYWHERE_FORCE_REINSTALL=1; shift ;;
       --no-jump)
-        ARGO_OPENCODE_NO_JUMP=1; shift ;;
+        ARGO_ANYWHERE_NO_JUMP=1; shift ;;
       --no-mfa)
-        ARGO_OPENCODE_NO_MFA=1; shift ;;
+        ARGO_ANYWHERE_NO_MFA=1; shift ;;
       --probe-nodes)
         PROBE_NODES=1; shift ;;
       --auto-port)
@@ -5266,7 +5432,7 @@ main() {
             if [ "$_pr_lo" -ge "$_pr_hi" ]; then
               die "--port-range needs LO < HI: got '${_pr_lo}-${_pr_hi}'"
             fi
-            ARGO_OPENCODE_PORT_RANGE="$2"; shift 2 ;;
+            ARGO_ANYWHERE_PORT_RANGE="$2"; shift 2 ;;
           *) die "--port-range expects LO-HI (e.g. 64742-64842), got '$2'." ;;
         esac ;;
       --scope)
@@ -5302,6 +5468,19 @@ main() {
   if [ "${KEEP_ORPHANS:-0}" = 1 ] && [ "${DROP_ORPHANS:-0}" = 1 ]; then
     die "--keep-orphans and --drop-orphans cannot be combined."
   fi
+
+  # v2.0 upgrade gate: refuse to run if v1.x state is detected on this
+  # machine. Skipped for read-only / inspection modes (help, list-tools,
+  # status without prior cache) so users can see help even with stale
+  # state. clean is allowed because cleanup is its purpose.
+  case "$mode" in
+    help|list-tools) ;;
+    *)
+      if ! detect_legacy_state_and_block; then
+        die "Refusing to run with v1.x state present. Clean up per UPGRADING.md, then re-run."
+      fi
+      ;;
+  esac
 
   # Resolve the port once, here, before any mode runs.
   resolve_port
