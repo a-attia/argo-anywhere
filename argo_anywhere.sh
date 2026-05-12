@@ -989,8 +989,6 @@ mfa_enabled() {
 # survives across script restarts (the most common failure mode: user sees
 # an error, Ctrl-Cs, and immediately re-runs, resetting the in-memory
 # counter but accumulating real auth failures against CSPO's rate limiter).
-# The file lock expires after SSH_FAIL_LOCK_TTL seconds so a user who waits
-# a few minutes and fixes their auth is not permanently blocked.
 #
 # Scope of tracking: ssh_reachable, ssh_mux_open, the scp + bootstrap ssh
 # in remote_bootstrap, find_next_free_remote_port, probe_remote_port_owner,
@@ -998,11 +996,59 @@ mfa_enabled() {
 # paths in open_tunnel + monitor_tunnel_loop have their own burst-backoff
 # (RECONN_BURST_LIMIT) and the common reconnect path does NOT re-auth (the
 # multiplex master holds the connection), so we don't double-count there.
+#
+# C5 fix (audit): three hardenings against repeated re-locking:
+#
+#   1. TTL = 30 min (was 5 min). 5 min was too short -- a user with
+#      permanently-broken auth could re-lock 12 times an hour, totalling
+#      36 ssh attempts/hour against CSPO. 30 min caps that at ~6 attempts/hour
+#      which sits comfortably below CSPO thresholds.
+#
+#   2. Post-expiry reset to THRESHOLD-1 (not 0). After a lock auto-expires,
+#      the user gets ONE more attempt before re-locking, not THREE fresh
+#      attempts. If their auth is still broken, the second auth-failure
+#      re-arms the lock immediately. This punishes "wait, then retry blindly"
+#      patterns without punishing "wait, fix, retry succeeds" patterns.
+#
+#   3. Exponential backoff per lock-event. The count of historical lock
+#      events lives in $SSH_FAIL_LOCK_COUNT_FILE; each new lock multiplies
+#      the TTL by 2 (capped at 24h). So: first lock 30 min, second 60 min,
+#      third 120 min, ... cap at 1440 min. A successful ssh attempt resets
+#      the count to 0 (fresh state). This rewards users who eventually
+#      get their auth working.
 SSH_FAIL_THRESHOLD=3
-SSH_FAIL_LOCK_TTL=300   # seconds; 5 minutes matches typical fail2ban windows
+SSH_FAIL_LOCK_TTL_BASE=1800     # 30 min base (was 300 = 5 min, too short for CSPO)
+SSH_FAIL_LOCK_TTL_MAX=86400     # 24h cap on exponential backoff
 SSH_FAIL_LOCK_FILE="${STATE_DIR}/ssh-fail-lock"
+SSH_FAIL_LOCK_COUNT_FILE="${STATE_DIR}/ssh-fail-lock-count"
 _SSH_FAIL_COUNT=0
 _SSH_LOCKED=0
+
+# Compute the current TTL based on past lock-event count (0 = first lock,
+# 1 = second lock, ...). Doubles per event, capped at SSH_FAIL_LOCK_TTL_MAX.
+_ssh_lock_ttl_for_count() {
+  local count="${1:-0}" ttl="$SSH_FAIL_LOCK_TTL_BASE"
+  local i=0
+  while [ "$i" -lt "$count" ] && [ "$ttl" -lt "$SSH_FAIL_LOCK_TTL_MAX" ]; do
+    ttl=$((ttl * 2))
+    i=$((i + 1))
+  done
+  [ "$ttl" -gt "$SSH_FAIL_LOCK_TTL_MAX" ] && ttl="$SSH_FAIL_LOCK_TTL_MAX"
+  printf '%s' "$ttl"
+}
+
+# Read the lock-event count from disk. 0 if not yet recorded.
+_ssh_lock_count_read() {
+  if [ -f "$SSH_FAIL_LOCK_COUNT_FILE" ]; then
+    local n; n="$(cat "$SSH_FAIL_LOCK_COUNT_FILE" 2>/dev/null || echo 0)"
+    case "$n" in
+      ''|*[!0-9]*) printf '0' ;;
+      *) printf '%s' "$n" ;;
+    esac
+  else
+    printf '0'
+  fi
+}
 
 # Pre-attempt gate: callers should invoke this before running ssh and skip
 # (return failure) if the lock is set. Returns 0 = ok to attempt, 1 = locked.
@@ -1013,36 +1059,49 @@ ssh_attempt_pre() {
   if [ "$_SSH_LOCKED" -eq 1 ]; then
     return 1
   fi
-  # On-disk lock (survives restarts).
+  # On-disk lock (survives restarts). TTL depends on past lock-event count
+  # (exponential backoff per audit C5).
   if [ -f "$SSH_FAIL_LOCK_FILE" ]; then
     local locked_at; locked_at="$(cat "$SSH_FAIL_LOCK_FILE" 2>/dev/null)"
     local now; now="$(date +%s)"
-    if [ -n "$locked_at" ] && [ $((now - locked_at)) -lt "$SSH_FAIL_LOCK_TTL" ]; then
-      local remaining=$(( SSH_FAIL_LOCK_TTL - (now - locked_at) ))
-      err "SSH failure lock is active (${remaining}s remaining)."
+    local lock_count; lock_count="$(_ssh_lock_count_read)"
+    local current_ttl; current_ttl="$(_ssh_lock_ttl_for_count "$lock_count")"
+    if [ -n "$locked_at" ] && [ $((now - locked_at)) -lt "$current_ttl" ]; then
+      local remaining=$(( current_ttl - (now - locked_at) ))
+      local rem_min=$(( remaining / 60 ))
+      err "SSH failure lock is active (${remaining}s = ~${rem_min}min remaining)."
       err "  Too many recent failed SSH attempts; refusing to add more."
-      err "  Either wait ${remaining}s and re-run, or verify your SSH manually:"
+      err "  Lock event #$((lock_count + 1)); current TTL ${current_ttl}s."
+      err "  Either wait ${rem_min}min and re-run, or verify your SSH manually:"
       err "    ssh -o ConnectTimeout=5 ${ARGO_ANYWHERE_USER:-<user>}@${ANL_JUMP} true"
       err "  Then delete the lock to unblock immediately:"
       err "    rm ${SSH_FAIL_LOCK_FILE}"
       _SSH_LOCKED=1
       return 1
     else
-      # TTL expired; remove stale lock and reset in-memory state.
+      # TTL expired. C5 fix: do NOT reset _SSH_FAIL_COUNT to 0; reset to
+      # THRESHOLD-1 so the user gets ONE more attempt before re-locking,
+      # not THREE fresh attempts. Punishes "wait, then blindly retry"
+      # patterns without punishing "wait, fix, retry succeeds" patterns.
+      # The on-disk lock file is removed (the next ssh_attempt_fail will
+      # rewrite it if needed). The lock-event count file is preserved so
+      # exponential backoff persists across the expiry.
       rm -f "$SSH_FAIL_LOCK_FILE"
-      _SSH_FAIL_COUNT=0
+      _SSH_FAIL_COUNT=$((SSH_FAIL_THRESHOLD - 1))
       _SSH_LOCKED=0
     fi
   fi
   return 0
 }
 
-# Mark the most recent ssh attempt as successful. Resets the counter and
-# removes the on-disk lock so that transient failures don't keep the user
-# permanently blocked after they fix their auth.
+# Mark the most recent ssh attempt as successful. Resets the counter,
+# removes the on-disk lock, AND resets the historical lock-event count
+# (so the user starts fresh; the exponential backoff doesn't punish them
+# forever for past failures once they've fixed their setup).
 ssh_attempt_ok() {
   _SSH_FAIL_COUNT=0
   rm -f "$SSH_FAIL_LOCK_FILE" 2>/dev/null || true
+  rm -f "$SSH_FAIL_LOCK_COUNT_FILE" 2>/dev/null || true
 }
 
 # Mark the most recent ssh attempt as a failure. Increments the counter and,
@@ -1093,11 +1152,31 @@ ssh_attempt_fail() {
       exit 3
     fi
 
+    # C5 fix: increment the historical lock-event count (drives exponential
+    # backoff on subsequent locks). Read prior count, add 1, write back.
+    # Failure to write is non-fatal here (we already have the on-disk lock
+    # file with the timestamp); the count file just enables backoff and
+    # an unfortunate filesystem state would only mean the next lock TTL
+    # doesn't grow as expected. Log a warn so the user notices.
+    local _prev_lock_count; _prev_lock_count="$(_ssh_lock_count_read)"
+    local _new_lock_count=$((_prev_lock_count + 1))
+    if ! printf '%s\n' "$_new_lock_count" > "$SSH_FAIL_LOCK_COUNT_FILE" 2>/dev/null; then
+      warn "Could not write lock-event count file at ${SSH_FAIL_LOCK_COUNT_FILE};"
+      warn "  exponential backoff may not progress correctly. Lock itself is intact."
+    fi
+    local _current_ttl; _current_ttl="$(_ssh_lock_ttl_for_count "$_prev_lock_count")"
+    local _ttl_min=$((_current_ttl / 60))
+
     err "SSH has failed ${_SSH_FAIL_COUNT} consecutive times."
     err "Disabling further SSH attempts to prevent CSPO from blocking your IP"
     err "  (and locking out everyone else sharing this compute node)."
-    err "  Lock will auto-expire in ${SSH_FAIL_LOCK_TTL}s, or delete it manually:"
+    err "  Lock event #${_new_lock_count}; TTL ${_current_ttl}s (~${_ttl_min}min)."
+    err "  Lock will auto-expire after that, or delete it manually:"
     err "    rm ${SSH_FAIL_LOCK_FILE}"
+    if [ "$_prev_lock_count" -gt 0 ]; then
+      err "  (TTL grows exponentially per repeated lock event: 30min -> 60 -> 120 -> ...)"
+      err "  (A successful SSH attempt resets the count to 0.)"
+    fi
     err ""
     err "Common causes:"
     err "  * Closed laptop while SSH agent forwarding was active (kills the forwarded key)"
