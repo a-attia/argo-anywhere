@@ -1053,9 +1053,46 @@ ssh_attempt_fail() {
   _SSH_FAIL_COUNT=$((_SSH_FAIL_COUNT + 1))
   if [ "$_SSH_FAIL_COUNT" -ge "$SSH_FAIL_THRESHOLD" ] && [ "$_SSH_LOCKED" -ne 1 ]; then
     _SSH_LOCKED=1
-    # Write timestamp to disk so the lock survives a script restart.
-    mkdir -p "$STATE_DIR" 2>/dev/null || true
-    date +%s > "$SSH_FAIL_LOCK_FILE" 2>/dev/null || true
+
+    # C4 fix: lock MUST persist to disk to survive script restarts.
+    # If we can't persist, the user can Ctrl-C + re-run and bypass the
+    # in-memory _SSH_FAIL_COUNT, accumulating real auth failures
+    # against CSPO's rate limiter -- exactly the situation this defense
+    # is supposed to PREVENT. Pre-fix code did:
+    #     mkdir -p "$STATE_DIR" 2>/dev/null || true
+    #     date +%s > "$SSH_FAIL_LOCK_FILE" 2>/dev/null || true
+    # Both errors swallowed -> if STATE_DIR creation fails (read-only
+    # $HOME, full disk, NFS hiccup), the lock is in-memory only and
+    # the user can bypass it. Now: die hard if either step fails.
+    # Better to halt than to silently expose the user to CSPO blocks.
+    if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+      err "SSH has failed ${_SSH_FAIL_COUNT} consecutive times AND we cannot"
+      err "  create the state dir to persist the failure lock:"
+      err "    ${STATE_DIR}"
+      err "  Without an on-disk lock, you could bypass our CSPO defense by"
+      err "  Ctrl-C + re-running. Refusing to continue."
+      err ""
+      err "Likely causes for the mkdir failure:"
+      err "  * \$HOME is read-only or full"
+      err "  * permission problem on \$HOME/.config/"
+      err "  * SELinux / AppArmor blocking it"
+      err ""
+      err "Fix the mkdir issue, then re-run. The first SSH attempt after the"
+      err "  fix starts a fresh failure counter."
+      exit 3
+    fi
+    if ! date +%s > "$SSH_FAIL_LOCK_FILE" 2>/dev/null; then
+      err "SSH has failed ${_SSH_FAIL_COUNT} consecutive times AND we cannot"
+      err "  write the failure lock file:"
+      err "    ${SSH_FAIL_LOCK_FILE}"
+      err "  Without persistence, you could bypass our CSPO defense by"
+      err "  Ctrl-C + re-running. Refusing to continue."
+      err ""
+      err "Likely cause: ${STATE_DIR} exists but is not writable by you."
+      err "Fix the permissions, then re-run."
+      exit 3
+    fi
+
     err "SSH has failed ${_SSH_FAIL_COUNT} consecutive times."
     err "Disabling further SSH attempts to prevent CSPO from blocking your IP"
     err "  (and locking out everyone else sharing this compute node)."
