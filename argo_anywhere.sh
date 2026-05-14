@@ -1621,12 +1621,31 @@ ensure_claudecode_installed() {
 # globals, since the writer (write_claudecode_config) is invoked via
 # handle_config_file and gets only the destination path.
 #
-# Decision tree:
+# Decision tree (H6 fix, audit Phase 2b Batch 4):
 #   1. --scope project|global / CLAUDECODE_SCOPE env -> use that.
 #   2. ~/.claude/settings.json exists AND has a non-empty `env` block
 #      (suggests user has a personal Anthropic subscription configured
-#      globally; we don't want to clobber it) -> default to project scope.
-#   3. Else -> global scope (smoothest UX for first-time users).
+#      globally; we don't want to clobber it) -> project scope.
+#   3. Else -> project scope by DEFAULT (was global pre-H6).
+#
+# H6 rationale: the old default of global-on-fresh-install was a silent
+# correctness landmine. On a fresh Claude Code install the user has not
+# yet run `claude auth login`, so ~/.claude.json doesn't exist, signal 1
+# misses, and we'd land on global. Then the user runs `claude auth
+# login` later -> the OAuth token gets stored in ~/.claude.json. Per
+# Anthropic's docs the OAuth token TAKES PRECEDENCE over
+# ANTHROPIC_AUTH_TOKEN in settings.json, silently neutralizing our
+# config. The user thinks they're talking to argo-proxy but they're
+# actually talking to their personal Anthropic account. New default of
+# project-scope avoids the precedence collision entirely (env in
+# settings.local.json applies regardless of OAuth state).
+#
+# Trade-off: project-scope means the user must be IN the project
+# directory to get the proxy config. We mention this explicitly in the
+# post-decision log so first-time users discover --scope global if
+# they actually want machine-wide behavior. Power users with a single
+# "AI work" directory aren't affected; users who want global behavior
+# can set CLAUDECODE_SCOPE=global in their shell rc.
 #
 # Why we never write to ./.claude/settings.json (the COMMITTED project
 # file): doing so would force every collaborator on the user's git repo
@@ -1703,9 +1722,22 @@ PYEOF
     log "  This keeps your global Anthropic settings intact."
     log "  Override with '--scope global' if you'd rather replace the global env."
   else
-    _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_GLOBAL_CONFIG"
-    _CLAUDECODE_SCOPE_NAME="global (~/.claude/settings.json)"
-    log "Claude Code scope: global (auto; no personal subscription or existing env block detected)."
+    # H6 fix (audit Phase 2b Batch 4): default to project scope even on
+    # fresh installs. See the function-level comment for the OAuth
+    # precedence reasoning. The discoverability hint below makes the
+    # new default visible so users who actually want machine-wide
+    # behavior know how to get it.
+    _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
+    _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
+    log "Claude Code scope: project (auto; default since v2.0)."
+    log "  Config will land at ${CLAUDECODE_PROJECT_CONFIG} and only apply when"
+    log "  'claude' is run from this directory ($(pwd))."
+    log "  Run with '--scope global' (or set CLAUDECODE_SCOPE=global) to write"
+    log "  to ~/.claude/settings.json instead and have the proxy config apply"
+    log "  in every directory on this machine. Note: '--scope global' is"
+    log "  silently neutralized once you run 'claude auth login', because the"
+    log "  OAuth token in ~/.claude.json takes precedence; project scope is"
+    log "  not affected by that precedence rule."
   fi
 }
 
@@ -3302,6 +3334,25 @@ do_post_tunnel_for_cli_tool() {
       log "    claude"
       log "  Models default to whatever Claude Code's --model flag resolves;"
       log "  the proxy advertises Anthropic's models at /v1/messages."
+      # H7 fix (audit Phase 2b Batch 4): privacy warning. The config
+      # written above contains the user's ANL username in clear text
+      # under env.ANTHROPIC_AUTH_TOKEN (the proxy uses the username as
+      # the bearer token; argo-proxy attributes calls by it). The
+      # username is not cryptographically a secret but IS personally-
+      # identifying -- leaking it into a public dotfile repo or a
+      # shared machine image is a privacy regression. Warn the user
+      # explicitly and remind them to gitignore the file.
+      warn "Privacy note: ${_CLAUDECODE_SCOPE_PATH} now contains your ANL username"
+      warn "  ('${ANL_USERNAME}') in env.ANTHROPIC_AUTH_TOKEN. Don't commit it to a"
+      warn "  public dotfile repo or share it widely."
+      if [ "$_CLAUDECODE_SCOPE_PATH" = "$CLAUDECODE_PROJECT_CONFIG" ]; then
+        log "  (Project scope -- Claude Code's defaults gitignore"
+        log "   .claude/settings.local.json automatically; verify your repo's"
+        log "   .gitignore covers it.)"
+      else
+        log "  (Global scope -- if your ~/.claude is tracked in a dotfiles repo,"
+        log "   add .claude/settings.json to that repo's .gitignore.)"
+      fi
       ;;
     # aider|cursor|generic) added in Phase 4
     "")
@@ -4015,16 +4066,41 @@ mode_server() {
       # Compare against the Argonne username we were told to serve, NOT the
       # OS account name -- on shared compute nodes a single OS user could
       # in principle have run argo-proxy under multiple Argonne identities.
+      #
+      # H5 fix (audit): inverted from "deny only on KNOWN mismatch" to
+      # "require KNOWN match before reusing". Previously, if the
+      # config.yaml was missing/unreadable/malformed, cfg_user came back
+      # empty and the old guard short-circuited to false -- silently
+      # falling through to "reusing." That meant a healthy argo-proxy
+      # with an inspection-failed config was attributed to the requested
+      # user without any verification. New rule: refuse to reuse unless
+      # we POSITIVELY confirm cfg_user == want_user. Three explicit
+      # branches: cfg_user empty (refuse with inspection-failed message),
+      # cfg_user set but != want_user (refuse with mismatch message;
+      # was already correct), cfg_user == want_user (reuse). want_user
+      # empty falls into the inspection-failed branch as well -- if we
+      # don't even know who we're supposed to be serving, we shouldn't
+      # be attaching to anyone's argo-proxy.
       local want_user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
       local cfg_user
       cfg_user="$(awk -F'"' '/^[[:space:]]*user:/{print $2; exit}' \
                    "${HOME}/.config/argoproxy/config.yaml" 2>/dev/null)"
-      if [ -n "$cfg_user" ] && [ -n "$want_user" ] && [ "$cfg_user" != "$want_user" ]; then
+      if [ -z "$want_user" ]; then
+        err "Existing argo-proxy on :${PROXY_PORT} (pid ${listener_pid}) is healthy, but ARGO_ANYWHERE_USER (and the legacy ANL_USERNAME) are unset."
+        err "  Refusing to reuse it; cannot verify whose calls would be attributed."
+        die "  Set ARGO_ANYWHERE_USER and re-run, or stop it first:  screen -S ${SCREEN_SESSION} -X quit"
+      fi
+      if [ -z "$cfg_user" ]; then
+        err "Existing argo-proxy on :${PROXY_PORT} (pid ${listener_pid}) is healthy, but its config.yaml is missing or unreadable at \${HOME}/.config/argoproxy/config.yaml."
+        err "  Refusing to reuse it; cannot verify identity."
+        die "  Stop it first:  screen -S ${SCREEN_SESSION} -X quit   (or pick another --port)"
+      fi
+      if [ "$cfg_user" != "$want_user" ]; then
         err "Existing argo-proxy on :${PROXY_PORT} (pid ${listener_pid}) is configured for user '${cfg_user}', not '${want_user}'."
         err "  Refusing to reuse it; calls would be misattributed."
         die "  Stop it first:  screen -S ${SCREEN_SESSION} -X quit   (or pick another --port)"
       fi
-      ok "Existing argo-proxy already serving on 127.0.0.1:${PROXY_PORT} (pid ${listener_pid}); reusing."
+      ok "Existing argo-proxy already serving on 127.0.0.1:${PROXY_PORT} (pid ${listener_pid}); identity verified (user='${cfg_user}'); reusing."
       return
     else
       warn "Port ${PROXY_PORT} is bound by our pid ${listener_pid} but /health does not answer; will kill and restart."
@@ -5543,9 +5619,18 @@ Options:
                          project -> ./.claude/settings.local.json (per-repo;
                                     gitignored by Claude Code defaults).
                          global  -> ~/.claude/settings.json (all projects).
-                       If unset, the script picks project when ~/.claude/
-                       settings.json already has an env block (preserves
-                       any personal Anthropic settings) and global otherwise.
+                       If unset, the script defaults to PROJECT scope
+                       (changed in v2.0; was global on fresh installs).
+                       The new default avoids a silent correctness bug
+                       where the OAuth token in ~/.claude.json (created
+                       by 'claude auth login') takes precedence over
+                       env.ANTHROPIC_AUTH_TOKEN in settings.json,
+                       neutralizing the proxy config; project scope is
+                       not affected by that precedence rule.
+                       Use --scope global if you'd rather have the
+                       config apply machine-wide (and accept that you
+                       must NOT run 'claude auth login' from this
+                       machine, or it'll silently override us).
                        Canonical env: CLAUDECODE_SCOPE.
   --verbose-server     Enable argo-proxy verbose logging on the compute
                        node. By default (since v2.0) the script writes
