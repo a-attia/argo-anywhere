@@ -1862,8 +1862,17 @@ ssh_preflight() {
   if ! ssh_attempt_pre; then
     die "Refusing to attempt SSH preflight: too many recent SSH failures (lock active). See above for recovery instructions."
   fi
+  # H1 fix (audit): include $(ssh_args "$user" "$target") so the BatchMode
+  # preflight uses the same routing as the actual subsequent SSHs --
+  # specifically, ProxyJump via $ANL_JUMP when --no-mfa --node compute-X is
+  # used from off-network. Without this, the preflight tries a direct
+  # connect to compute-X (always fails off-network), increments the
+  # failure counter, and a third invocation triggers the SSH lock.
+  # ssh_args returns the empty string for target == ANL_JUMP, so the
+  # jump-loop guard (preflight against the jump host itself) still works.
+  # shellcheck disable=SC2046
   if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
-       "${user}@${target}" true 2>/dev/null; then
+       $(ssh_args "$user" "$target") "${user}@${target}" true 2>/dev/null; then
     ssh_attempt_ok
     ok "Passwordless SSH to ${target} works."
     return
@@ -1956,16 +1965,28 @@ pick_node() {
   if [ "${PROBE_NODES:-0}" = 1 ]; then
     log "Probing ${#ANL_NODES[@]} node(s) $(jump_descr) (--probe-nodes)..."
     for node in "${ANL_NODES[@]}"; do
+      # H3 fix (audit): explicit pre-iteration gate. ssh_reachable does
+      # its own ssh_attempt_pre check internally and returns false on
+      # lock -- but that's indistinguishable from a real reachability
+      # failure, so the loop would silently mark every remaining node
+      # as "unreachable" rather than telling the user the SSH lock
+      # fired. Front-loading the check lets us die with the proper
+      # recovery message before consuming an attempt the lock would
+      # have refused anyway.
+      if ! ssh_attempt_pre; then
+        die "Refusing to continue --probe-nodes: too many recent SSH failures (lock active). See above for recovery instructions."
+      fi
+      # ssh_attempt_pre succeeded above; ssh_reachable will call it
+      # again internally (idempotent for the not-yet-locked case) and
+      # then ssh_attempt_ok or ssh_attempt_fail to update the counter.
       if ssh_reachable "$user" "$node"; then
         ok "  reachable: ${node}"
         working+=("$node")
       else
         warn "  unreachable: ${node}"
-        # Bail early if the SSH attempt tracker has locked: the rest of
-        # the probe loop would silently mark every remaining node as
-        # "unreachable" without actually trying ssh (because
-        # ssh_attempt_pre returns 1 once locked). Better to fail fast
-        # with the recovery message already shown by the tracker.
+        # Defense-in-depth: the H3 pre-iteration gate above catches the
+        # already-locked case; this catches the case where the tracker
+        # JUST locked as a result of this iteration's ssh_attempt_fail.
         if [ "${_SSH_LOCKED:-0}" = 1 ]; then
           die "SSH attempt tracker has locked further attempts mid-probe; cannot continue. See above for recovery."
         fi
@@ -2021,6 +2042,16 @@ EOF
   fi
 
   local picked
+  # H2 fix (audit): per-call retry limit on the interactive picker loop.
+  # A confused user typing bad hostnames burns one CSPO attempt per
+  # ssh_reachable miss; without a cap, they can rack up several attempts
+  # before the global SSH lock fires. Cap is 5 attempts (NOT counting
+  # in-range numeric picks, default Enter, or numeric-out-of-range
+  # parser warnings -- only attempts that would consume an SSH attempt).
+  # On reaching the cap, refuse to continue and direct the user to
+  # --node / --probe-nodes / re-running with a fresh terminal.
+  local attempts=0
+  local _PICK_NODE_MAX=5
   while :; do
     local choice
     choice="$(ask "Pick a node [1-${#working[@]}, hostname, or Enter for default]:" "")"
@@ -2028,7 +2059,8 @@ EOF
       # Default
       picked="$default"; break
     elif [[ "$choice" =~ ^[0-9]+$ ]]; then
-      # Numeric pick: must be in range
+      # Numeric pick: must be in range. NOT counted toward the H2 cap;
+      # this branch never opens an SSH connection.
       if [ "$choice" -ge 1 ] && [ "$choice" -le "${#working[@]}" ]; then
         picked="${working[$((choice-1))]}"; break
       else
@@ -2040,6 +2072,10 @@ EOF
       # ANL_NODES, verify reachability, use it. Equivalent to the
       # --node-flag path so the user gets the same UX whether they
       # provided the host on the CLI or typed it interactively.
+      attempts=$((attempts+1))
+      if [ "$attempts" -gt "$_PICK_NODE_MAX" ]; then
+        die "Too many failed picks in this picker (${_PICK_NODE_MAX}). Re-run with --node <host> if you know the hostname, or --probe-nodes to see which nodes are currently reachable."
+      fi
       local in_list=0 n
       for n in "${ANL_NODES[@]:-}"; do
         [ "$n" = "$choice" ] && in_list=1 && break
@@ -2057,10 +2093,12 @@ EOF
         if [ "${_SSH_LOCKED:-0}" = 1 ]; then
           die "SSH attempt tracker has locked further attempts; cannot continue. See above for recovery."
         fi
-        warn "Could not reach '${choice}' $(jump_descr) as ${user}; pick again."
+        local _remaining=$((_PICK_NODE_MAX - attempts))
+        warn "Could not reach '${choice}' $(jump_descr) as ${user}; pick again (${_remaining} attempt(s) left)."
         continue
       fi
     else
+      # Parse error (no SSH attempted) -- not counted toward the H2 cap.
       warn "Invalid choice. Type a number (1-${#working[@]}), a hostname, or hit Enter."
     fi
   done
