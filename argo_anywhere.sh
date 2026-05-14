@@ -2115,15 +2115,24 @@ remote_bootstrap() {
 
   log "Running server bootstrap on ${node}..."
   # Forward the canonical env names; --force-reinstall passes through too.
+  # P2 fix: also forward ARGO_ANYWHERE_VERBOSE_SERVER (set by --verbose-server)
+  # so the server-side write_argoproxy_config knows whether to emit
+  # `verbose: true` (debug; explicit opt-in) or `verbose: false` (default
+  # since v2.0; prevents prompts being logged to ~/.argo_anywhere.server.log
+  # in plaintext on a shared compute node).
   local force_kv=""
   if [ -n "${FORCE_REINSTALL:-}" ]; then
     force_kv="ARGO_ANYWHERE_FORCE_REINSTALL=1 "
+  fi
+  local verbose_kv=""
+  if [ -n "${ARGO_ANYWHERE_VERBOSE_SERVER:-}" ]; then
+    verbose_kv="ARGO_ANYWHERE_VERBOSE_SERVER=1 "
   fi
   ssh_attempt_pre || die "Refusing to run bootstrap: SSH failure lock is active. See above."
   # shellcheck disable=SC2046
   if ssh -o StrictHostKeyChecking=accept-new \
          $(ssh_args "$user" "$node") "${user}@${node}" \
-         "ARGO_ANYWHERE_USER='${user}' ARGO_ANYWHERE_PORT='${PROXY_PORT}' ${force_kv}bash ~/${REMOTE_SELF} server"; then
+         "ARGO_ANYWHERE_USER='${user}' ARGO_ANYWHERE_PORT='${PROXY_PORT}' ${force_kv}${verbose_kv}bash ~/${REMOTE_SELF} server"; then
     ssh_attempt_ok
   else
     ssh_attempt_fail
@@ -3562,6 +3571,20 @@ write_argoproxy_config() {
 
   local real_cfg="${HOME}/.config/argoproxy/config.yaml"
 
+  # P2 fix (audit): default verbose=false, opt-in via --verbose-server
+  # (which sets ARGO_ANYWHERE_VERBOSE_SERVER=1, forwarded by
+  # remote_bootstrap). Pre-fix default was verbose=true, which made
+  # argo-proxy log every request body (prompts) and response body to
+  # its stdout, captured in ~/.argo_anywhere.server.log on the compute
+  # node. The Argo gateway itself doesn't retain prompts, but the
+  # local verbose log on the user's compute node is created by
+  # argo-proxy on their account; the gateway's privacy guarantee
+  # doesn't propagate to the user's own log file.
+  local verbose_value="false"
+  if [ -n "${ARGO_ANYWHERE_VERBOSE_SERVER:-}" ]; then
+    verbose_value="true"
+  fi
+
   # Case 1: no existing file -- emit defaults.
   if [ ! -f "$real_cfg" ]; then
     cat > "$dest" <<EOF
@@ -3569,7 +3592,7 @@ config_version: "3"
 user: "${user}"
 host: 127.0.0.1
 port: ${PROXY_PORT}
-verbose: true
+verbose: ${verbose_value}
 argo_base_url: "https://apps.inside.anl.gov/argoapi"
 EOF
     return
@@ -3597,7 +3620,7 @@ config_version: "3"
 user: "${user}"
 host: 127.0.0.1
 port: ${PROXY_PORT}
-verbose: true
+verbose: ${verbose_value}
 argo_base_url: "https://apps.inside.anl.gov/argoapi"
 EOF
     return
@@ -3606,13 +3629,18 @@ EOF
   # Try the merge. If PyYAML is missing or the existing file fails to parse,
   # exit code != 0; we then fall back to defaults-only with a warning so
   # the script doesn't hang on a partial/empty proposed file.
-  if ! "$pyexe" - "$real_cfg" "$dest" "$user" "$PROXY_PORT" <<'PYEOF' 2>/dev/null
+  #
+  # P2 fix: pass the verbose value as a 5th arg. The Python heredoc only
+  # SETS verbose if the existing file lacks it (setdefault); existing
+  # explicit user choices are preserved either way.
+  if ! "$pyexe" - "$real_cfg" "$dest" "$user" "$PROXY_PORT" "$verbose_value" <<'PYEOF' 2>/dev/null
 import sys
 try:
     import yaml
 except ImportError:
     sys.exit(2)
-src, dst, user, port = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+src, dst, user, port, verbose_str = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
+verbose_default = (verbose_str == "true")
 try:
     with open(src) as f:
         data = yaml.safe_load(f) or {}
@@ -3627,7 +3655,9 @@ data['host'] = "127.0.0.1"
 data['port'] = port
 # Provide sensible defaults for keys argo-proxy needs but the existing file
 # might lack (e.g. a legacy file with no argo_base_url and no verbose).
-data.setdefault('verbose', True)
+# verbose_default reflects the script's --verbose-server flag (P2 fix);
+# preserves any explicit user choice already in the existing config.
+data.setdefault('verbose', verbose_default)
 data.setdefault('argo_base_url', "https://apps.inside.anl.gov/argoapi")
 with open(dst, 'w') as f:
     yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
@@ -3641,7 +3671,7 @@ config_version: "3"
 user: "${user}"
 host: 127.0.0.1
 port: ${PROXY_PORT}
-verbose: true
+verbose: ${verbose_value}
 argo_base_url: "https://apps.inside.anl.gov/argoapi"
 EOF
   fi
@@ -5314,6 +5344,7 @@ Usage: $(basename "$0") [SUBCOMMAND] [--cli-tool NAME]
                           [--no-jump] [--no-mfa] [--probe-nodes]
                           [--auto-port] [--port-range LO-HI]
                           [--scope project|global]
+                          [--verbose-server]
                           [--force-reinstall]
                           [--keep-orphans | --drop-orphans]
                           [--dry-run] [--local-only] [-y]
@@ -5434,6 +5465,16 @@ Options:
                        settings.json already has an env block (preserves
                        any personal Anthropic settings) and global otherwise.
                        Canonical env: CLAUDECODE_SCOPE.
+  --verbose-server     Enable argo-proxy verbose logging on the compute
+                       node. By default (since v2.0) the script writes
+                       \`verbose: false\` in the argo-proxy config to
+                       prevent prompt+response bodies from being logged
+                       to ~/.argo_anywhere.server.log on the compute
+                       node (where they'd be readable by anyone with
+                       SSH access to your account, plus root). Use
+                       this flag ONLY when actively debugging argo-proxy
+                       behavior; remember to remove it for routine use.
+                       Canonical env: ARGO_ANYWHERE_VERBOSE_SERVER=1.
 
   Flags below apply to 'update-models':
   --keep-orphans       Skip the per-orphan prompt; keep ALL models in the
@@ -5690,6 +5731,11 @@ Canonical (preferred):
   ARGO_ANYWHERE_PORT_RANGE=LO-HI port range for --auto-port and the [n]ext-
                                  free-port choice (default
                                  PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100)
+  ARGO_ANYWHERE_VERBOSE_SERVER=1 enable argo-proxy verbose logging on the
+                                 compute node (alternative to --verbose-server).
+                                 OFF by default since v2.0 to prevent prompt
+                                 bodies from being logged to disk on the
+                                 compute node. Use only for debugging.
   ARGO_BOX_STYLE=ascii|unicode   override the box-drawing heuristic
 
 Legacy (still honored, prints a one-time deprecation warning):
@@ -5875,6 +5921,14 @@ main() {
         ARGO_ANYWHERE_NO_MFA=1; shift ;;
       --probe-nodes)
         PROBE_NODES=1; shift ;;
+      --verbose-server)
+        # P2 fix: explicit opt-in for argo-proxy's verbose mode on the
+        # compute node. Default since v2.0 is verbose=false (the
+        # server-side log file ~/.argo_anywhere.server.log otherwise
+        # captures every prompt+response in plaintext on a shared
+        # compute node). Set this when actively debugging argo-proxy
+        # behavior; remember to remove for routine use.
+        ARGO_ANYWHERE_VERBOSE_SERVER=1; export ARGO_ANYWHERE_VERBOSE_SERVER; shift ;;
       --auto-port)
         AUTO_PORT=1; shift ;;
       --port-range)
