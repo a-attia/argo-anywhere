@@ -597,3 +597,9 @@ git config --local commit.template .gitmessage
   the v2.0 development cycle. Per-commit attribution via the
   `Co-Authored-By:` trailer; see [`CONTRIBUTORS.md`](CONTRIBUTORS.md)
   for the full acknowledgment + rationale.
+
+---
+
+*Created 2025 (project inception); rewritten 2026-05-14 to follow
+the [scicomp-research-skills](https://github.com/a-attia/scicomp-research-skills)
+human-facing-doc-authoring conventions. Maintained by Ahmed Attia.*
