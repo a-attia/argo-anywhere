@@ -2149,17 +2149,58 @@ remote_bootstrap() {
 SSH_TUNNEL_PID=""
 MONITOR_PID=""
 
+# Set by main() and mode_client() so cleanup_local can render an
+# accurate post-Ctrl+C exit summary (audit finding N1). Both default
+# to empty so the summary degrades gracefully if cleanup fires before
+# they're set (e.g. error during arg parsing).
+_INVOKED_MODE=""
+_INVOKED_CLI_TOOL=""
+
 cleanup_local() {
   local rc=$?
   trap - EXIT INT TERM
   if [ -n "$MONITOR_PID" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
     kill "$MONITOR_PID" 2>/dev/null || true
   fi
+  local closed_tunnel=0
   if [ -n "$SSH_TUNNEL_PID" ] && kill -0 "$SSH_TUNNEL_PID" 2>/dev/null; then
     log "Closing SSH tunnel (pid=${SSH_TUNNEL_PID})..."
     kill "$SSH_TUNNEL_PID" 2>/dev/null || true
     wait "$SSH_TUNNEL_PID" 2>/dev/null || true
+    closed_tunnel=1
   fi
+
+  # Audit finding N1: print a short exit summary so the user knows
+  # exactly what just got torn down vs what is still running on the
+  # compute node. Only meaningful for foregrounded modes that owned
+  # a local tunnel + monitor (client / tunnel); skip otherwise to
+  # avoid noise on script-internal die paths or for subcommands
+  # like 'status' / 'help' that never started a monitor.
+  case "${_INVOKED_MODE:-}" in
+    client|setup|tunnel)
+      if [ "$closed_tunnel" = 1 ] || [ -n "$MONITOR_PID" ]; then
+        local _self; _self="$(basename "$0")"
+        local _node="${_PICKED_NODE:-${ARGO_ANYWHERE_NODE:-<node>}}"
+        # Only mention --cli-tool if we actually picked one (client/setup);
+        # tunnel mode is tool-agnostic.
+        local _reuse_cmd
+        if [ -n "${_INVOKED_CLI_TOOL:-}" ]; then
+          _reuse_cmd="bash ${_self} --cli-tool ${_INVOKED_CLI_TOOL} client"
+        elif [ "${_INVOKED_MODE}" = "tunnel" ]; then
+          _reuse_cmd="bash ${_self} tunnel"
+        else
+          _reuse_cmd="bash ${_self} --cli-tool <name> client"
+        fi
+        ok "Local tunnel and health monitor stopped."
+        ok "The remote argo-proxy on ${_node} is still running (intentional)."
+        log "  - To use it again: ${_reuse_cmd}"
+        log "      (will detect and reuse the existing proxy)"
+        log "  - To fully stop:   bash ${_self} stop"
+        log "  - To remove all artifacts (local + remote): bash ${_self} clean"
+      fi
+      ;;
+  esac
+
   exit "$rc"
 }
 
@@ -3484,6 +3525,9 @@ mode_client() {
   if [ -z "$chosen_client" ]; then
     die "No CLI tool picked; aborting. Pass --cli-tool <name> or pick from the menu."
   fi
+  # Expose to cleanup_local (audit finding N1) so the Ctrl+C exit
+  # summary can suggest the exact reuse command (--cli-tool <name>).
+  _INVOKED_CLI_TOOL="$chosen_client"
 
   # Call directly (NOT via $()): see comment in mode_tunnel for why.
   _client_common_setup 1
@@ -6027,6 +6071,11 @@ main() {
       *) warn "--cli-tool ignored for subcommand '${mode}' (only used by client/setup/update-models)." ;;
     esac
   fi
+
+  # Expose the invoked subcommand to cleanup_local (audit finding N1)
+  # so the Ctrl+C exit summary can branch on whether we actually owned
+  # a local tunnel (client/setup/tunnel) vs not (status/stop/help/...).
+  _INVOKED_MODE="$mode"
 
   case "$mode" in
     client)        mode_client ;;
