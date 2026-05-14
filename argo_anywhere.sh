@@ -1219,6 +1219,22 @@ ssh_mux_args() {
 }
 
 # Close any open master sockets we own. Called by `clean` and on demand.
+#
+# H8 fix (audit Phase 2b Batch 5): the prior implementation used
+#   ssh -O exit -o "ControlPath=${sock}" x
+# where 'x' was a dummy hostname. ssh -O exit requires a destination
+# argument syntactically, but if the master socket is already gone or
+# stale (the file exists but the master pid is dead), ssh may fall
+# back to a normal connection attempt against the literal hostname
+# 'x'. Depending on the user's ~/.ssh/config and DNS, that can either
+# fail noisily or -- worse -- hit some unrelated host literally
+# resolved to 'x'. Switch to:
+#   ssh -O exit -S "${sock}" placeholder
+# where -S is the canonical socket-only flag (more explicit than
+# overloading ControlPath via -o); 'placeholder' is purely positional
+# and is never contacted because -O exit returns before any connection
+# attempt. Also pre-check [ -S "$sock" ] (already done by the for-loop
+# guard) so the only way to reach the ssh call is a live socket file.
 ssh_mux_close_all() {
   local sock
   if [ ! -d "$SSH_MUX_DIR" ]; then return 0; fi
@@ -1229,10 +1245,11 @@ ssh_mux_close_all() {
     [ -S "$sock" ] || continue
     log "  closing mux socket: ${sock}"
     if [ "${CLEAN_DRY_RUN:-0}" = 1 ]; then
-      log "    [dry-run] would: ssh -O exit -o ControlPath=${sock} dummy"
+      log "    [dry-run] would: ssh -O exit -S ${sock} placeholder"
     else
-      # ssh -O exit needs *something* to address; the path alone is enough.
-      ssh -O exit -o "ControlPath=${sock}" x 2>/dev/null || rm -f "$sock"
+      # H8 fix: -S is the canonical socket-only flag; 'placeholder' is
+      # purely positional and is never contacted by 'ssh -O exit'.
+      ssh -O exit -S "${sock}" placeholder 2>/dev/null || rm -f "$sock"
     fi
   done
 }
@@ -2893,9 +2910,25 @@ probe_remote_port_owner() {
 # find_next_free_remote_port: walk a port range on the picked node and
 # echo the first port that's free, or empty if none in the range. Single
 # SSH call.
+#
+# H4 fix (audit Phase 2b Batch 5): the remote one-liner walks every
+# port between start and end inclusive. Default range is 100 ports
+# (start..start+100); a caller passing a too-wide range (e.g.
+# ARGO_ANYWHERE_PORT_RANGE=64742-70000 = 5258 ports) would hold an SSH
+# session open for tens of seconds while the inner shell-loop walks
+# every port and runs lsof on each. Clamp the effective end to
+# start+_FREE_PORT_MAX_SCAN-1 so the remote loop is bounded regardless
+# of caller input. The cap is generous (200 ports) but defends against
+# typo'd / pathological inputs without affecting the common case.
 find_next_free_remote_port() {
   local user="$1" node="$2" start="$3" end="${4:-}"
   [ -n "$end" ] || end="$((start + 100))"
+  local _FREE_PORT_MAX_SCAN=200
+  local _max_end=$((start + _FREE_PORT_MAX_SCAN - 1))
+  if [ "$end" -gt "$_max_end" ]; then
+    warn "find_next_free_remote_port: clamping end ${end} to ${_max_end} (scanning more than ${_FREE_PORT_MAX_SCAN} ports per call is refused)."
+    end="$_max_end"
+  fi
   ssh_attempt_pre || { echo ""; return; }
   local result ssh_rc
   # shellcheck disable=SC2046
@@ -5797,7 +5830,7 @@ new Duo prompt happens).
 To turn this off (for non-Duo hosts):  --no-mfa  or  ARGO_ANYWHERE_NO_MFA=1
 To inspect/close sockets manually:
   ls -l ~/.ssh/sockets/argo-anywhere-*
-  ssh -O exit -o ControlPath=~/.ssh/sockets/argo-anywhere-<user>-<host>-<port> dummy
+  ssh -O exit -S ~/.ssh/sockets/argo-anywhere-<user>-<host>-<port> placeholder
 'clean' also offers to close all our sockets.
 
 RUNNING ON A COMPUTE NODE
