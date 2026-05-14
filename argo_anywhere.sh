@@ -24,13 +24,14 @@
 #   argo_anywhere.sh help                    # long-form guide
 #   argo_anywhere.sh -h | --help             # short usage
 #
-# Distribution: https://github.com/a-attia/argo-opencode  (repo name kept;
-# rename was script-internal, not org/repo).
+# Distribution: https://github.com/a-attia/argo-anywhere
+# (Pre-v2.0 repo name was a-attia/argo-opencode; GitHub auto-redirects
+# old curl/clone URLs forever, so legacy users keep working unchanged.)
 # Users (latest):
-#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh -o argo_anywhere.sh
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh -o argo_anywhere.sh
 #   bash argo_anywhere.sh
 # Users (pinned to a release tag, recommended for stability):
-#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v2.0.0/argo_anywhere.sh -o argo_anywhere.sh
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.0.0/argo_anywhere.sh -o argo_anywhere.sh
 #   bash argo_anywhere.sh
 #
 # Author: Ahmed Attia (attia@anl.gov)
@@ -125,7 +126,7 @@ case "${0:-}" in
 [err ]
 [err ]   2. Your curl was interrupted mid-download, leaving a partial
 [err ]      file. Fix: re-download:
-[err ]           curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh -o argo_anywhere.sh
+[err ]           curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh -o argo_anywhere.sh
 [err ]
 [err ]   3. You scp'd a symlink instead of the real file (legacy tools
 [err ]      without -L don't dereference). Fix: re-fetch via curl as
@@ -5360,9 +5361,9 @@ you over SSH on the chosen compute node.
 QUICK START
 -----------
   # Latest from main:
-  curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/${script_name} -o ${script_name}
+  curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/${script_name} -o ${script_name}
   # ...or pin to a release tag (recommended once you have a setup that works):
-  curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.0.0/${script_name} -o ${script_name}
+  curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v1.0.0/${script_name} -o ${script_name}
 
   bash ${script_name}                # runs 'client' by default
   # ...in another terminal once it says "Tunnel is live":
@@ -5684,7 +5685,7 @@ REFERENCES
   argo-proxy source: https://github.com/Oaklight/argo-proxy
   OpenCode:          https://opencode.ai/
   ANL AI4Dev notes:  https://web.cels.anl.gov/~jacob/ai4dev.html
-  This script:       https://github.com/a-attia/argo-opencode
+  This script:       https://github.com/a-attia/argo-anywhere
   Maintainer:        Ahmed Attia (attia@anl.gov)
 
 SECURITY NOTE

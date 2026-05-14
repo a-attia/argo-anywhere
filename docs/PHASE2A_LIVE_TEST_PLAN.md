@@ -18,7 +18,7 @@ codification). Audit C2/C3/C6 were addressed in Phase 1. Remaining:
 ## Pre-test setup (laptop)
 
 ```sh
-cd ~/AHMED_HOME/Software/argo-opencode
+cd ~/AHMED_HOME/Software/argo-anywhere   # (or wherever you have the local clone)
 git pull
 git log --oneline -7
 # Expect 15f4bca at top (or newer if I've pushed more since)

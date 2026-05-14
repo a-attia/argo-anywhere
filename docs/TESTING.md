@@ -21,7 +21,7 @@ Reading time: ~5 min. Run time: ~5–10 min including one Duo prompt.
   compute node you actually use (e.g. `compute-01.cels.anl.gov`).
 - This guide assumes you are running the version of `argo_anywhere.sh` in
   *your current working directory* — typically your local clone of
-  https://github.com/a-attia/argo-opencode. It does **not** re-download from
+  https://github.com/a-attia/argo-anywhere. It does **not** re-download from
   GitHub or any hosted copy. If you want to test the published release
   instead, `curl` it down to a temp dir first and `cd` there.
 
@@ -418,7 +418,7 @@ Once on the node, fetch the script (or use the existing
 fresh download to be sure):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh -o argo_anywhere.sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh -o argo_anywhere.sh
 md5sum argo_anywhere.sh
 ```
 

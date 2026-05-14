@@ -34,7 +34,7 @@ the macOS-specific gotcha where `/bin/sh` is bash with `POSIXLY_CORRECT=y`.
 The `help` subcommand prints the full user guide; this section is the
 maintainer-side complement.
 
-Distribution: published at <https://github.com/a-attia/argo-opencode>.
+Distribution: published at <https://github.com/a-attia/argo-anywhere>.
 Users `curl` either `main` or a pinned release tag (e.g. `v1.0.0`); both
 URLs are documented in `README.md` and the script's own header.
 
@@ -262,7 +262,7 @@ serves symlinks correctly via raw URLs (returns the linked content,
 not a redirect), so users can:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_claudecode.sh -o argo_claudecode.sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_claudecode.sh -o argo_claudecode.sh
 bash argo_claudecode.sh    # picks Claude Code defaults
 ```
 
@@ -450,7 +450,7 @@ or SSH option logic.
 2. Update the script header's example `curl` URLs if you're bumping the
    recommended pinned tag.
 3. `git tag vX.Y.Z` and `git push origin main vX.Y.Z`.
-4. The `curl …/raw.githubusercontent.com/a-attia/argo-opencode/vX.Y.Z/…`
+4. The `curl …/raw.githubusercontent.com/a-attia/argo-anywhere/vX.Y.Z/…`
    URL becomes live as soon as the push completes.
 
 There is no separate release-notes file (yet). If we ever start one, this

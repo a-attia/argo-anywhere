@@ -1,13 +1,18 @@
-# argo-opencode
+# argo-anywhere
 
-Self-contained orchestrator that lets Argonne users run AI coding assistants
+> **Upgrading from `argo_opencode.sh` (pre-v2.0)?** A full upgrade guide is
+> at [`UPGRADING.md`](./UPGRADING.md) (Phase 3, coming soon). For now the
+> short answer: the script auto-detects v1.x state on first run and prints
+> exact `mv`/`rm` commands to clean it up. Run them, then re-invoke.
+
+Self-contained orchestrator that lets Argonne users run AI coding CLI tools
 ([OpenCode](https://opencode.ai/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
 and others) against [argo-proxy](https://github.com/Oaklight/argo-proxy) on an
 ANL compute node, from anywhere (inside or outside the ANL network).
 
 One bash script, two roles:
 
-- **Client mode (laptop)**: install the chosen AI client if needed, write
+- **Client mode (laptop)**: install the chosen AI CLI tool if needed, write
   its config, push this script to a chosen ANL compute node, start
   argo-proxy there inside `screen`, then open the SSH tunnel and monitor
   its health.
@@ -20,121 +25,87 @@ run `client`.**
 
 ## Quick start
 
-The script ships as ONE physical file (`argo_anywhere.sh`) plus per-client
-symlinks. The file inspects its invocation name (`$0`) at startup and selects
-the matching client automatically — no flags needed.
-
-| Filename | Default client |
-|---|---|
-| `argo_anywhere.sh` (canonical) | Interactive picker — choose at startup |
-| `argo_opencode.sh` (symlink) | [OpenCode](https://opencode.ai/) |
-| `argo_claudecode.sh` (symlink) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) |
-
-### Installing all clients (recommended)
-
-Download the canonical file once, then create local symlinks. A single
-`curl` command upgrades every name simultaneously.
+The script ships as a SINGLE file: `argo_anywhere.sh`. Per-tool selection
+is via the `--cli-tool` flag (or interactive picker). Pre-v2.0 used
+per-client symlinks; that approach was removed because it broke under
+`git clone` with `core.symlinks=false` and on filesystems that don't
+preserve symlinks. See [audit C1](./docs/AUDIT_2026-05-12.md) for details.
 
 ```sh
-# Pin to a release (recommended for stability):
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_anywhere.sh \
+# Pin to a release (recommended; tags are immutable):
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.0.0/argo_anywhere.sh \
      -o argo_anywhere.sh && chmod +x argo_anywhere.sh
 
-# Create per-client names (same file, no duplication):
-ln -s argo_anywhere.sh argo_opencode.sh
-ln -s argo_anywhere.sh argo_claudecode.sh
+# Run with explicit tool selection:
+bash argo_anywhere.sh --cli-tool opencode client       # OpenCode
+bash argo_anywhere.sh --cli-tool claudecode client     # Claude Code
 
-# Run:
-bash argo_opencode.sh    # → OpenCode (no picker)
-bash argo_claudecode.sh  # → Claude Code (no picker)
-bash argo_anywhere.sh    # → interactive picker
-
-# Upgrade all three at once:
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_anywhere.sh \
-     -o argo_anywhere.sh
+# Or invoke without --cli-tool to be prompted interactively:
+bash argo_anywhere.sh client          # picker fires
+bash argo_anywhere.sh setup           # always shows picker
+bash argo_anywhere.sh list-tools      # see what's supported
 ```
 
-### Installing a single client
-
-If you only need one client, download it by name directly. GitHub follows the
-symlink transparently, so you receive the full `argo_anywhere.sh` content saved
-under the name you chose — `$0` does the rest.
+To track `main` instead of a pinned release (gets the latest fixes, but
+may move under your feet):
 
 ```sh
-# OpenCode only:
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_opencode.sh \
-     -o argo_opencode.sh && chmod +x argo_opencode.sh
-bash argo_opencode.sh
-# ...in another terminal once it says "Tunnel is live":
-opencode
-```
-
-```sh
-# Claude Code only:
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.2.0/argo_claudecode.sh \
-     -o argo_claudecode.sh && chmod +x argo_claudecode.sh
-bash argo_claudecode.sh
-# ...in another terminal once it says "Tunnel is live":
-claude
-```
-
-To track `main` instead of a pinned release (gets the latest fixes, but may
-move under your feet):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/main/argo_anywhere.sh \
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh \
      -o argo_anywhere.sh
 ```
 
 The first run prompts for your ANL (Argonne) username and asks you to pick
 a compute node. Subsequent runs reuse the cached values.
 
-### Picking a different client without renaming
+### What `--cli-tool` accepts
 
 ```sh
-# The 'setup' subcommand always shows the client picker:
-bash argo_anywhere.sh setup
-
-# argo_anywhere.sh with no subcommand defaults to the picker:
-bash argo_anywhere.sh
-
-# Each per-client name (argo_opencode.sh, argo_claudecode.sh, ...)
-# defaults to that client — no picker shown.
+bash argo_anywhere.sh list-tools
 ```
 
-### Upgrading from before v1.2.0
+Currently:
+- `opencode` — [OpenCode](https://opencode.ai/) (sst/opencode-style)
+- `claudecode` — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (Anthropic CLI)
 
-Pre-v1.2.0 the canonical filename was `argo_opencode.sh`. The rename to
-`argo_anywhere.sh` is a pure file move + back-compat shims; **no manual
-migration is required**:
+More tools (aider, Cursor, generic OpenAI-compatible) planned for Phase 4.
 
-- Existing curl URLs (e.g. `…/v1.1.0/argo_opencode.sh`) keep working forever
-  -- tags are immutable.
-- Existing per-client URLs (e.g. `…/main/argo_opencode.sh`) keep working --
-  GitHub serves the symlink content transparently (the file is now a symlink
-  to `argo_anywhere.sh`).
-- The state directory (`~/.config/argo_opencode/`) is auto-migrated to
-  `~/.config/argo_anywhere/` on the next run; cached username/node survive.
-- Old env-var names (`ARGO_OPENCODE_USER`, etc.) keep working with a
-  one-time deprecation warning per variable. Update your `.bashrc` exports
-  to `ARGO_ANYWHERE_*` at your leisure.
-- Stale SSH multiplex sockets (`~/.ssh/sockets/argo-opencode-*`) are
-  closed by `clean`.
-- Stale remote-side files (`~/.argo_opencode.sh`, `~/.argo_opencode.server.log`
-  on the compute node) are removed by the next `clean`.
+### Upgrading from `argo_opencode.sh` (pre-v2.0)
+
+The canonical filename was `argo_opencode.sh` before v2.0. v2.0 renames to
+`argo_anywhere.sh` and removes per-client symlinks. The script DETECTS v1.x
+state on first run and **refuses to proceed until you've cleaned it up**,
+printing the exact commands. Typical cleanup:
+
+```sh
+mv ~/.config/argo_opencode ~/.config/argo_anywhere    # state cache
+rm -f ~/.ssh/sockets/argo-opencode-*                    # mux sockets
+# (Pre-v2.0 ARGO_OPENCODE_* env-var exports in your .bashrc/.zshrc still
+#  work via auto-promotion to ARGO_ANYWHERE_*; one-time WARN per stale var.)
+```
+
+Old curl URLs against the previous repo name (`a-attia/argo-opencode`)
+**keep working forever** — GitHub auto-redirects them to the new name
+(`a-attia/argo-anywhere`).
+
+Pinning to old release tags also works:
+```sh
+# Still works (uses the v1.1.0 immutable tag):
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.1.0/argo_opencode.sh -o argo_opencode.sh
+```
 
 ## Subcommands
 
 | Subcommand | What it does |
 |---|---|
-| `client` (default) | Full laptop-side flow: install chosen client + write its config + tunnel + monitor. Chosen client is determined by invocation name (e.g. `argo_opencode.sh` -> OpenCode, `argo_claudecode.sh` -> Claude Code, `argo_anywhere.sh` -> interactive picker). |
-| `setup` | Same as `client` but ALWAYS shows the client picker, regardless of invocation name |
-| `tunnel` | Same as `client` but does NOT install or configure any client; just brings up the tunnel |
+| `client` (default) | Full laptop-side flow: install chosen CLI tool + write its config + tunnel + monitor. CLI tool selected via `--cli-tool <name>`; without it, the picker fires. |
+| `setup` | Same as `client` but ALWAYS shows the picker, even if `--cli-tool` is set. Useful for one-off installations of a different tool from your usual. |
+| `tunnel` | Same as `client` but does NOT install or configure any CLI tool; just brings up the tunnel |
 | `server` | Auto-invoked on the ANL compute node by `client` |
 | `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL) |
-| `update-models` | Refresh the OpenCode model list from the live `/v1/models` (OpenCode-specific) |
+| `update-models` | Refresh the OpenCode model list from the live `/v1/models` (OpenCode-specific today) |
 | `stop` | Kill the local SSH tunnel (does NOT touch the remote argo-proxy) |
 | `clean` | Remove every artifact this script created (local + remote, with prompts) |
+| `list-tools` | Print the registry of supported `--cli-tool` values |
 | `help` | Long-form guide (paths, troubleshooting, customization) |
 
 The `help` subcommand prints the full guide. Keep it open while you work
@@ -465,6 +436,10 @@ bash argo_anywhere.sh clean --dry-run -y --local-only # safe enumeration
 - [ANL AI4Dev notes](https://web.cels.anl.gov/~jacob/ai4dev.html) — the
   internal reference this script is built around
 
-## Author
+## Authors
 
-Ahmed Attia (attia@anl.gov)
+- **Primary**: Ahmed Attia ([attia@anl.gov](mailto:attia@anl.gov))
+- **AI collaborator**: Claude (Anthropic), used substantially during the
+  v2.0 development cycle. Per-commit attribution via the
+  `Co-Authored-By:` trailer; see [`CONTRIBUTORS.md`](./CONTRIBUTORS.md)
+  for the full acknowledgment + rationale.
