@@ -1901,6 +1901,20 @@ EOF
 # ============================================================================
 # SECTION: 14. NODE PICKER (--node, --probe-nodes, fallback to ANL_NODES)
 # ============================================================================
+
+# write_node_cache <node>: persist the given node name to NODE_CACHE.
+# Called from the three "successful tunnel state" sites in mode_client,
+# mode_tunnel, and _client_common_setup's on-node short-circuit. The
+# cache reflects "last successfully USED node", not "last picked node"
+# (P3 fix audit). Returns 0 even on permission failure (best-effort
+# persistence; the cache is a UX nicety, not load-bearing).
+write_node_cache() {
+  local node="$1"
+  [ -n "$node" ] || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s\n' "$node" > "$NODE_CACHE" 2>/dev/null || true
+}
+
 pick_node() {
   local user="$1"
 
@@ -1915,12 +1929,16 @@ pick_node() {
     done
     [ "$in_list" -eq 1 ] || warn "Requested node '${req}' is not in ANL_NODES (proceeding anyway)."
 
-    log "Verifying reachability of '${req}' $(jump_descr)..."
+     log "Verifying reachability of '${req}' $(jump_descr)..."
     if ssh_reachable "$user" "$req"; then
       ok "  reachable: ${req}"
-      mkdir -p "$STATE_DIR" 2>/dev/null \
-        || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?)."
-      printf '%s\n' "$req" > "$NODE_CACHE"
+      # P3 fix (audit): cache write deferred to AFTER successful tunnel
+      # establishment (in mode_client / mode_tunnel / on-node short-circuit
+      # in _client_common_setup). pick_node returns the picked node; the
+      # cache reflects "last successfully USED node", not "last picked".
+      # Without this, the cache lies whenever a pick fails to reach a
+      # working tunnel, and the G1 same-port-different-node check
+      # (lines ~2811-2829) compares two values that always agree.
       echo "$req"
       return
     else
@@ -2047,9 +2065,8 @@ EOF
     fi
   done
 
-  mkdir -p "$STATE_DIR" 2>/dev/null \
-    || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?)."
-  printf '%s\n' "$picked" > "$NODE_CACHE"
+  # P3 fix (audit): cache write deferred to AFTER successful tunnel
+  # establishment. See comment in the --node branch above for rationale.
   echo "$picked"
 }
 
@@ -2555,6 +2572,87 @@ monitor_tunnel_loop() {
 #                          running locally on a compute node); proceed without
 #                          opening a tunnel; clients can use it directly
 #   other-or-broken     -- something else bound and /health doesn't work; refuse
+# local_tunnel_destination <port>: prints the destination host of the
+# SSH tunnel/master currently holding the local listener on <port>, or
+# empty string if it can't be determined. Args: 1 = port number.
+#
+# How it works (P3 fix audit):
+#
+# The script's mux sockets are named per the literal-tokens template
+# `argo-anywhere-%r-%h-%p` (see ssh_mux_args). So a master to
+# `aattia@compute-01.cels.anl.gov:22` lives at the path
+# `~/.ssh/sockets/argo-anywhere-aattia-compute-01.cels.anl.gov-22`.
+# A foreground `ssh -N -L PORT:...` opened with ControlMaster=auto
+# also has that ControlPath in its `ps` command-line.
+#
+# So: find the listener pid for <port>, read its `ps` command, extract
+# the ControlPath socket name, parse out the host. The host portion is
+# encoded between the user prefix and the port suffix in the socket
+# basename.
+#
+# Why this exists (P3 audit finding): the G1 same-port-different-node
+# check used to compare against the cached node, which pick_node updated
+# eagerly BEFORE a successful tunnel establishment, so the comparison
+# always passed and silent misroute slipped through. Reading the actual
+# socket name is ground truth: it's literally the destination openssh
+# is talking to.
+#
+# Returns: prints the host name (e.g. `compute-01.cels.anl.gov`) and
+# exits 0; OR prints nothing and exits 0 if it can't be determined.
+# Never errors / dies; the caller decides what to do with empty output.
+local_tunnel_destination() {
+  local port="$1"
+  local pid
+  # Same SIGPIPE-resilient pattern as local_tunnel_status (P1 fix).
+  pid="$( { lsof -nPi ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1; } || true )"
+  [ -n "$pid" ] || { printf ''; return 0; }
+
+  local cmd
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+  [ -n "$cmd" ] || { printf ''; return 0; }
+
+  # Extract the ControlPath socket. Two patterns in the wild:
+  #   - foreground ssh: `... -o ControlPath=/path/argo-anywhere-USER-HOST-PORT ...`
+  #     OR `... -S /path/argo-anywhere-USER-HOST-PORT ...` (less common)
+  #   - mux master:     `ssh: /path/argo-anywhere-USER-HOST-PORT [mux]`
+  # Both expose the socket path verbatim. We sed for the literal
+  # 'argo-anywhere-' (or 'argo-opencode-' for v1.x masters still alive
+  # mid-upgrade) and extract the socket basename. Two sed passes (one
+  # per prefix) instead of one with alternation: BSD sed -E (macOS)
+  # alternation inside a capture group is fragile across versions; two
+  # focused patterns are simpler and match exactly one socket basename.
+  local sock_basename=""
+  case "$cmd" in
+    *argo-anywhere-*)
+      sock_basename="$(printf '%s\n' "$cmd" | \
+        sed -nE 's|.*[/=[:space:]](argo-anywhere-[^[:space:]]+).*|\1|p' | head -n1)"
+      ;;
+    *argo-opencode-*)
+      sock_basename="$(printf '%s\n' "$cmd" | \
+        sed -nE 's|.*[/=[:space:]](argo-opencode-[^[:space:]]+).*|\1|p' | head -n1)"
+      ;;
+  esac
+  [ -n "$sock_basename" ] || { printf ''; return 0; }
+
+  # Parse the basename: argo-{anywhere,opencode}-USER-HOST-PORT
+  # Strip the prefix:
+  local without_prefix="${sock_basename#argo-anywhere-}"
+  without_prefix="${without_prefix#argo-opencode-}"
+  # Strip the trailing -PORT (port is purely numeric):
+  local without_port="${without_prefix%-[0-9]*}"
+  # Strip the user prefix. We don't always know the user (callers may
+  # invoke this without passing it), so we use a generic "first hyphen-
+  # separated field is the user" rule — works because ANL usernames are
+  # alphanumeric (no hyphens) and the host always contains dots.
+  local host="${without_port#*-}"
+  # Sanity: host should look like a hostname (contain a dot OR be a
+  # bare alphanumeric label). If parsing went sideways, return empty.
+  case "$host" in
+    *.*|[a-zA-Z0-9]*) printf '%s' "$host" ;;
+    *) printf '' ;;
+  esac
+}
+
 local_tunnel_status() {
   local port="$1"
   local pid
@@ -2801,20 +2899,27 @@ ensure_or_reuse_tunnel() {
   #    listener, decide whether to reuse it before doing any SSH work.
   local lstatus; lstatus="$(local_tunnel_status "$PROXY_PORT")"
 
-  # Sanity check before reuse: we can't directly read what node a running
-  # ssh tunnel targets, but we have the cached node from the last run.
-  # If the user is asking for a DIFFERENT node from the cached one AND
-  # we found a healthy tunnel on the requested port, it's almost certainly
-  # the previous run's tunnel pointed at the cached node, not the
-  # currently-requested one. Reusing it would silently send the user's
-  # traffic to the wrong destination. Detect and warn.
-  local cached_node_for_check=""
-  [ -f "$NODE_CACHE" ] && cached_node_for_check="$(cat "$NODE_CACHE" 2>/dev/null)"
+  # P3 fix (audit): same-port-different-node check using the actual
+  # ground-truth destination of the SSH master/tunnel, not a cached
+  # value. The pre-fix check compared $node against the NODE_CACHE
+  # contents, but pick_node updated the cache eagerly BEFORE this
+  # check ran, so the comparison always succeeded and silent misroute
+  # slipped through. local_tunnel_destination() inspects the listener
+  # pid's ControlPath socket basename for the real destination.
+  #
+  # Two-layer fallback: if local_tunnel_destination returns empty (e.g.
+  # the listener is a fg-tunnel without a Control* socket, or parsing
+  # failed), fall back to the cache as a defensive last-resort. The
+  # cache MAY be stale or not-yet-written if this is the user's first
+  # ever invocation, so cache-disagreement is downgraded from die-hard
+  # to warn-only in the fallback path. The socket-based check is the
+  # primary defense.
   case "$lstatus" in
     ours-healthy-fg|ours-healthy-mux)
-      if [ -n "$cached_node_for_check" ] && [ "$cached_node_for_check" != "$node" ]; then
+      local actual_dest; actual_dest="$(local_tunnel_destination "$PROXY_PORT")"
+      if [ -n "$actual_dest" ] && [ "$actual_dest" != "$node" ]; then
         warn "An existing tunnel is bound to localhost:${PROXY_PORT}, but it was opened"
-        warn "  by a previous run targeting '${cached_node_for_check}', not the node you"
+        warn "  by a previous run targeting '${actual_dest}', not the node you"
         warn "  just picked ('${node}'). Reusing it would silently send traffic to the"
         warn "  WRONG node. The script supports ONE tunnel per local port; you can't"
         warn "  have two tunnels on the same port to different nodes."
@@ -2822,8 +2927,22 @@ ensure_or_reuse_tunnel() {
         warn "Options:"
         warn "  * Stop the existing tunnel ('$(basename "$0") stop') and re-run."
         warn "  * Pick a different port ('--port N') for this run."
-        warn "  * Re-run targeting '${cached_node_for_check}' (the existing tunnel's destination)."
+        warn "  * Re-run targeting '${actual_dest}' (the existing tunnel's destination)."
         die "Refusing to silently reuse a tunnel pointed at a different node."
+      fi
+      # If actual_dest is empty (parse failure / fg-tunnel without
+      # ControlPath), fall back to cache-based heuristic. Warn-only
+      # (not die) because the cache may legitimately disagree on a
+      # first-ever run with no prior cache entry.
+      if [ -z "$actual_dest" ]; then
+        local cached_node_for_check=""
+        [ -f "$NODE_CACHE" ] && cached_node_for_check="$(cat "$NODE_CACHE" 2>/dev/null)"
+        if [ -n "$cached_node_for_check" ] && [ "$cached_node_for_check" != "$node" ]; then
+          warn "Could not determine the actual destination of the existing tunnel"
+          warn "  on :${PROXY_PORT} (socket parsing returned empty). Cached node says"
+          warn "  '${cached_node_for_check}'; you picked '${node}'. Proceeding optimistically;"
+          warn "  if your traffic ends up at the wrong node, run 'stop' and re-run."
+        fi
       fi
       ;;
   esac
@@ -3273,6 +3392,8 @@ EOF
     log "  with Authorization: Bearer ${ANL_USERNAME}"
     log "(no foreground tunnel to keep alive; argo-proxy stays running under"
     log "  screen/tmux/nohup; use '$(basename "$0") clean' to stop everything.)"
+    # P3 fix: cache the node only AFTER the on-node bootstrap succeeded.
+    write_node_cache "$node"
     _PICKED_NODE=""  # signal short-circuit (caller should bail out)
     return 0
   fi
@@ -3314,6 +3435,11 @@ mode_tunnel() {
   # new tunnel or reuses an existing healthy one.
   local rc=0
   ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
+  # P3 fix: cache the node only AFTER ensure_or_reuse_tunnel returned
+  # successfully (rc=0 = we own the tunnel; rc=2 = we're reusing an
+  # external-healthy listener). On a non-success rc the script has
+  # already die'd, so we won't reach here.
+  write_node_cache "$node"
   gather_summary
   render_summary
   log "Tunnel is up; no client configured (this is 'tunnel' mode)."
@@ -3364,6 +3490,11 @@ mode_client() {
   #   3. block in the foreground monitor + reconnect loop (unless ext-healthy)
   local rc=0
   ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
+  # P3 fix: cache the node only AFTER ensure_or_reuse_tunnel returned
+  # successfully (rc=0 = we own the tunnel; rc=2 = we're reusing an
+  # external-healthy listener). On a non-success rc the script has
+  # already die'd, so we won't reach here.
+  write_node_cache "$node"
   do_post_tunnel_for_cli_tool "$chosen_client"
   if [ "$rc" -eq 2 ]; then
     log "(external listener; not entering monitor loop. The proxy is reachable"
