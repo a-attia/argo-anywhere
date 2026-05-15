@@ -1561,6 +1561,15 @@ write_opencode_config() {
   local dest="$1"
   local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
   [ -n "$user" ] || die "write_opencode_config: no username available (ARGO_ANYWHERE_USER unset)"
+  # L6 fix (audit Phase 2d): assert PROXY_PORT is set before writing.
+  # Pre-fix, an empty PROXY_PORT would interpolate into the baseURL as
+  # 'http://localhost:/v1' -- a syntactically valid URL that points
+  # nowhere, and OpenCode would silently fail to connect. resolve_port
+  # always runs before this writer in the normal client flow, but a
+  # script-internal refactor or a direct call from an untested path
+  # could bypass it; this assert ensures the broken-config silent-fail
+  # is converted to a fail-loud die at the writer entry.
+  [ -n "${PROXY_PORT:-}" ] || die "write_opencode_config: PROXY_PORT is empty (resolve_port not called?). Refusing to write a config with baseURL 'http://localhost:/v1' that would silently fail to connect."
   cat > "$dest" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
@@ -1914,7 +1923,19 @@ write_claudecode_config() {
   # treats it as starting fresh.
   local orig="$_CLAUDECODE_SCOPE_PATH"
 
-  python3 - "$orig" "$dest" "$user" "$PROXY_PORT" <<'PYEOF'
+  # M8 fix (audit Phase 2d): distinguish "file absent" (legit fresh-write)
+  # from "file present but unparseable" (refuse to overwrite). Pre-fix, a
+  # malformed JSON file silently became `data = {}` and the writer wrote
+  # a fresh file with only our env keys -- destroying the user's
+  # broken-but-recoverable config. Now: if the file exists but parses
+  # to non-dict or raises during json.load(), exit 2; bash side dies
+  # with a clear recovery hint.
+  #
+  # Exit codes from the Python heredoc:
+  #   0 -> success (file absent, or file present + parsed cleanly)
+  #   2 -> file present but unparseable (refuse to merge; preserve user's file)
+  local _py_rc=0
+  python3 - "$orig" "$dest" "$user" "$PROXY_PORT" <<'PYEOF' || _py_rc=$?
 import json, os, sys
 
 orig_path, dest_path, user, port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -1925,12 +1946,15 @@ if os.path.isfile(orig_path):
     try:
         with open(orig_path) as f:
             data = json.load(f) or {}
-        if not isinstance(data, dict):
-            data = {}
     except Exception:
-        # Malformed JSON -- start fresh; the user will see the diff
-        # and can pick [k]eep if they'd rather not lose it.
-        data = {}
+        # M8 fix: malformed JSON -> refuse to merge. Caller dies with
+        # a recovery hint pointing at the file + suggesting the user
+        # fix it manually or pick [k]eep at the prompt.
+        sys.exit(2)
+    if not isinstance(data, dict):
+        # Top-level JSON wasn't an object -- can't merge into a dict.
+        # Same refuse-to-overwrite treatment as the malformed-JSON case.
+        sys.exit(2)
 
 env = data.get("env") or {}
 if not isinstance(env, dict):
@@ -1946,6 +1970,23 @@ with open(dest_path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PYEOF
+  if [ "$_py_rc" -eq 2 ]; then
+    err "write_claudecode_config: existing config at ${orig} is present but"
+    err "  cannot be parsed as JSON (or is not a top-level JSON object)."
+    err "  Refusing to merge -- doing so would silently destroy your file."
+    err ""
+    err "Recovery options:"
+    err "  1. Fix the JSON manually (\`python3 -m json.tool ${orig}\` will"
+    err "     show you the parse error), then re-run."
+    err "  2. Move the file aside (\`mv ${orig} ${orig}.broken.\$(date +%s)\`)"
+    err "     and re-run; the writer will create a fresh file from scratch."
+    err "  3. Pick [k]eep at the next config-handling prompt to leave the"
+    err "     broken file in place (use this if you want to recover content"
+    err "     from it before letting the script overwrite)."
+    die "Refusing to overwrite a broken Claude Code config."
+  elif [ "$_py_rc" -ne 0 ]; then
+    die "write_claudecode_config: python3 heredoc exited with rc=${_py_rc} (unexpected)."
+  fi
 }
 
 # setup_claudecode_cli_tool: ensure Claude Code is installed and its
@@ -3922,11 +3963,10 @@ EOF
     return
   fi
 
-  # Case 2: existing file -- merge. Pick the venv python if available so we
-  # use the PyYAML that argo-proxy itself uses. Fall back to system python3
-  # (which may or may not have PyYAML; if not, we degrade to "fresh write
-  # behavior with a loud warning so the user knows their extras would be
-  # lost on [b]").
+  # Case 2: existing file -- merge via PyYAML to preserve user-owned keys.
+  # Pick the venv python if available so we use the same PyYAML argo-proxy
+  # itself depends on. Fall back to system python3 only if the venv python
+  # is unavailable.
   local pyexe=""
   local venv_dir; venv_dir="$(eval echo "$VENV_PATH" 2>/dev/null || true)"
   if [ -n "$venv_dir" ] && [ -x "${venv_dir}/bin/python" ]; then
@@ -3935,29 +3975,42 @@ EOF
     pyexe="python3"
   fi
 
+  # M9 fix (audit Phase 2d, Option A per user choice): die hard if no
+  # python available for YAML merge. Pre-fix the no-pyexe branch wrote
+  # a hardcoded 6-key defaults file, silently dropping any user-owned
+  # keys (argo_embedding_url, concurrent_downloads, max_payload_size,
+  # etc.) when the user picked [b]ackup at the prompt. The fallback
+  # was actively dangerous and the warn message could be missed under
+  # time pressure. Now: refuse to write the merge tempfile if we can't
+  # do the merge safely; user must install python3 (or the venv must
+  # be reachable) before re-running.
   if [ -z "$pyexe" ]; then
-    warn "write_argoproxy_config: no python available for YAML merge;"
-    warn "  falling back to defaults-only output. Existing keys at"
-    warn "  ${real_cfg} would be LOST if you pick [b]."
-    cat > "$dest" <<EOF
-config_version: "3"
-user: "${user}"
-host: 127.0.0.1
-port: ${PROXY_PORT}
-verbose: ${verbose_value}
-argo_base_url: "https://apps.inside.anl.gov/argoapi"
-EOF
-    return
+    err "write_argoproxy_config: no python available for safe YAML merge."
+    err "  An existing config exists at ${real_cfg} with possibly user-owned"
+    err "  keys (argo_embedding_url, concurrent_downloads, etc.) that the"
+    err "  hardcoded-defaults fallback would silently drop on [b]ackup."
+    err ""
+    err "Recovery: install python3 + PyYAML, then re-run. On a typical"
+    err "  ANL compute node, the script's argo-proxy venv (\${HOME}/argovenv)"
+    err "  has both; if it's missing or stale, force a fresh install:"
+    err "    bash $(basename "$0") --force-reinstall server"
+    die "Refusing to write argo-proxy config without safe YAML merge."
   fi
 
-  # Try the merge. If PyYAML is missing or the existing file fails to parse,
-  # exit code != 0; we then fall back to defaults-only with a warning so
-  # the script doesn't hang on a partial/empty proposed file.
+  # Try the merge. PyYAML is required (M9 die-hard); existing-config
+  # parse failures also die-hard rather than silently writing defaults.
   #
-  # P2 fix: pass the verbose value as a 5th arg. The Python heredoc only
-  # SETS verbose if the existing file lacks it (setdefault); existing
-  # explicit user choices are preserved either way.
-  if ! "$pyexe" - "$real_cfg" "$dest" "$user" "$PROXY_PORT" "$verbose_value" <<'PYEOF' 2>/dev/null
+  # Exit codes from the Python heredoc:
+  #   0 -> success
+  #   2 -> PyYAML missing in this python (die-hard per M9; install via pip)
+  #   3 -> existing config parses to non-dict (corrupt or non-YAML content)
+  #   4 -> unhandled exception during yaml.safe_load (file unreadable,
+  #        syntax error, etc.)
+  #
+  # P2 fix: pass the verbose value as a 5th arg; P2 amendment overwrites
+  # rather than setdefault for the security-defaulted verbose key.
+  local _py_rc=0
+  "$pyexe" - "$real_cfg" "$dest" "$user" "$PROXY_PORT" "$verbose_value" <<'PYEOF' 2>/dev/null || _py_rc=$?
 import sys
 try:
     import yaml
@@ -3995,19 +4048,47 @@ data.setdefault('argo_base_url', "https://apps.inside.anl.gov/argoapi")
 with open(dst, 'w') as f:
     yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
 PYEOF
-  then
-    warn "write_argoproxy_config: YAML merge failed (PyYAML missing or"
-    warn "  existing config unparseable); falling back to defaults-only."
-    warn "  Existing keys at ${real_cfg} would be LOST if you pick [b]."
-    cat > "$dest" <<EOF
-config_version: "3"
-user: "${user}"
-host: 127.0.0.1
-port: ${PROXY_PORT}
-verbose: ${verbose_value}
-argo_base_url: "https://apps.inside.anl.gov/argoapi"
-EOF
-  fi
+
+  case "$_py_rc" in
+    0) ;;  # success
+    2)
+      err "write_argoproxy_config: PyYAML is not available in ${pyexe}."
+      err "  We need PyYAML to safely merge the new config with your"
+      err "  existing ${real_cfg} (preserving user-owned keys like"
+      err "  argo_embedding_url, concurrent_downloads, etc.)."
+      err ""
+      err "Recovery: install PyYAML, then re-run."
+      err "  In the venv: ${pyexe} -m pip install pyyaml"
+      err "  System-wide (Linux): sudo apt install python3-yaml"
+      err "  Or: pip install --user pyyaml"
+      die "Refusing to write argo-proxy config without PyYAML for safe merge."
+      ;;
+    3)
+      err "write_argoproxy_config: existing config at ${real_cfg} parses"
+      err "  to non-dict (top-level YAML is not an object). Refusing to"
+      err "  merge -- doing so would silently destroy the file content."
+      err ""
+      err "Recovery: inspect the file (\`cat ${real_cfg}\`) and either fix"
+      err "  it to be a YAML object, OR move it aside (\`mv ${real_cfg}"
+      err "  ${real_cfg}.broken.\$(date +%s)\`) and re-run; the writer will"
+      err "  create a fresh file from defaults."
+      die "Refusing to overwrite a malformed argo-proxy config."
+      ;;
+    4)
+      err "write_argoproxy_config: existing config at ${real_cfg} could"
+      err "  not be parsed by PyYAML (file unreadable, YAML syntax error,"
+      err "  or other I/O error). Refusing to merge."
+      err ""
+      err "Recovery: try \`${pyexe} -c \"import yaml; print(yaml.safe_load(open('${real_cfg}')))\"\`"
+      err "  to see the exact parse error. Then either fix the file or"
+      err "  move it aside (\`mv ${real_cfg} ${real_cfg}.broken.\$(date +%s)\`)"
+      err "  and re-run."
+      die "Refusing to overwrite an unparseable argo-proxy config."
+      ;;
+    *)
+      die "write_argoproxy_config: python3 heredoc exited with rc=${_py_rc} (unexpected)."
+      ;;
+  esac
 }
 
 mode_server() {
