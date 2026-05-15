@@ -1318,7 +1318,7 @@ ssh_mux_open() {
   local user="$1" host="$2"
   mfa_enabled || return 0
   if ! ssh_attempt_pre; then
-    die "Refusing to open SSH master: too many recent SSH failures (lock active). See above for recovery instructions."
+    die "Aborted: open SSH master (SSH failure lock active; recovery above)."
   fi
   log "Opening multiplexed SSH master to ${user}@${host} (Duo prompt expected once)..."
   # Pass $host so ssh_args knows to drop '-J' when host == ANL_JUMP (loop).
@@ -1358,8 +1358,15 @@ resolve_username() {
     [[ "$u" =~ ^[a-zA-Z][a-zA-Z0-9._-]*$ ]] && break
     err "Invalid username. Use letters, digits, dot, underscore, hyphen."
   done
-  mkdir -p "$STATE_DIR" 2>/dev/null \
-    || die "Cannot create state dir '$STATE_DIR' (permission denied? \$HOME read-only?). Set ARGO_ANYWHERE_USER in env to skip caching."
+  # L1 fix (audit Phase 2c): surface the actual mkdir error instead of
+  # swallowing stderr. Pre-fix: the user saw a generic "permission
+  # denied? \$HOME read-only?" guess; whatever mkdir actually said
+  # (the precise reason: ENOSPC, EROFS, EACCES on a specific component,
+  # SELinux denial, NFS hiccup) was discarded. Now: capture stderr,
+  # include it in the die message verbatim.
+  local _mk_err
+  _mk_err="$(mkdir -p "$STATE_DIR" 2>&1)" \
+    || die "Cannot create state dir '$STATE_DIR': ${_mk_err}. Set ARGO_ANYWHERE_USER in env to skip caching."
   printf '%s\n' "$u" > "$USER_CACHE"
   echo "$u"
 }
@@ -1960,7 +1967,7 @@ ssh_preflight() {
   # Tracked by the SSH attempt tracker so a wrong --user / missing key
   # doesn't get retried into a CSPO IP block. See ssh_attempt_pre/ok/fail.
   if ! ssh_attempt_pre; then
-    die "Refusing to attempt SSH preflight: too many recent SSH failures (lock active). See above for recovery instructions."
+    die "Aborted: SSH preflight (SSH failure lock active; recovery above)."
   fi
   # H1 fix (audit): include $(ssh_args "$user" "$target") so the BatchMode
   # preflight uses the same routing as the actual subsequent SSHs --
@@ -2074,7 +2081,7 @@ pick_node() {
       # recovery message before consuming an attempt the lock would
       # have refused anyway.
       if ! ssh_attempt_pre; then
-        die "Refusing to continue --probe-nodes: too many recent SSH failures (lock active). See above for recovery instructions."
+        die "Aborted: --probe-nodes (SSH failure lock active; recovery above)."
       fi
       # ssh_attempt_pre succeeded above; ssh_reachable will call it
       # again internally (idempotent for the not-yet-locked case) and
@@ -2088,7 +2095,7 @@ pick_node() {
         # already-locked case; this catches the case where the tracker
         # JUST locked as a result of this iteration's ssh_attempt_fail.
         if [ "${_SSH_LOCKED:-0}" = 1 ]; then
-          die "SSH attempt tracker has locked further attempts mid-probe; cannot continue. See above for recovery."
+          die "Aborted mid-probe: SSH lock just fired (recovery above)."
         fi
       fi
     done
@@ -2191,7 +2198,7 @@ EOF
         # failure immediately (without trying ssh) once locked, so the
         # "pick again" loop would never make progress.
         if [ "${_SSH_LOCKED:-0}" = 1 ]; then
-          die "SSH attempt tracker has locked further attempts; cannot continue. See above for recovery."
+          die "Aborted at node-pick: SSH lock just fired (recovery above)."
         fi
         local _remaining=$((_PICK_NODE_MAX - attempts))
         warn "Could not reach '${choice}' $(jump_descr) as ${user}; pick again (${_remaining} attempt(s) left)."
@@ -2666,8 +2673,11 @@ monitor_tunnel_loop() {
       # CSPO lock is active, refuse to add more attempts; the user
       # gets the same notification path as a totally-failed reconnect.
       if ! ssh_attempt_pre; then
-        warn "SSH attempt tracker has locked further attempts; cannot reconnect."
-        warn "  See above for recovery instructions."
+        # L4+L5 fix (audit Phase 2c): ssh_attempt_pre already printed
+        # the recovery block above; one short warn line is enough to
+        # mark the reconnect-refusal as a separate event from the
+        # lock-fired event.
+        warn "Reconnect refused (SSH failure lock active; recovery above)."
         notify_user "argo-proxy tunnel" \
           "SSH lock active; tunnel reconnect refused. Fix auth + delete lock to retry."
         break
