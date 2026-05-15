@@ -11,10 +11,10 @@ others — against [argo-proxy](https://github.com/Oaklight/argo-proxy)
 on an ANL compute node, **from any laptop on any network**, with
 **one Duo prompt per session**.
 
-> Upgrading from `argo_opencode.sh` (pre-v2.0)? See the
-> [Upgrading section](#upgrading-from-argo_opencodesh-pre-v20) below.
-> The script also auto-detects v1.x state on first run and prints
-> exact cleanup commands.
+> Upgrading from `argo_opencode.sh` (pre-v2.0)? See
+> [`docs/UPGRADING.md`](docs/UPGRADING.md) for the full migration
+> guide. The script also auto-detects v1.x state on first run and
+> prints exact cleanup commands.
 
 ## Contents
 
@@ -32,6 +32,7 @@ on an ANL compute node, **from any laptop on any network**, with
 - [SSH failure protection (CSPO defense)](#ssh-failure-protection-cspo-defense)
 - [Port policy](#port-policy)
 - [Common operations](#common-operations)
+- [Where to read more](#where-to-read-more)
 - [Upgrading from `argo_opencode.sh` (pre-v2.0)](#upgrading-from-argo_opencodesh-pre-v20)
 - [Testing](#testing)
 - [Contributing](#contributing)
@@ -44,11 +45,12 @@ One bash script (`argo_anywhere.sh`) that orchestrates two roles:
 
 - **Client mode (laptop)**: install the chosen AI CLI tool if needed,
   write its config, push this script to a chosen ANL compute node,
-  start argo-proxy there inside `screen`, then open the SSH tunnel and
-  monitor its health.
+  start argo-proxy there inside `screen` (preferred; falls back to
+  `tmux`, then `nohup`), then open the SSH tunnel and monitor its
+  health.
 - **Server mode (ANL compute node)**: create a Python venv, install
   argo-proxy, write `~/.config/argoproxy/config.yaml`, start
-  `argo-proxy serve` inside `screen` (preferred), `tmux`, or `nohup`.
+  `argo-proxy serve` inside `screen`/`tmux`/`nohup`.
 
 Server mode is auto-invoked over SSH by client mode. **You normally
 only ever run `client`**.
@@ -60,17 +62,15 @@ package, no multi-file install.
 
 ## Status
 
-Pre-v2.0 release (active development).
-
-- **v1.x line**: tagged at `v1.0.0`, `v1.1.0`, `v1.2.0`. Legacy users
-  with pinned URLs to those tags keep working forever.
-- **v2.0 (in progress)**: Phase 2a (CSPO hardening + symlink-self-defense
-  + bootstrap silent-fail fix) **awaiting live-test** verification.
-  Phase 2b (high-severity audit fixes) queued; Phase 3 (docs) queued;
-  v2.0.0 tag after final live-test.
-
-See [`PLAN.md`](PLAN.md) Section 4 (Milestones) for the full phase
-status and roadmap.
+v2.0 is ready-to-tag. The v1.x line is tagged at `v1.0.0`, `v1.1.0`,
+and `v1.2.0`; legacy users with pinned URLs to those tags keep
+working forever. v2.0 closes a 43-finding fresh-eyes audit (10
+critical, 11 high, 10 medium, 10 low, 3 info) covering CSPO
+defenses, identity-handling correctness, privacy posture, and
+multi-tool support. See [`PLAN.md`](PLAN.md) Section 4 (Milestones)
+for the full phase-by-phase status and roadmap;
+[`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) is the audit
+trail with each finding's resolution.
 
 ## Quick start
 
@@ -146,7 +146,7 @@ post-v2.0 work.
 | `server` | Auto-invoked on the ANL compute node by `client`. Also a documented standalone workflow ("leave a proxy on this node for any client to reach"). |
 | `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL). |
 | `update-models` | Refresh the OpenCode model list from the live `/v1/models` (OpenCode-specific today). |
-| `stop` | Kill the local SSH tunnel. Does NOT touch the remote argo-proxy. |
+| `stop` | Kill the local SSH tunnel. Does NOT touch the remote argo-proxy (see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Single-instance constraint" for why). |
 | `clean` | Remove every artifact this script created (local + remote, with risk-tiered prompts). |
 | `list-tools` | Print the registry of supported `--cli-tool` values. |
 | `help` | Long-form guide (paths, troubleshooting, customization). Keep open while learning prompts. |
@@ -180,7 +180,10 @@ bash argo_anywhere.sh help | less
 | `~/.config/argoproxy/config.yaml` | argo-proxy config (port + user) |
 
 See [`examples/`](./examples/) for sanitized templates of both
-configs (laptop OpenCode + compute-node argo-proxy).
+configs (laptop OpenCode + compute-node argo-proxy). The full
+inventory of where prompt + identity data may persist (with
+sensitivity classifications) lives in
+[`docs/SECURITY.md`](docs/SECURITY.md) "What gets logged where".
 
 ## MFA / Duo handling
 
@@ -197,8 +200,8 @@ To turn this off for non-Duo hosts: `--no-mfa` or
 
 The default `client` flow assumes you are running the script from a
 laptop *outside* the ANL network. If the script detects it is itself
-running on an ANL compute node (the FQDN matches a name in
-`ANL_NODES` or ends in `.cels.anl.gov`), it adjusts:
+running on an ANL compute node (the FQDN ends in `.cels.anl.gov`),
+it adjusts:
 
 - `--no-jump` and `--no-mfa` are auto-defaulted on (intra-site SSH
   needs neither).
@@ -230,14 +233,18 @@ Each user runs their own argo-proxy instance on the compute node —
 the proxy is per-user, listening on `127.0.0.1:<port>`, and your
 config + auth travel with it. Two users **can** share a compute
 node, but they cannot share the same port: whoever binds first wins,
-and the other gets refused.
+and the other gets refused. The single-instance constraint (one
+argo-proxy per user per node) is documented in
+[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 
 To handle this gracefully, the script:
 
 - **Detects port collisions before bootstrap.** Before `client` ssh's
   into the node to start argo-proxy, it probes `127.0.0.1:<port>` on
-  the node and identifies the owner. If it's you, the script reuses;
-  if it's someone else, you're prompted:
+  the node and identifies the owner. If it's you, the script reuses
+  AFTER positively verifying identity (v2.0 H5 fix; cfg_user must
+  equal want_user, not just "not different"); if it's someone else,
+  you're prompted:
 
   ```text
   [warn] Port 64742 on compute-01 is in use by another user
@@ -259,7 +266,9 @@ To handle this gracefully, the script:
 
 - **`--port-range LO-HI`** overrides the default search range
   (defaults to `64742`-`64842`). Use it if your environment reserves
-  a different range for ad-hoc services.
+  a different range for ad-hoc services. The remote port-scan range
+  is clamped to ≤200 ports per call (v2.0 H4 fix) regardless of how
+  wide the requested range is.
 
 - **Local self-collision** (you re-run `client` while a tunnel is
   already up from a previous invocation): the script detects the
@@ -313,20 +322,28 @@ Anthropic chose not to deep-merge it):
 
 The script writes EITHER the global file OR the project-local file
 (never the committed file — that would force your collaborators to
-also use this proxy). The choice is automatic by default, checked in
-order:
+also use this proxy). Since v2.0 the default is **project scope**,
+checked in this order:
 
-1. **`~/.claude.json` exists** — Claude Code's auth state file,
+1. **`--scope project|global` flag (or `CLAUDECODE_SCOPE` env)** —
+   explicit override wins.
+2. **`~/.claude.json` exists** — Claude Code's auth state file,
    created by `claude auth login`. Its presence means you have a
    personal Anthropic subscription. Writing `ANTHROPIC_AUTH_TOKEN`
    to the global `~/.claude/settings.json` would shadow your OAuth
    token and break all non-proxy Claude Code usage → **project scope
    automatically**.
-2. **`~/.claude/settings.json` already has an `env` block** — you (or
+3. **`~/.claude/settings.json` already has an `env` block** — you (or
    another tool) put env vars in the global file; clobbering it would
    silently remove them → **project scope automatically**.
-3. **Neither condition** → **global scope** (smoothest UX for
-   first-time users with no prior Claude Code setup).
+4. **None of the above** → **project scope** (changed in v2.0; was
+   global pre-v2.0). The new default closes a silent-correctness
+   regression: pre-v2.0 the script wrote to `~/.claude/settings.json`
+   on fresh installs; if the user later ran `claude auth login`, the
+   resulting OAuth token in `~/.claude.json` would silently take
+   precedence over `ANTHROPIC_AUTH_TOKEN` in `settings.json`,
+   neutralizing the proxy config without warning. Project scope is
+   not affected by that precedence rule.
 
 To force one or the other:
 
@@ -339,10 +356,19 @@ When the script writes the project scope, **you must run `claude`
 from that same directory** to pick up the settings. The script prints
 which directory at the end of the setup step.
 
+If you opt back into `--scope global`, accept that you must NOT run
+`claude auth login` from that machine — the OAuth precedence rule
+will silently neutralize the proxy config the moment you do.
+
 The script always preserves any non-Anthropic-Argo keys in the target
 file's `env` block (and the file's other top-level keys: `model`,
 `permissions`, `hooks`, etc.). It only owns `ANTHROPIC_BASE_URL` and
-`ANTHROPIC_AUTH_TOKEN`.
+`ANTHROPIC_AUTH_TOKEN`. After writing, the script also prints a
+**privacy warning** (v2.0 H7 fix) reminding you that the config now
+contains your ANL username (used as the bearer token) and that the
+file should be gitignored if your `~/.claude/` is tracked in a
+dotfiles repo. See [`docs/SECURITY.md`](docs/SECURITY.md) for the
+full privacy posture.
 
 ## Tunnel monitoring and reconnect
 
@@ -367,7 +393,8 @@ forward it had. You decide when to re-run `client`.
 This burst-cap escalation was added in v2.0 (audit finding C7) to
 prevent CSPO IP blocks from sustained reconnect loops; see
 [SSH failure protection](#ssh-failure-protection-cspo-defense) for
-the full CSPO defense.
+the full CSPO defense and [`docs/SECURITY.md`](docs/SECURITY.md) for
+the broader threat-model context.
 
 ## SSH failure protection (CSPO defense)
 
@@ -487,32 +514,32 @@ bash argo_anywhere.sh clean -y --purge               # delete EVERYTHING, includ
 For the full troubleshooting guide (env vars, security notes,
 escape hatches), run `bash argo_anywhere.sh help`.
 
+## Where to read more
+
+| Doc | When to read |
+|:----|:-------------|
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | You're on `argo_opencode.sh` v1.x and want to upgrade to `argo_anywhere.sh` v2.0 |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | You're security-conscious or admin-recommending the script; want the threat model + privacy posture in one place |
+| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | You're evaluating whether the script fits your use case; want to know the known limitations + their rationale upfront |
+| [`docs/TESTING.md`](docs/TESTING.md) | You're a maintainer / contributor who made a non-trivial change and want to live-verify before tagging |
+| [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | You want the audit trail of every fix that landed in v2.0 (43 findings + STATUS resolutions) |
+| [`PLAN.md`](PLAN.md) | You're a maintainer / co-author; plan-of-record + design decisions D-001..D-015 |
+| [`AGENTS.md`](AGENTS.md) | You're an AI coding tool working on this codebase; project conventions + skill loading |
+
 ## Upgrading from `argo_opencode.sh` (pre-v2.0)
 
 The canonical filename was `argo_opencode.sh` before v2.0. v2.0
 renames to `argo_anywhere.sh` and removes the per-client symlinks
 (`argo_opencode.sh`, `argo_claudecode.sh`) that v1.x distributed.
+Per-tool selection is now via `--cli-tool <name>` (or the
+interactive picker).
 
-The script DETECTS v1.x state on first run and **refuses to proceed
-until you've cleaned it up**, printing the exact commands. Typical
-cleanup:
-
-```sh
-mv ~/.config/argo_opencode ~/.config/argo_anywhere    # state cache
-rm -f ~/.ssh/sockets/argo-opencode-*                  # mux sockets
-# (Pre-v2.0 ARGO_OPENCODE_* env-var exports in your .bashrc/.zshrc still
-#  work via auto-promotion to ARGO_ANYWHERE_*; one-time WARN per stale var.)
-```
-
-For users who had argo-proxy running on a compute node from v1.x:
-- The legacy `~/agovenv` venv and `agovproxy` screen session are
-  detected and surfaced via WARN messages on the next `server`
-  bootstrap. The script does NOT auto-kill them (the legacy session
-  might still be holding a live argo-proxy other clients depend on);
-  it suggests the cleanup command.
-- `clean` mode enumerates both old (`agovproxy` / `agovenv` /
-  `~/.argo_opencode.*`) and new (`argovproxy` / `argovenv` /
-  `~/.argo_anywhere.*`) names.
+For the step-by-step migration (re-curl, update aliases, update env
+vars, run client once, verify, optionally clean up old install) plus
+the full list of behavior changes you may notice (verbose: false
+default, claudecode default-to-project scope, stricter on-node
+identity check, Ctrl+C exit summary, better error messages on SSH
+failure lock), see [`docs/UPGRADING.md`](docs/UPGRADING.md).
 
 Old curl URLs against the previous repo name (`a-attia/argo-opencode`)
 **keep working forever** — GitHub auto-redirects them to the new name
@@ -547,8 +574,13 @@ Per-phase test plans (used during the v2.0 development cycle) live in
 
 - [`notes/test_plan_phase1.md`](notes/test_plan_phase1.md) — passed
   2026-05-12 (D1+D2+D4 + legacy detection)
-- [`notes/test_plan_phase2a.md`](notes/test_plan_phase2a.md) —
-  awaiting live-test (CSPO hardening + symlink self-defense)
+- [`notes/test_plan_phase2a.md`](notes/test_plan_phase2a.md) — passed
+  2026-05-14 (P3 added + verified during the live test)
+- [`notes/test_plan_phase2b.md`](notes/test_plan_phase2b.md) — passed
+  2026-05-15 with three follow-up amendments (H5 yaml_scalar, P2
+  setdefault, N1 scope-keyed; all amendments live-verified)
+- `notes/test_plan_phase2c3.md` — to be added at the close of
+  Phase 2c+3 (this batch)
 
 ## Contributing
 
@@ -562,7 +594,12 @@ framework's conventions for agent-facing project files:
 - [`PLAN.md`](PLAN.md) — plan-of-record (scope, architecture,
   milestones, design decisions log).
 - [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) — active
-  fresh-eyes audit (42 findings, mostly addressed in v2.0).
+  fresh-eyes audit (43 findings; the v2.0 release closes all of HIGH
+  + CRIT + most of MED/LOW; see the audit doc for the per-finding
+  STATUS resolutions).
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — known limitations
+  (read before adding features that bump up against the
+  single-instance constraint or the bash 3.2 target).
 - [`notes/agent_feedback.md`](notes/agent_feedback.md) — per-project
   feedback channel into the upstream `scicomp-research-skills`.
 - [`CONTRIBUTORS.md`](CONTRIBUTORS.md) — primary author + AI
@@ -602,4 +639,9 @@ git config --local commit.template .gitmessage
 
 *Created 2025 (project inception); rewritten 2026-05-14 to follow
 the [scicomp-research-skills](https://github.com/a-attia/scicomp-research-skills)
-human-facing-doc-authoring conventions. Maintained by Ahmed Attia.*
+human-facing-doc-authoring conventions; revised 2026-05-15 (Phase
+2c+3) to reflect v2.0-ready-to-tag state, the H6 claudecode default
+flip, the new `docs/UPGRADING.md` / `docs/SECURITY.md` /
+`docs/LIMITATIONS.md` cross-links, and the closure of all 11
+HIGH-severity audit items + 23 of 23 in-scope MED/LOW/INFO items.
+Maintained by Ahmed Attia.*
