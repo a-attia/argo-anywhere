@@ -235,7 +235,7 @@ showing post-Phase-2a rates stay below typical CSPO thresholds.
 | **Smoke tests** | Inline in `AGENTS.md` "Project-specific facts" + `docs/TESTING.md` |
 | **End-to-end live-verification** | `docs/TESTING.md` (768 lines; covers `client` flow with real SSH, real Duo, real argo-proxy) |
 | **Phase-specific test plans** | `notes/test_plan_phase1.md`, `notes/test_plan_phase2a.md` (preserved historical artifacts) |
-| **Audit trail** | `docs/AUDIT_2026-05.md` (5-round audit) + `docs/AUDIT_2026-05-12.md` (42-finding fresh-eyes audit) |
+| **Audit trail** | `docs/AUDIT_2026-05_pre-rebuild.md` (5-round audit; archived) + `docs/AUDIT_2026-05-12.md` (43-finding fresh-eyes audit; current) |
 
 The principle: **lightest tool that does the job.** A bash orchestrator
 running against real infrastructure doesn't benefit from a CI matrix
@@ -588,9 +588,13 @@ deprecation window + clear UPGRADING.md guidance.
   and date-stamp changes.
 - **AGENTS.md** is the agent-facing complement; revise in lockstep
   with significant PLAN changes that affect agent-facing conventions.
-- **Audit docs** (`docs/AUDIT_2026-05.md`, `docs/AUDIT_2026-05-12.md`):
-  historical artifacts, not actively maintained (each is a fresh-eyes
-  audit at a point in time). Future audits get new dated files.
+- **Audit docs** (`docs/AUDIT_2026-05_pre-rebuild.md`,
+  `docs/AUDIT_2026-05-12.md`): historical artifacts, not actively
+  maintained (each is a fresh-eyes audit at a point in time). Future
+  audits get new dated files. Archived audits get a `_pre-<event>`
+  suffix when the script changes substantially enough that line/symbol
+  references no longer apply (audit doc renamed to
+  `_pre-rebuild` per audit finding I3 closure).
 - **Per-phase test plans** (`notes/test_plan_phase*.md`): created per
   phase, archived as historical artifact when phase completes.
 - **Live verification** (`docs/TESTING.md`): living guide; revised

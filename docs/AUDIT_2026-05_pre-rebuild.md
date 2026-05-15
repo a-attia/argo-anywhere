@@ -1,5 +1,23 @@
 # Audit 2026-05 — pre-Phase-3 (multi-client) baseline
 
+> **HISTORICAL ARCHIVE (filed 2026-05-15 per audit finding I3)**.
+> This audit was conducted in early May 2026 against the v1.x line
+> (`argo_opencode.sh`, pre-rename) and is preserved here for
+> provenance. The current audit-of-record is
+> [`AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md), which started after
+> the v1.2.0 rename + revert sequence and the multi-client refactor
+> introduced new findings that this earlier audit could not have
+> seen (the script changed substantially between the two audits).
+> The findings table below is documented for completeness; do not
+> use it as a current to-do list. References to symbols / line
+> numbers in this doc reflect the v1.x codebase before the v2.0
+> rebuild and will not match the current `argo_anywhere.sh`.
+>
+> All findings from this earlier audit that remained relevant after
+> the v2.0 rebuild were either (a) re-found and tracked in the
+> 2026-05-12 audit, or (b) explicitly cross-referenced from
+> 2026-05-12's "Cross-check against prior audit" section.
+
 Structured audit of `argo_opencode.sh` after Phase 2 of the multi-client
 work landed (collision-detection UX, `tunnel` subcommand, on-node
 short-circuit, etc.) and before Phase 3 (Claude Code support + repo
