@@ -2311,7 +2311,7 @@ remote_bootstrap() {
   # doesn't silently accumulate CSPO failures. In MFA mode the mux master
   # absorbs the connection, so ssh_attempt_ok/fail is still correct (a mux
   # failure IS a real failure worth counting).
-  ssh_attempt_pre || die "Refusing to copy script: SSH failure lock is active. See above."
+  ssh_attempt_pre || die "Aborted: scp script to ${node} (SSH failure lock active; recovery above)."
   if scp "${scp_opts[@]}" "$self" "${user}@${node}:${REMOTE_SELF}"; then
     ssh_attempt_ok
   else
@@ -2334,7 +2334,7 @@ remote_bootstrap() {
   if [ -n "${ARGO_ANYWHERE_VERBOSE_SERVER:-}" ]; then
     verbose_kv="ARGO_ANYWHERE_VERBOSE_SERVER=1 "
   fi
-  ssh_attempt_pre || die "Refusing to run bootstrap: SSH failure lock is active. See above."
+  ssh_attempt_pre || die "Aborted: server bootstrap on ${node} (SSH failure lock active; recovery above)."
   # shellcheck disable=SC2046
   if ssh -o StrictHostKeyChecking=accept-new \
          $(ssh_args "$user" "$node") "${user}@${node}" \
@@ -2796,9 +2796,7 @@ monitor_tunnel_loop() {
           if ! kill -0 "$SSH_TUNNEL_PID" 2>/dev/null; then
             # Sub-case A: ssh died.
             ssh_attempt_fail
-            warn "Reconnect ssh exited early (forward not installed)."
-            warn "  Likely auth issue or remote port now in use by something else."
-            warn "  See above for SSH attempt tracker state."
+            warn "Reconnect ssh exited early (forward not installed; auth issue or remote-port collision; tracker state above)."
           else
             # Sub-case B: ssh alive, /health silent.
             ssh_attempt_ok   # still a successful ssh; mark accordingly
