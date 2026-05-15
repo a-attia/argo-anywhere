@@ -62,13 +62,15 @@ package, no multi-file install.
 
 ## Status
 
-v2.0 is ready-to-tag. The v1.x line is tagged at `v1.0.0`, `v1.1.0`,
-and `v1.2.0`; legacy users with pinned URLs to those tags keep
-working forever. v2.0 closes a 43-finding fresh-eyes audit (10
-critical, 11 high, 10 medium, 10 low, 3 info) covering CSPO
-defenses, identity-handling correctness, privacy posture, and
-multi-tool support. See [`PLAN.md`](PLAN.md) Section 4 (Milestones)
-for the full phase-by-phase status and roadmap;
+**v2.0.0 released 2026-05-15.** The v1.x line is tagged at
+`v1.0.0`, `v1.1.0`, and `v1.2.0`; legacy users with pinned URLs to
+those tags keep working forever. v2.0 closes a 43-finding fresh-eyes
+audit (10 critical, 11 high, 10 medium, 10 low, 3 info) covering
+CSPO defenses, identity-handling correctness, privacy posture, and
+multi-tool support — 33 of 43 findings closed (all CRIT + all HIGH
++ in-scope MED/LOW/INFO; 10 deferred to optional follow-up phases).
+See [`PLAN.md`](PLAN.md) Section 4 (Milestones) for the full
+phase-by-phase status and roadmap;
 [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) is the audit
 trail with each finding's resolution.
 

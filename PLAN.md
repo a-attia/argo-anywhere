@@ -7,8 +7,8 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: pre-v2.0 (active development); v1.x line on
-`a-attia/argo-anywhere`.
+**Status**: v2.0.0 tagged + released 2026-05-15. v1.x line tagged
+at v1.0.0 / v1.1.0 / v1.2.0; legacy URLs redirect forever.
 **Repo**: <https://github.com/a-attia/argo-anywhere>.
 **License**: MIT (matches the repo's existing convention).
 
@@ -634,15 +634,20 @@ project's commit/tag pin; the script itself is downstream-of-nobody.
 
 ## 9. Lifecycle stage
 
-- **Now**: v2.0 ready-to-tag. Phase 2a (CRIT) live-tested PASS;
-  Phase 2b (HIGH + 3 amendments from live test #1) live-tested PASS;
-  Phase 2c+3 (MED/LOW/INFO + new docs UPGRADING/SECURITY/LIMITATIONS
-  + TESTING.md / AGENTS.md / PLAN.md final pass) landing this
-  session. Awaiting final live-test gate then v2.0.0 tag.
-- **Next 6 months**: Tag v2.0.0; start Phase 4 (additional CLI tools
-  — aider, cursor, generic OpenAI-compatible). Possible Phase 2d
-  defensive-hardening batch (M6/M7/M8/M9/M10/L6/L10) if real-world
-  use surfaces the silent-failure paths those defend against.
+- **Now**: v2.0.0 released 2026-05-15. Audit-coverage state:
+  33 of 43 findings closed (10 CRIT + 11 HIGH + 12 in-scope
+  MED/LOW/INFO). All four phases (1, 2a, 2b, 2c+3) live-tested
+  PASS with mid-test amendments where surfaced (P3 added in
+  Phase 2a; H5/P2/N1 in Phase 2b; L4+L5 in Phase 2c+3). Maintenance
+  posture: gather real-world feedback; respond to upstream Argo /
+  argo-proxy / OpenCode / Claude Code protocol changes as they
+  land.
+- **Next 6 months**: optional Phase 2d defensive-hardening batch
+  (M6/M7/M8/M9/M10/L6/L10) if real-world use surfaces the
+  silent-failure paths those defend against; Phase 2e cosmetic
+  (I2 _LOGGING rename) when convenient. Phase 4 (additional CLI
+  tools — aider, cursor, generic OpenAI-compatible) when there's
+  user demand or a personal need.
 - **Long term**: Maintenance posture — single-author project; releases
   follow ANL-AI4Dev or Argo upstream changes that affect the
   protocols this script speaks. Abandonment criteria: when the upstream

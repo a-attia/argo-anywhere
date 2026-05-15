@@ -65,8 +65,11 @@ loading set for normal sessions.
 - **Name**: argo-anywhere
 - **Nature**: research-software (CLI orchestrator); single-file bash
   script with inline Python heredocs for structured-data work
-- **Status**: v2.0 ready-to-tag (Phase 2c+3 complete; awaiting final
-  live-test gate then v2.0.0 tag)
+- **Status**: v2.0.0 tagged + released (2026-05-15). Phase 2c+3
+  live-test #1 passed with one mid-test amendment (L4+L5
+  incomplete dedup) and two test-plan defects (workarounds
+  applied; underlying code was correct). Next phases optional:
+  Phase 2d defensive-hardening, Phase 4 multi-tool extension.
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
   `server`, `status`, `stop`, `update-models`, `clean`, `list-tools`,
@@ -75,7 +78,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code today; aider/cursor/generic planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: v1.2.0 (last tag); v2.0 in final pre-tag review
+- **Current release**: v2.0.0 (tagged 2026-05-15)
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
 
 ### Human-facing doc map
