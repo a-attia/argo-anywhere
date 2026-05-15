@@ -32,7 +32,8 @@ Conventions follow
 |:---|:---|:---|:---|
 | Phase 1 | [`test_plan_phase1.md`](test_plan_phase1.md) | passed (2026-05-12) | C2, C3, H9 |
 | Phase 2a | [`test_plan_phase2a.md`](test_plan_phase2a.md) | passed (2026-05-14; P3 added + verified) | C1, C4, C5, C7, P1, P3 |
-| Phase 2b | [`test_plan_phase2b.md`](test_plan_phase2b.md) | awaiting live-test | H1-H8, P2, N1 |
+| Phase 2b | [`test_plan_phase2b.md`](test_plan_phase2b.md) | passed (2026-05-15; 3 amendments H5+P2+N1 added + verified) | H1-H8, P2, N1 |
+| Phase 2c+3 | [`test_plan_phase2c3.md`](test_plan_phase2c3.md) | awaiting live-test | M1-M3, M5, L1-L5, L7, L9, I1, I3 + new docs (UPGRADING/SECURITY/LIMITATIONS) + doc rewrites |
 
 ## Index of impl + section notes
 
