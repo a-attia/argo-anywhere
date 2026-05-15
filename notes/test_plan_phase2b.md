@@ -167,6 +167,18 @@ summary when the user Ctrl+C's, explaining that the local tunnel +
 monitor stopped, the remote argo-proxy is still alive, and how to
 reuse / fully stop / fully clean.
 
+> **Live-test #1 finding (2026-05-15)**: the original Batch 2
+> summary's three reuse hints conflated scopes and the middle hint
+> was misleading (`To fully stop: bash argo_anywhere.sh stop` --
+> the local tunnel is already gone by the time the summary prints,
+> so `stop` would say "Nothing to stop locally"). Amended via a
+> follow-up commit that rewrites the summary to (a) state
+> explicitly what's STILL ALIVE (SSH master + remote argo-proxy,
+> with their roles), and (b) list scope-keyed options including
+> the exact `ssh -O exit -S <sock> placeholder` command for closing
+> the SSH master. The expected output below reflects the AMENDED
+> summary.
+
 ### Test 3a: client mode prints the summary
 
 ```sh
@@ -179,16 +191,28 @@ Wait for the status box + "Foregrounding ..." message. Press
 **Pass**: see (in this order, after the cleanup log lines):
 
 ```
-[ ok ] Local tunnel and health monitor stopped.
-[ ok ] The remote argo-proxy on compute-01.cels.anl.gov is still running (intentional).
-[argo_anywhere]   - To use it again: bash argo_anywhere.sh --cli-tool opencode client
-[argo_anywhere]       (will detect and reuse the existing proxy)
-[argo_anywhere]   - To fully stop:   bash argo_anywhere.sh stop
-[argo_anywhere]   - To remove all artifacts (local + remote): bash argo_anywhere.sh clean
+[ ok ] Ctrl-C: tore down the local SSH tunnel + health monitor.
+[argo_anywhere]
+[argo_anywhere] What's still alive (intentional; left for fast restart):
+[argo_anywhere]   * SSH multiplex master to aattia@compute-01.cels.anl.gov
+[argo_anywhere]       (keeps Duo state warm; next 'client' run skips the Duo prompt)
+[argo_anywhere]   * Remote argo-proxy on compute-01.cels.anl.gov:64742
+[argo_anywhere]       (still serving; any laptop with a tunnel here keeps working)
+[argo_anywhere]
+[argo_anywhere] Pick the scope you actually want, by what you want to keep warm:
+[argo_anywhere]   Restart instantly (reuse mux + remote argo-proxy; no Duo prompt):
+[argo_anywhere]     bash argo_anywhere.sh --cli-tool opencode client
+[argo_anywhere]   Also close the SSH master (frees the socket; next run re-prompts Duo):
+[argo_anywhere]     ssh -O exit -S /Users/attia/.ssh/sockets/argo-anywhere-aattia-compute-01.cels.anl.gov-22 placeholder
+[argo_anywhere]   Also stop the remote argo-proxy + remove all script state (laptop + node):
+[argo_anywhere]     bash argo_anywhere.sh clean
 ```
 
-The reuse-command line should mention the actual `--cli-tool`
-value you used.
+Three checks: (1) the reuse-command line mentions the actual
+`--cli-tool` value you used; (2) the `ssh -O exit -S` line shows
+the actual mux-socket path including your username + the picked
+node; (3) the `Also stop the remote argo-proxy + remove all
+script state` line names `clean`, NOT the misleading old `stop`.
 
 ### Test 3b: tunnel mode prints the summary (tool-agnostic hint)
 
@@ -198,8 +222,8 @@ bash argo_anywhere.sh tunnel
 
 Wait for the foregrounded monitor; **Ctrl+C**.
 
-**Pass**: same summary, but the reuse hint is `bash
-argo_anywhere.sh tunnel` (no `--cli-tool` mentioned).
+**Pass**: same summary shape, but the "Restart instantly" line
+shows `bash argo_anywhere.sh tunnel` (no `--cli-tool` mentioned).
 
 ### Test 3c: status mode does NOT print the summary
 
@@ -211,17 +235,41 @@ bash argo_anywhere.sh status 2>&1 | tail -5
 NOT the new N1 ok/log lines. status never owns a foregrounded
 tunnel, so the N1 summary block correctly does not fire.
 
-### Test 3d: synthetic 4-scenario harness (already verified during
+### Test 3d: client mode WITHOUT a mux socket on disk
+
+This exercises the defensive branch that omits the "Also close
+the SSH master" line when no socket file exists (e.g. the
+`--no-mfa` invocation path that skips the multiplex master setup).
+
+```sh
+bash argo_anywhere.sh --no-mfa --cli-tool opencode client
+```
+
+Wait for the status box + "Foregrounding ..." message. Press
+**Ctrl+C**.
+
+**Pass**: the summary shows `(no SSH multiplex master on disk;
+nothing to reuse on the laptop side)` instead of the
+`SSH multiplex master to ...` line, AND the `Also close the SSH
+master` option is OMITTED entirely (no copy-paste-able command
+for an action that wouldn't do anything).
+
+### Test 3e: synthetic 5-scenario harness (already verified during
 implementation; here for re-verification if needed)
 
 A standalone harness exercised:
-- A: client mode + `--cli-tool opencode` -> full summary, opencode hint
-- B: tunnel mode -> full summary, tunnel hint
-- C: status mode -> SILENT
-- D: client mode + early-die path (no monitor started) -> SILENT
+- A: client mode, mux socket EXISTS -> full menu including the
+     `ssh -O exit -S <sock>` line
+- B: tunnel mode, mux socket EXISTS -> same shape, reuse cmd is
+     `tunnel`
+- C: client mode, mux socket DOES NOT EXIST -> "no SSH multiplex
+     master on disk" + the `Also close the SSH master` option
+     omitted
+- D: status mode -> SILENT
+- E: client mode + early-die path (no monitor started) -> SILENT
 
-Re-running this harness is documented in commit `564cb26`'s body
-(see `git show 564cb26 -- argo_anywhere.sh | head -80`). Skip
+Re-running this harness is documented in the amendment commit's
+body. Skip
 unless the live tests above show unexpected behavior.
 
 ---

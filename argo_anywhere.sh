@@ -2314,6 +2314,22 @@ cleanup_local() {
   # a local tunnel + monitor (client / tunnel); skip otherwise to
   # avoid noise on script-internal die paths or for subcommands
   # like 'status' / 'help' that never started a monitor.
+  #
+  # N1 amendment (2026-05-15, post-live-test #1): the original summary
+  # said "To fully stop: bash argo_anywhere.sh stop" which was
+  # misleading -- the local tunnel is ALREADY gone by the time the
+  # summary prints, so 'stop' would be a no-op. The user's actual
+  # decision after Ctrl+C is "what other state from this session do I
+  # also want torn down?" There are three independently-resident
+  # pieces of state, and the new summary lists them explicitly + the
+  # exact command for each scope:
+  #   1. SSH multiplex master (laptop ~/.ssh/sockets/) -- alive,
+  #      keeps Duo state warm; close with `ssh -O exit -S <sock>`.
+  #   2. Remote argo-proxy (compute node) -- alive, keeps the node's
+  #      port held; close with `clean` (or the screen/tmux/pkill
+  #      one-liner clean prints when invoked with --remote-only).
+  #   3. Local config / state dir / cache -- alive, harmless; clean
+  #      with `clean` if you want a true blank slate.
   case "${_INVOKED_MODE:-}" in
     client|setup|tunnel)
       if [ "$closed_tunnel" = 1 ] || [ -n "$MONITOR_PID" ]; then
@@ -2329,12 +2345,34 @@ cleanup_local() {
         else
           _reuse_cmd="bash ${_self} --cli-tool <name> client"
         fi
-        ok "Local tunnel and health monitor stopped."
-        ok "The remote argo-proxy on ${_node} is still running (intentional)."
-        log "  - To use it again: ${_reuse_cmd}"
-        log "      (will detect and reuse the existing proxy)"
-        log "  - To fully stop:   bash ${_self} stop"
-        log "  - To remove all artifacts (local + remote): bash ${_self} clean"
+        # Compute the exact mux-socket path so the user can copy/paste
+        # the `ssh -O exit -S ...` command without having to look it up.
+        local _user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-<user>}}"
+        local _mux_sock="${SSH_MUX_DIR}/argo-anywhere-${_user}-${_node}-22"
+        local _mux_alive=0
+        [ -S "$_mux_sock" ] && _mux_alive=1
+
+        ok "Ctrl-C: tore down the local SSH tunnel + health monitor."
+        log ""
+        log "What's still alive (intentional; left for fast restart):"
+        if [ "$_mux_alive" = 1 ]; then
+          log "  * SSH multiplex master to ${_user}@${_node}"
+          log "      (keeps Duo state warm; next 'client' run skips the Duo prompt)"
+        else
+          log "  * (no SSH multiplex master on disk; nothing to reuse on the laptop side)"
+        fi
+        log "  * Remote argo-proxy on ${_node}:${PROXY_PORT}"
+        log "      (still serving; any laptop with a tunnel here keeps working)"
+        log ""
+        log "Pick the scope you actually want, by what you want to keep warm:"
+        log "  Restart instantly (reuse mux + remote argo-proxy; no Duo prompt):"
+        log "    ${_reuse_cmd}"
+        if [ "$_mux_alive" = 1 ]; then
+          log "  Also close the SSH master (frees the socket; next run re-prompts Duo):"
+          log "    ssh -O exit -S ${_mux_sock} placeholder"
+        fi
+        log "  Also stop the remote argo-proxy + remove all script state (laptop + node):"
+        log "    bash ${_self} clean"
       fi
       ;;
   esac
