@@ -579,8 +579,12 @@ Per-phase test plans (used during the v2.0 development cycle) live in
 - [`notes/test_plan_phase2b.md`](notes/test_plan_phase2b.md) — passed
   2026-05-15 with three follow-up amendments (H5 yaml_scalar, P2
   setdefault, N1 scope-keyed; all amendments live-verified)
-- `notes/test_plan_phase2c3.md` — to be added at the close of
-  Phase 2c+3 (this batch)
+- [`notes/test_plan_phase2c3.md`](notes/test_plan_phase2c3.md) —
+  passed 2026-05-15 with one follow-up amendment (L4+L5 incomplete
+  dedup at 3 additional sites; landed mid-test) and two test-plan
+  defects identified (Test 2b + Test 5b: synthetic SSH-failure-lock
+  exercise via `status` doesn't trigger the lock-fired branch
+  because `status` makes no SSH calls; workarounds applied)
 
 ## Contributing
 

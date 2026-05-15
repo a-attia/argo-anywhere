@@ -538,6 +538,78 @@ cross-links to `docs/UPGRADING.md` for the full migration.
 
 ---
 
+## Live-test #1 results (2026-05-15)
+
+All 14 tests passed; one amendment landed mid-test; two test-plan
+defects identified.
+
+| Test | Status | Notes |
+|:-----|:-------|:------|
+| Pre-test setup | ✓ | 9 commits ahead of origin; 40 marker comments. |
+| 1 — regression smoke | ✓ | All 5 checks pass; ALL GREEN tunnel; H8 dry-run syntax confirmed. |
+| 2 — M2 env-var name | ✓ via Option B | **Test plan defect** (see below). |
+| 3 — M3 port-read caching | ✓ | Single `baseURL` jq invocation confirmed via `bash -x` trace. |
+| 4 — L1 mkdir error | ✓ | Real macOS `mkdir: ... Permission denied` surfaced verbatim. |
+| 5 — L4+L5 lock dedup | ✓ | Found 3 incomplete sites; **amendment landed mid-test** (`8946aeb`). Final state: zero "See above for recovery" matches. |
+| 6 — L7 brew PATH | ✓ | Code review; for-loop iterates 3 paths in correct order. |
+| 7 — L9 host_is_target cache | ✓ | Code review; 4 cache globals + init function in place. |
+| 8 — M1 dead loop removed | ✓ | `on_anl_compute_node` now 14 lines, suffix-match only. |
+| 9 — L3 TTY-gated bell | ✓ | `[ -t 2 ]` guard around `printf '\a' >&2`. |
+| 10 — I3 archive | ✓ all 3 sub-checks | Rename in git; provenance note; cross-refs updated. |
+| 11 — new docs render | ✓ all 4 sub-checks | 882 lines total; no placeholders; no personal paths; all links resolve. |
+| 12 — AGENTS.md updated | ✓ | Status field + doc-map subsection both correct. |
+| 13 — PLAN.md D-015 | ✓ | Entry present with correct title + status + commit refs. |
+| 14 — README rewrite | ✓ all 4 sub-checks | Status concise; Claude Code scope project-default; Where-to-read-more table; Upgrading shrunk to ~27 lines (target ≤ 25; immaterial). |
+
+### Amendment landed mid-test
+
+`8946aeb` — **L4+L5 amendment**: Test 5a's `grep 'See above for
+recovery'` returned 3 matches the original Batch 1 fix had missed
+(`remote_bootstrap`'s scp + ssh pre-gates at lines 2314 + 2337,
+plus `monitor_tunnel_loop`'s reconnect-fail warn at line 2801).
+Same one-liner-mode-descriptor treatment applied to all three.
+Audit doc updated. Verified: zero remaining matches.
+
+### Test-plan defects identified (workarounds applied)
+
+**Both defects share the same root cause**: the test plan assumed
+certain subcommands exercise SSH paths that they don't. Specifically,
+`status` mode is purely local checks (`lsof`, `curl /health` to
+localhost, `jq` on the OpenCode config). It doesn't make any SSH
+calls, so neither `ssh_attempt_pre` nor `pick_node` ever fires. A
+synthetic lock-file sitting in `~/.config/argo_anywhere/` is
+invisible to `status` runs.
+
+| Defect | Where | Symptom | Workaround used |
+|:-------|:------|:--------|:----------------|
+| Test 2b | "verify M2 env-var name in lock recovery via `bash argo_anywhere.sh status`" | `grep -E "ssh -o ConnectTimeout"` returned no matches because `status` doesn't call `ssh_attempt_pre`. | Pure-function unit test that directly invoked the recovery-line printf with `ARGO_ANYWHERE_USER=aattia` set. Confirmed: `aattia@logins.cels.anl.gov` printed correctly. |
+| Test 5b | "verify L4+L5 single-recovery-block via `bash argo_anywhere.sh --probe-nodes status`" | Same root cause: `status` doesn't call `pick_node`, so the `--probe-nodes` flag is parsed but unused. The locked branch never fires. | Code-review-only verification (`grep -n 'recovery above'`) showed all 8 dedup sites use the same one-liner pattern. Structural proof that no double-recovery-block path exists. |
+
+For both defects, the test ASSERTION held (M2 fix + L4+L5 fix work
+correctly); only the test STIMULUS was wrong (the chosen
+subcommand didn't trigger the assertion site). The corresponding
+audit-doc STATUS blocks are accurate; the closures stand.
+
+**Lessons for future test plans** (queued for upstream roll-up via
+`notes/agent_feedback.md`):
+
+1. When designing a test that exercises an internal code path, verify
+   that the chosen subcommand actually traverses that path. The naive
+   "set up state X + run command Y + look for output Z" template
+   silently fails when Y doesn't exercise the code reading X.
+2. For SSH-failure-tracker tests specifically, the chosen subcommand
+   must make at least one SSH call. `status` doesn't qualify;
+   `tunnel` qualifies BUT short-circuits when a local listener
+   exists (the common case during testing). Pure-function unit
+   tests that source the helper out of the script are the most
+   reliable approach.
+3. Code-review verification is a legitimate fallback when synthetic
+   state-injection is unreliable; structural proofs (e.g.
+   "every callsite uses pattern X") can stand in for behavior tests
+   when behavior tests can't be cleanly arranged.
+
+---
+
 ## Reporting back
 
 For each test, paste either "pass" or the relevant verbatim output.
