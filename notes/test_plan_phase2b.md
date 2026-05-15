@@ -98,7 +98,7 @@ accepts it.
 ### Test 2c: argo-proxy config on the compute node has verbose=false
 
 This is best verified after the next live `client` run (most
-recent invocation overwrites the config on the node). After your
+recent invocation rewrites the config on the node). After your
 next `bash argo_anywhere.sh --cli-tool <name> client`:
 
 ```sh
@@ -106,6 +106,30 @@ ssh aattia@compute-01.cels.anl.gov 'grep -E "^verbose:" ~/.config/argoproxy/conf
 ```
 
 **Pass**: prints `verbose: false`.
+
+> **Live-test #1 finding (2026-05-14)**: the original P2 fix used
+> `data.setdefault('verbose', verbose_default)` in the PyYAML merge
+> path, intending to "preserve user's explicit choice." That was
+> wrong: the pre-P2 script wrote `verbose: true` automatically (no
+> user input), so on first upgrade `setdefault` preserved the old
+> `true` and the new `false` default silently did NOT take effect.
+> Fixed in a follow-up commit by switching to direct assignment
+> (`data['verbose'] = verbose_default`). The user's explicit-opt-in
+> channel is the `--verbose-server` CLI flag, NOT the file content.
+> Test 2c above passes after the amendment lands AND the user has
+> re-run `client` once with the new script (the run that scp's the
+> fixed script to the node + rewrites the config).
+>
+> If you find `verbose: true` after running `client` from the new
+> script, check that:
+> 1. The script on the compute node has the amendment:
+>    `ssh aattia@compute-01.cels.anl.gov 'grep "data\[.verbose.\] = " ~/.argo_anywhere.sh'`
+>    expected output: a line of Python code with the assignment.
+> 2. The `client` invocation actually reached `mode_server` and
+>    rewrote the config (look for `[ ok ] argo-proxy config already
+>    up to date` OR `argo-proxy config written` in the log; if you
+>    see neither, the local-reuse path short-circuited and the
+>    config was not touched this run).
 
 ### Test 2d: opt-in via flag flips it back to true
 

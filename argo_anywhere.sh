@@ -3870,11 +3870,20 @@ data['config_version'] = "3"
 data['user'] = user
 data['host'] = "127.0.0.1"
 data['port'] = port
-# Provide sensible defaults for keys argo-proxy needs but the existing file
-# might lack (e.g. a legacy file with no argo_base_url and no verbose).
-# verbose_default reflects the script's --verbose-server flag (P2 fix);
-# preserves any explicit user choice already in the existing config.
-data.setdefault('verbose', verbose_default)
+# P2 fix amendment (2026-05-14): always overwrite `verbose` with the
+# script's chosen value. The original P2 fix used setdefault to
+# "preserve user's explicit choice", but that was wrong: the
+# pre-P2 script wrote verbose: true automatically (no user input
+# involved), so on first upgrade the existing `verbose: true` would
+# be preserved and the P2 default (false) would silently NOT take
+# effect -- the security regression the fix was meant to close
+# stays open. Discovered during Phase 2b live test #1 on a real
+# upgrader's config. The user's "explicit choice" channel is the
+# --verbose-server CLI flag (or ARGO_ANYWHERE_VERBOSE_SERVER env);
+# the file content is not a user-input channel for this key.
+data['verbose'] = verbose_default
+# argo_base_url is genuinely user-customizable (alternate Argo
+# endpoints / dev environments); preserve any existing value.
 data.setdefault('argo_base_url', "https://apps.inside.anl.gov/argoapi")
 with open(dst, 'w') as f:
     yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
