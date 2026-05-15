@@ -335,8 +335,47 @@ ok()   { printf '%s[ ok ]%s %s\n' "$C_GRN" "$C_OFF" "$*" >&2; }
 warn() { printf '%s[warn]%s %s\n' "$C_YLW" "$C_OFF" "$*" >&2; }
 err()  { printf '%s[err ]%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; }
 die()  { err "$*"; exit 1; }
-ask()  { local p="$1" def="${2:-}" reply; printf '%s%s%s ' "$C_YLW" "$p" "$C_OFF" >&2;
-         read -r reply || true; printf '%s' "${reply:-$def}"; }
+# ask: prompt the user for input. Args: <prompt-text> [<default-value>].
+#
+# M10 fix (audit Phase 2d, default-with-WARN per user choice): when stdin
+# is not a TTY, return the default value WITH a one-time WARN naming
+# the prompt + the default. Pre-fix the script silently used the default,
+# which was correct for the legitimate non-TTY scenario (mode_server
+# under tee'd re-exec) but invisible in other non-TTY scenarios
+# (curl|bash, CI, automation). The WARN is suppressed when
+# ARGO_ANYWHERE_LOGGING=1 (the tee'd re-exec sentinel set by mode_server's
+# bootstrap) -- in that case the silent-default behavior IS correct and
+# expected. In all other non-TTY cases, the WARN surfaces what got
+# auto-answered so the user can see whether the default is what they
+# wanted.
+#
+# When stdin is NOT a TTY AND there's no default, ask() still returns
+# empty (matching pre-fix behavior). Callers that can't accept an empty
+# answer (e.g. resolve_username's username prompt) should die with a
+# clear "set ARGO_ANYWHERE_USER in env to skip this prompt" message;
+# they were already doing so via the [-z reply] checks in their loops.
+ask()  {
+  local p="$1" def="${2:-}" reply
+  if [ -t 0 ] || [ "${ARGO_ANYWHERE_LOGGING:-0}" = 1 ]; then
+    # Interactive TTY OR the legitimate tee'd-re-exec scenario:
+    # behave exactly as before (no warn; silent default if read fails).
+    printf '%s%s%s ' "$C_YLW" "$p" "$C_OFF" >&2
+    read -r reply || true
+    printf '%s' "${reply:-$def}"
+  else
+    # Non-TTY in an unexpected scenario (curl|bash, CI, automation).
+    # Surface the auto-answer so the user knows which prompt got
+    # the default (and what the default was).
+    if [ -n "$def" ]; then
+      warn "non-interactive (stdin is not a TTY); auto-answering prompt"
+      warn "  '${p}' with default '${def}'."
+    else
+      warn "non-interactive (stdin is not a TTY) and no default for prompt"
+      warn "  '${p}'; returning empty (caller may die)."
+    fi
+    printf '%s' "${def}"
+  fi
+}
 
 # ============================================================================
 # SECTION: 4. BOX DRAWING (Unicode vs ASCII detection + print_summary_box)
