@@ -571,7 +571,13 @@ _my_interface_ips() {
       | grep -vE '^(127\.|0\.0\.0\.0$)'
   elif command -v ifconfig >/dev/null 2>&1; then
     # Match `inet <ip>` (BSD/macOS) and `inet addr:<ip>` (older Linux net-tools).
-    # gsub strips the optional `addr:` prefix from $2 in place.
+    # L2 fix (audit Phase 2c): the `gsub(/^addr:/, "", $2)` mutates the
+    # second whitespace-separated field IN PLACE -- so $2 is "<ip>"
+    # whether the upstream wrote `inet 1.2.3.4` or `inet addr:1.2.3.4`.
+    # The mutation is intentional (cleaner than tracking which dialect
+    # we're in), and `print $2` then sees the cleaned value. Reading
+    # this as `gsub on the whole line` is the misread to avoid -- the
+    # third arg to gsub names the target field explicitly.
     ifconfig 2>/dev/null \
       | awk '/inet (addr:)?[0-9]/{
           gsub(/^addr:/, "", $2);
@@ -601,9 +607,33 @@ _my_interface_ips() {
 #      physical hosts including this one, the cheap string check at (1)
 #      and the resolution-of-our-fqdn at (2) miss because they only
 #      compare to ONE name we know we have).
+# L9 fix (audit Phase 2c): cache the script-invocation-stable values
+# ($me = our FQDN, $me_ip = our resolved IP, $my_ips = our interface
+# IPs) so multiple host_is_target calls in one script run don't repeat
+# the same lookups. pick_node's default-selection loop calls this once
+# per ANL_NODES entry (10 nodes => up to 20 DNS lookups); on a stalled-
+# DNS system that latency was visible. The cache is correct for our
+# purposes because none of these values change during a script
+# invocation: hostname is fixed, our IPs don't change mid-run, and
+# the local DNS resolver's view of our FQDN is stable.
+_HOST_IS_TARGET_ME=""
+_HOST_IS_TARGET_ME_IP=""
+_HOST_IS_TARGET_MY_IPS=""
+_HOST_IS_TARGET_CACHE_INIT=0
+_host_is_target_init_cache() {
+  [ "$_HOST_IS_TARGET_CACHE_INIT" = 1 ] && return 0
+  _HOST_IS_TARGET_ME="$(this_host_fqdn)"
+  if command -v getent >/dev/null 2>&1 && [ -n "$_HOST_IS_TARGET_ME" ]; then
+    _HOST_IS_TARGET_ME_IP="$(getent hosts "$_HOST_IS_TARGET_ME" 2>/dev/null | awk '{print $1; exit}')"
+  fi
+  _HOST_IS_TARGET_MY_IPS="$(_my_interface_ips)"
+  _HOST_IS_TARGET_CACHE_INIT=1
+}
+
 host_is_target() {
   local target; target="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  local me; me="$(this_host_fqdn)"
+  _host_is_target_init_cache
+  local me="$_HOST_IS_TARGET_ME"
   [ -n "$me" ] || return 1
 
   # (1) cheap string comparison + short-name tolerance
@@ -615,16 +645,13 @@ host_is_target() {
     "${me}".*) return 0 ;;
   esac
 
-  # (2) compare resolved IPs (cheap; one getent each). Only attempt when
-  # getent is available (Linux) -- macOS doesn't ship it but the alias-
-  # match case isn't usually relevant on macOS (you're not on a node
-  # whose alias another machine knows). Skip silently if getent missing;
-  # fall through to (3) below.
+  # (2) compare resolved IPs (cheap; one getent for target; our IP is
+  # cached). Only attempt when getent is available (Linux) -- macOS
+  # doesn't ship it but the alias-match case isn't usually relevant on
+  # macOS. Skip silently if getent missing; fall through to (3) below.
   if command -v getent >/dev/null 2>&1; then
-    local target_ip me_ip
-    target_ip="$(getent hosts "$target" 2>/dev/null | awk '{print $1; exit}')"
-    me_ip="$(getent hosts "$me" 2>/dev/null | awk '{print $1; exit}')"
-    if [ -n "$target_ip" ] && [ -n "$me_ip" ] && [ "$target_ip" = "$me_ip" ]; then
+    local target_ip="$(getent hosts "$target" 2>/dev/null | awk '{print $1; exit}')"
+    if [ -n "$target_ip" ] && [ -n "$_HOST_IS_TARGET_ME_IP" ] && [ "$target_ip" = "$_HOST_IS_TARGET_ME_IP" ]; then
       return 0
     fi
   fi
@@ -632,7 +659,7 @@ host_is_target() {
   # (3) does the target alias resolve to any of MY interface IPs?
   # Robust against round-robin DNS where the alias has multiple A
   # records and only some of them are us.
-  local target_ips my_ips
+  local target_ips
   if command -v getent >/dev/null 2>&1; then
     target_ips="$(getent hosts "$target" 2>/dev/null | awk '{print $1}')"
   else
@@ -650,12 +677,11 @@ host_is_target() {
   fi
   [ -n "$target_ips" ] || return 1
 
-  my_ips="$(_my_interface_ips)"
-  [ -n "$my_ips" ] || return 1
+  [ -n "$_HOST_IS_TARGET_MY_IPS" ] || return 1
 
   local tip mip
   for tip in $target_ips; do
-    for mip in $my_ips; do
+    for mip in $_HOST_IS_TARGET_MY_IPS; do
       if [ "$tip" = "$mip" ]; then
         return 0
       fi
@@ -876,20 +902,24 @@ read_port_from_opencode_config() {
 
 resolve_port() {
   local p=""
+  # M3 fix (audit Phase 2c): hoist read_port_from_opencode_config call
+  # to the top so the result is computed once and reused. Pre-fix, the
+  # override-flag path (--port / ARGO_ANYWHERE_PORT env) would skip the
+  # initial read and then the post-if-block "always read config too"
+  # line would run a SECOND jq invocation. Same correctness, fewer
+  # subprocesses, immune to config-edited-mid-run race.
+  PORT_FROM_CONFIG="$(read_port_from_opencode_config || true)"
   if [ -n "$PORT_OVERRIDE_CLI" ]; then
     p="$PORT_OVERRIDE_CLI"; PORT_SOURCE="--port flag"
   elif [ -n "${ARGO_ANYWHERE_PORT:-}" ]; then
     p="$ARGO_ANYWHERE_PORT"; PORT_SOURCE="ARGO_ANYWHERE_PORT env"
   else
-    PORT_FROM_CONFIG="$(read_port_from_opencode_config || true)"
     if [ -n "$PORT_FROM_CONFIG" ]; then
       p="$PORT_FROM_CONFIG"; PORT_SOURCE="opencode config baseURL"
     else
       p="$PROXY_PORT_DEFAULT"; PORT_SOURCE="built-in default"
     fi
   fi
-  # Always read config too (even when not chosen) so we can compare later.
-  [ -z "$PORT_FROM_CONFIG" ] && PORT_FROM_CONFIG="$(read_port_from_opencode_config || true)"
   # Sanity check: must be a number in valid TCP range.
   case "$p" in
     [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]|[1-5][0-9][0-9][0-9][0-9]|6[0-4][0-9][0-9][0-9]|65[0-4][0-9][0-9]|655[0-2][0-9]|6553[0-5]) ;;
@@ -1598,18 +1628,37 @@ ensure_opencode_installed() {
   # pick up the rc-file change naturally on next login. If the binary
   # really isn't there after install, fall through to the die() with a
   # message that points at the actual recovery action.
+  # L7 fix (audit Phase 2c): also check Homebrew install locations on
+  # macOS (Apple Silicon = /opt/homebrew/bin/opencode; Intel macOS =
+  # /usr/local/bin/opencode). Pre-fix only checked ~/.opencode/bin/,
+  # which is the upstream curl|bash location (and the brew-fallback
+  # path on a macOS without /usr/local/bin on PATH); the actual brew
+  # success path drops the binary into one of the brew-managed prefixes.
+  # Order matters: try the brew locations first so users on a brew
+  # system get the brew-managed binary (which integrates with brew
+  # upgrade workflows) rather than a dangling rc-file-PATH artifact.
   if ! command -v opencode >/dev/null 2>&1; then
-    if [ -x "${HOME}/.opencode/bin/opencode" ]; then
-      log "Installer placed binary at ~/.opencode/bin/opencode but the new"
-      log "  PATH only takes effect in fresh shells. Prepending it for this run."
-      PATH="${HOME}/.opencode/bin:${PATH}"
-      export PATH
-    fi
+    local _candidate
+    for _candidate in \
+        /opt/homebrew/bin/opencode \
+        /usr/local/bin/opencode \
+        "${HOME}/.opencode/bin/opencode"; do
+      if [ -x "$_candidate" ]; then
+        log "Installer placed binary at ${_candidate} but the new"
+        log "  PATH only takes effect in fresh shells. Prepending its dir for this run."
+        PATH="$(dirname "$_candidate"):${PATH}"
+        export PATH
+        break
+      fi
+    done
   fi
 
   if ! command -v opencode >/dev/null 2>&1; then
     err "OpenCode install reported success but the binary is not on PATH and"
-    err "  was not found at the standard location (~/.opencode/bin/opencode)."
+    err "  was not found at any standard location:"
+    err "    ~/.opencode/bin/opencode (upstream curl|bash installer)"
+    err "    /opt/homebrew/bin/opencode (Homebrew on Apple Silicon)"
+    err "    /usr/local/bin/opencode (Homebrew on Intel macOS)"
     err "  Try opening a new shell (or 'source ~/.bashrc' / 'source ~/.zshrc')"
     err "  and re-running this script."
     die "Cannot continue without a runnable opencode binary."
