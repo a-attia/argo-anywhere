@@ -10,6 +10,14 @@ on a compute node). For the cheaper local-only checks see
 
 Reading time: ~5 min. Run time: ~5–10 min including one Duo prompt.
 
+> **Adjacent docs**: [`UPGRADING.md`](UPGRADING.md) covers what changes
+> for v1.x users at v2.0. [`SECURITY.md`](SECURITY.md) covers the threat
+> model + privacy posture. [`LIMITATIONS.md`](LIMITATIONS.md) covers
+> known limitations including the single-instance constraint that
+> several tests below exercise. [`AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md)
+> is the audit trail referenced from individual test pass criteria
+> below.
+
 ---
 
 ## Conventions in this guide
@@ -210,7 +218,7 @@ your local OS account name.
 [argo_anywhere] Running server bootstrap on <node>...
 [argo_anywhere] [server] starting bootstrap on <node>... for user=<user> port=<port>
 [ ok ] system python3 3.x OK
-[ ok ] venv python 3.x OK (/home/<user>/agovenv)
+[ ok ] venv python 3.x OK (/home/<user>/argovenv)
 [ ok ] argo-proxy: argo-proxy <version>
 ```
 
@@ -219,9 +227,16 @@ Then either:
 **(A) reuse path** — an existing argo-proxy is already serving:
 
 ```
-[ ok ] Existing argo-proxy already serving on 127.0.0.1:<port> (pid X); reusing.
+[ ok ] Existing argo-proxy already serving on 127.0.0.1:<port> (pid X); identity verified (user='<user>'); reusing.
 [ ok ] Server is up on <node>:<port>.
 ```
+
+The "identity verified (user='<user>')" tag is from the v2.0 H5 fix
+(audit Phase 2b Batch 4). If you see "config.yaml is missing or
+unreadable" or "configured for user 'X', not '<you>'" instead, the
+H5 identity-check refused the reuse — see
+[`docs/AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md) section H5 for
+the full set of refusal branches and recovery options.
 
 **(B) fresh path** — argo-proxy needs to start. You may then see a config-
 differs prompt similar to Step 3d but for `~/.config/argoproxy/config.yaml`:
@@ -240,7 +255,7 @@ After the diff, re-prompt fires. **Type `b`** to back up + overwrite.
 
 ```
 [ ok ] Backed up to ...config.yaml.bak.<ts> and overwrote argo-proxy config.
-[argo_anywhere] Starting argo-proxy in screen session 'agovproxy'...
+[argo_anywhere] Starting argo-proxy in screen session 'argovproxy'...
 [ ok ] argo-proxy is listening on 127.0.0.1:<port>.
 [ ok ] Server is up on <node>:<port>.
 ```
@@ -250,7 +265,13 @@ After the diff, re-prompt fires. **Type `b`** to back up + overwrite.
   (not twice — that would indicate the `mode_server` re-exec is double-
   bootstrapping, a regression of an old bug).
 - If you went through path (B), the proposed YAML preserved your unknown
-  keys.
+  keys AND the `verbose:` line in the proposed file is `verbose: false`
+  (the v2.0 P2 default; was `verbose: true` pre-v2.0). If you passed
+  `--verbose-server`, expect `verbose: true` instead.
+- If you went through path (A) and Claude Code was the chosen tool,
+  expect a privacy-warning callout immediately after the post-config
+  lines (the H7 fix; warns that the config contains your ANL username
+  and reminds you to gitignore the file).
 
 ### 3f — tunnel up + summary
 
@@ -262,11 +283,16 @@ After the diff, re-prompt fires. **Type `b`** to back up + overwrite.
 Then the ALL GREEN summary box, with non-zero model counts.
 
 ```
-[argo_anywhere] Foregrounding tunnel. Ctrl-C to disconnect.
+[argo_anywhere] Foregrounding (mux-owned tunnel; Ctrl-C to disconnect health monitor).
+[argo_anywhere]   Note: the SSH multiplex master keeps the forward alive even if you
+[argo_anywhere]   kill this script. Use 'bash argo_anywhere.sh stop' (or 'clean') to
+[argo_anywhere]   fully tear down the tunnel.
 ```
 
 The script is now blocking. **Leave this terminal alone** — Ctrl-C will tear
-down the tunnel.
+down the local SSH tunnel + health monitor and print the v2.0 N1 scope-keyed
+exit summary listing what's still alive (SSH master, remote argo-proxy) and
+the exact commands for each scope you might want to also tear down.
 
 ---
 
@@ -346,7 +372,7 @@ lsof -nPi ":${PORT}" -sTCP:LISTEN -t | xargs -r kill 2>/dev/null
 
 # Kill stale remote session + argo-proxy on the node
 ssh -J <user>@logins.cels.anl.gov <user>@<node> '
-  screen -S agovproxy -X quit 2>/dev/null
+  screen -S argovproxy -X quit 2>/dev/null
   pkill -f "argo-proxy serve" 2>/dev/null
   sleep 1
   echo "--- final state ---"
@@ -359,9 +385,12 @@ Then re-run `bash argo_anywhere.sh client` (or, in a pinch, the legacy
 
 ### You accidentally Ctrl-C'd the foregrounded client
 
-That's fine — `cleanup_local` runs, the tunnel comes down cleanly. Re-run
-`bash argo_anywhere.sh client` to bring it back. Cached username and node
-will be reused so you skip those prompts.
+That's fine — `cleanup_local` runs, the tunnel comes down cleanly. The
+v2.0 N1 exit summary explains what's still alive and what command to
+run for each scope. Re-run `bash argo_anywhere.sh --cli-tool <name>
+client` to bring the tunnel back; cached username and node will be
+reused (and the SSH multiplex master + remote argo-proxy survive
+Ctrl+C, so the re-run is fast: no Duo prompt, no remote bootstrap).
 
 ---
 
@@ -600,34 +629,38 @@ inherently awkward.
 
 ---
 
-## Multi-client tests (Phase 3+)
+## Multi-tool tests (v2.0+)
 
-These verify that the per-client invocation/dispatch + Claude Code support
-work end to end. Run after any change to the dispatcher
-(`do_post_tunnel_for_client`, `default_client_for_invocation`,
-`interactive_setup_picker`) or to per-client setup functions.
+These verify that the per-tool selection + Claude Code support work end
+to end. Run after any change to the dispatcher (`do_post_tunnel_for_cli_tool`,
+`interactive_cli_tool_picker`, `cli_tool_is_known`) or to per-tool
+setup functions (`setup_<name>_cli_tool`).
 
-### Setup: ensure all symlinks are present
+> **v2.0 change**: per-tool selection is exclusively explicit since v2.0
+> (audit decision D-007 in `PLAN.md`). The pre-v2.0 pattern of
+> per-client symlinks (`argo_claudecode.sh` -> `argo_opencode.sh`,
+> etc.) was removed because it broke under
+> `git clone core.symlinks=false` (audit Bug 1) and was the root
+> cause of several silent-misroute issues. There is now ONE
+> canonical filename (`argo_anywhere.sh`); per-tool selection is
+> always via the `--cli-tool <name>` flag, the interactive picker,
+> or the `setup` subcommand (which forces the picker). See
+> [`docs/UPGRADING.md`](UPGRADING.md) "Update your shell aliases"
+> for the recommended shell-alias pattern.
+
+### Multi-tool test 1: explicit `--cli-tool` selection
 
 ```sh
-ls -la argo_*.sh
-# Expect: argo_anywhere.sh (regular file), argo_anywhere.sh and
-# argo_claudecode.sh as symlinks (mode lrwxr-xr-x) pointing to argo_anywhere.sh.
+bash argo_anywhere.sh --cli-tool opencode -h >/dev/null && echo "opencode OK"
+bash argo_anywhere.sh --cli-tool claudecode -h >/dev/null && echo "claudecode OK"
+bash argo_anywhere.sh --cli-tool bogus -h 2>&1 | head -3
+# Should die with: --cli-tool: unknown tool 'bogus'. Known tools: opencode, claudecode.
 ```
 
-### Multi-client test 1: invocation-name dispatch
+**Pass:** the two valid tool names parse cleanly; an unknown tool name
+dies with the registry list.
 
-```sh
-bash argo_anywhere.sh -h | head -1     # "Usage: argo_anywhere.sh ..."
-bash argo_claudecode.sh -h | head -1   # "Usage: argo_claudecode.sh ..."
-bash argo_anywhere.sh -h | head -1     # "Usage: argo_anywhere.sh ..."
-```
-
-All three must show their own basename. Any showing
-`argo_anywhere.sh` from a non-opencode invocation means the symlink
-isn't being resolved or `$0` is being mangled.
-
-### Multi-client test 2: interactive picker (anywhere)
+### Multi-tool test 2: interactive picker (no `--cli-tool`)
 
 ```sh
 printf '\n' | bash argo_anywhere.sh 2>&1 | head -10
@@ -636,7 +669,7 @@ printf '\n' | bash argo_anywhere.sh 2>&1 | head -10
 #     1) OpenCode ...
 #     2) Claude Code ...
 #   Pick a client [1-2, ...]:
-#   [err ] No client picked; aborting.
+#   [err ] No CLI tool picked; aborting. Pass --cli-tool <name> or pick from the menu.
 ```
 
 Then with input `1`:
@@ -648,71 +681,79 @@ printf '1\n' | bash argo_anywhere.sh --user nobody --node bogus.example 2>&1 | h
 # important bit: the picker gates correctly.
 ```
 
-### Multi-client test 3: `setup` subcommand forces picker
+### Multi-tool test 3: `setup` subcommand forces picker
 
 ```sh
-printf '\n' | bash argo_anywhere.sh setup 2>&1 | head -8
-# Expect the picker to appear EVEN THOUGH the invocation is argo_anywhere.sh.
-# (Without `setup`, argo_anywhere.sh would proceed straight to the
-# OpenCode flow without showing the picker.)
+printf '\n' | bash argo_anywhere.sh --cli-tool opencode setup 2>&1 | head -8
+# Expect the picker to appear EVEN THOUGH --cli-tool opencode was passed.
+# (`setup` always shows the picker regardless of --cli-tool, useful for
+# one-off installations of a different tool from the user's usual.)
 ```
 
-### Multi-client test 4: Claude Code scope auto-detection
+### Multi-tool test 4: Claude Code scope default behavior
 
 Pre-conditions: a successful tunnel up to a compute node.
 
-Test the global-scope branch (no existing `~/.claude/settings.json`):
+> **v2.0 change**: default scope is now PROJECT (was global on fresh
+> installs pre-v2.0). The H6 fix (audit Phase 2b Batch 4) closes a
+> silent-correctness regression where `claude auth login`'s OAuth
+> token would override our config in global scope.
+
+Test the project-default branch (no `~/.claude.json`, no existing
+global env block — the typical fresh-install case):
 
 ```sh
-# Make sure no global file exists, or back it up first.
+# Make sure no global file or OAuth state exists, or back them up first.
 [ -f ~/.claude/settings.json ] && mv ~/.claude/settings.json ~/.claude/settings.json.testbak
-bash argo_claudecode.sh
+[ -f ~/.claude.json ] && mv ~/.claude.json ~/.claude.json.testbak
+
+cd /tmp && mkdir -p test-claude-scope-default && cd test-claude-scope-default
+bash <path-to-script>/argo_anywhere.sh --cli-tool claudecode client
 # In the script's log lines, look for:
-#   [argo_anywhere] Claude Code scope: global (auto; no existing env block to preserve).
-# Then verify the file:
-cat ~/.claude/settings.json
+#   [argo_anywhere] Claude Code scope: project (auto; default since v2.0).
+#   [argo_anywhere]   Config will land at .claude/settings.local.json and only apply when
+#   [argo_anywhere]   'claude' is run from this directory (/tmp/test-claude-scope-default).
+# Then verify the project file was written:
+cat ./.claude/settings.local.json
 # Should contain:
 #   "env": {
 #     "ANTHROPIC_BASE_URL": "http://localhost:64742",
 #     "ANTHROPIC_AUTH_TOKEN": "<your-anl-username>"
 #   }
+# And the global file was NOT written:
+[ ! -f ~/.claude/settings.json ] && echo "global untouched (correct)"
+
+# Restore backups:
+[ -f ~/.claude/settings.json.testbak ] && mv ~/.claude/settings.json.testbak ~/.claude/settings.json
+[ -f ~/.claude.json.testbak ] && mv ~/.claude.json.testbak ~/.claude.json
 ```
 
-Test the project-scope branch (existing `env` block in global):
+Test the project branch via signal 1 (pre-existing `~/.claude.json`,
+i.e. user has run `claude auth login` already):
 
 ```sh
-# Pre-seed a global env block (e.g. simulating personal Anthropic key).
-mkdir -p ~/.claude
-cat > ~/.claude/settings.json <<'EOF'
-{
-  "env": {
-    "ANTHROPIC_API_KEY": "sk-ant-personal-..."
-  }
-}
-EOF
-
-cd /tmp && mkdir -p test-claude-scope && cd test-claude-scope
-bash ~/path/to/argo_claudecode.sh
+touch ~/.claude.json   # synthetic OAuth state
+cd /tmp/test-claude-scope-default
+bash <path-to-script>/argo_anywhere.sh --cli-tool claudecode client
 # Look for:
-#   [argo_anywhere] Claude Code scope: project (auto; ~/.claude/settings.json
-#     already has an env block).
-# Then verify project file was written, global was untouched:
-cat ./.claude/settings.local.json    # should have ANTHROPIC_BASE_URL etc.
-cat ~/.claude/settings.json          # should still have the personal key
+#   [argo_anywhere] Claude Code scope: project (auto; ~/.claude.json detected
+#                                                — personal subscription preserved).
+rm ~/.claude.json   # cleanup
 ```
 
-### Multi-client test 5: `--scope` override
+### Multi-tool test 5: `--scope` override
 
 ```sh
-bash argo_claudecode.sh --scope global
+cd /tmp/test-claude-scope-default
+bash <path-to-script>/argo_anywhere.sh --cli-tool claudecode --scope global client
 # Look for:  [argo_anywhere] Claude Code scope: global (--scope global).
-bash argo_claudecode.sh --scope project
+bash <path-to-script>/argo_anywhere.sh --cli-tool claudecode --scope project client
 # Look for:  [argo_anywhere] Claude Code scope: project (--scope project).
-bash argo_claudecode.sh --scope bogus
+bash <path-to-script>/argo_anywhere.sh --cli-tool claudecode --scope bogus client 2>&1 | head -5
 # Should die with: --scope must be 'project' or 'global' (got 'bogus').
 ```
 
-### Multi-client test 6: Claude Code env-block merge preservation
+### Multi-tool test 6: Claude Code env-block merge preservation
 
 Pre-condition: a `~/.claude/settings.json` with extra top-level keys
 AND extra env keys we don't own.
@@ -729,8 +770,8 @@ cat > ~/.claude/settings.json <<'EOF'
 }
 EOF
 
-bash argo_claudecode.sh --scope global
-# Pick [b] backup+overwrite at the prompt (or [m] merge if offered).
+bash argo_anywhere.sh --cli-tool claudecode --scope global client
+# Pick [b] backup+overwrite at the prompt.
 # Then:
 cat ~/.claude/settings.json
 # Should still contain:
@@ -742,25 +783,46 @@ cat ~/.claude/settings.json
 #   - env.ANTHROPIC_AUTH_TOKEN (NEW, from us)
 ```
 
-### Multi-client test 7: idempotency
+### Multi-tool test 7: H7 privacy warning prints
+
+Pre-condition: a fresh-ish Claude Code config write (Test 4 or 6 setup).
+
+After the config-writer prompt finishes (you picked `[b]` or the file
+didn't exist), look for the H7 privacy-warning callout:
+
+```
+[warn] Privacy note: <path-to-claudecode-config> now contains your ANL username
+[warn]   ('<user>') in env.ANTHROPIC_AUTH_TOKEN. Don't commit it to a
+[warn]   public dotfile repo or share it widely.
+[argo_anywhere]   (Project scope -- Claude Code's defaults gitignore
+[argo_anywhere]    .claude/settings.local.json automatically; verify your repo's
+[argo_anywhere]    .gitignore covers it.)
+```
+
+The trailing `(Project scope ...)` lines are scope-specific; for
+`--scope global` the trailing lines mention `~/.claude/settings.json`
++ dotfiles-repo gitignore advice instead.
+
+### Multi-tool test 8: idempotency
 
 ```sh
-bash argo_claudecode.sh        # writes the config
-bash argo_claudecode.sh        # second run should report:
+bash argo_anywhere.sh --cli-tool claudecode client    # writes the config
+bash argo_anywhere.sh --cli-tool claudecode client    # second run should report:
 #   [ ok ] Claude Code config (...) already up to date: ...
 # i.e. cmp -s in handle_config_file finds no diff, no prompt.
 ```
 
 ---
 
-## What each multi-client step verifies
+## What each multi-tool step verifies
 
 | Test | What it verifies |
 |------|------------------|
-| 1    | `$0` invocation-name detection survives symlink resolution |
-| 2    | `argo_anywhere.sh` triggers picker; picker shows registered clients; abort-on-empty works |
-| 3    | `setup` subcommand always shows picker regardless of `$0` |
-| 4    | Auto-scope detection (global when no env block; project when there is one) |
-| 5    | `--scope` override; invalid value rejected |
+| 1    | `--cli-tool` flag accepts known names; rejects unknown with registry list |
+| 2    | Picker shows registered tools; abort-on-empty works |
+| 3    | `setup` subcommand forces picker even when `--cli-tool` is set |
+| 4    | Project-scope default (v2.0 H6 fix) on fresh installs; signal-1 path on existing OAuth |
+| 5    | `--scope` override (global / project / invalid value rejected) |
 | 6    | `write_claudecode_config` Python heredoc preserves user-owned env keys + non-env top-level keys |
-| 7    | Per-client setup is idempotent (handle_config_file's cmp branch) |
+| 7    | H7 privacy warning fires per-scope (project vs global hint variants) |
+| 8    | Per-tool setup is idempotent (handle_config_file's cmp branch) |

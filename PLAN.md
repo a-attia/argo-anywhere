@@ -551,6 +551,76 @@ section B for the full decision-log convention. Append-only: never
 delete D-NNN; if reversed, add D-MMM marked "supersedes D-NNN" and
 edit D-NNN's status to "superseded by D-MMM".)
 
+### D-015 — Scope-keyed (not action-keyed) exit summaries and error messages (2026-05-15)
+
+**Status**: accepted; codified in code by the N1 amendment commit
+(`087dfe2`) and proven in the H5 amendment kill-hint (commit
+`5ced284`).
+
+**Context.** When an exit summary or error message lists "what you
+can do next" actions, the user is in a "what state from this session
+do I want to keep alive vs tear down" mental model at that moment,
+NOT a "what are this tool's verbs called" mental model. Action-keyed
+hints (`stop`, `clean`, `restart`) force the user to reverse-engineer
+the scope mapping from the action names. This was concretely
+exercised in Phase 2b live test #1: the original N1 summary's
+`To fully stop: bash <self> stop` hint was misleading because by the
+time the summary printed, `cleanup_local` had already killed the
+local listener -- `stop` would print "Nothing to stop locally" and
+the user could reasonably interpret that as "did anything actually
+stop?"
+
+**Decision.** Exit summaries and error messages list options by SCOPE
+(what state each touches), not by action name. For each scope, show
+the EXACT command (with all parameters filled in from runtime
+context), not the action name + reverse-engineerable scope. Verify
+the command would actually do something useful at the moment it
+prints (e.g. don't suggest `stop` after already stopping the local
+listener -- the user would run it and see "nothing to stop", which
+corrodes trust in the message).
+
+**Alternatives considered.**
+
+1. **Action-keyed hints with a separate "what each action does"
+   table.** Rejected: requires the user to look up the table at the
+   moment of decision, increases cognitive load, doesn't surface the
+   live state.
+2. **Always offer all known actions in a fixed menu.** Rejected:
+   includes options that wouldn't do anything useful at this moment;
+   corrodes trust in the menu.
+3. **Interactive prompt at exit ("scope? t/s/c/^C")**. Rejected:
+   adds friction; the whole point of Ctrl+C is to be fast and
+   unambiguous; the script is a CLI tool, not a TUI.
+
+**Consequences.**
+- The N1 Ctrl+C exit summary lists each independently-resident piece
+  of state (SSH multiplex master, remote argo-proxy, local config /
+  cache) with the exact command for each scope. When a piece of
+  state is absent (e.g. no mux socket on disk under `--no-mfa`),
+  the corresponding option is OMITTED entirely so the user never
+  sees a "do this" hint they can't actually act on.
+- The H5 reuse-refusal recovery hint includes both `kill <listener_pid>`
+  AND `screen -S argovproxy -X quit` because Phase 2b live test #1
+  demonstrated that argo-proxy can survive `screen -X quit` in a
+  detached state. The hint surfaces both commands so the
+  detached-process case isn't discovered the hard way.
+- The L1 (mkdir error) fix surfaces the actual mkdir stderr verbatim
+  in the die message rather than a generic "permission denied?"
+  guess.
+- The L4+L5 (lock recovery dedup) fix collapses 5 sites that
+  re-stated "See above for recovery instructions" into one-liner
+  mode descriptors, because the recovery block was already printed
+  by `ssh_attempt_pre` / `ssh_attempt_fail` -- the additional line
+  added a context tag, not a recapitulation.
+
+**Generalisation queued for upstream.** Filed as agent-feedback entry
+on 2026-05-15 (the "scope-keyed exit summaries" entry); concrete
+proposal is a 1-paragraph addition to
+`human-facing-doc-authoring`'s "Universal conventions" or to a new
+`references/error-message-authoring.md` reference file. The pattern
+generalises beyond this script: any CLI tool with multiple
+independently-resident pieces of state benefits from this discipline.
+
 ---
 
 ## 8. Code-paper coupling
@@ -564,11 +634,15 @@ project's commit/tag pin; the script itself is downstream-of-nobody.
 
 ## 9. Lifecycle stage
 
-- **Now**: pre-v2.0 release (active development). v1.x line is tagged
-  and stable; v2.0 is in Phase 2a verification.
-- **Next 6 months**: Complete v2.0 (Phase 2b/2c/3 + tag); start
-  Phase 4 (additional CLI tools — aider, cursor, generic
-  OpenAI-compatible).
+- **Now**: v2.0 ready-to-tag. Phase 2a (CRIT) live-tested PASS;
+  Phase 2b (HIGH + 3 amendments from live test #1) live-tested PASS;
+  Phase 2c+3 (MED/LOW/INFO + new docs UPGRADING/SECURITY/LIMITATIONS
+  + TESTING.md / AGENTS.md / PLAN.md final pass) landing this
+  session. Awaiting final live-test gate then v2.0.0 tag.
+- **Next 6 months**: Tag v2.0.0; start Phase 4 (additional CLI tools
+  — aider, cursor, generic OpenAI-compatible). Possible Phase 2d
+  defensive-hardening batch (M6/M7/M8/M9/M10/L6/L10) if real-world
+  use surfaces the silent-failure paths those defend against.
 - **Long term**: Maintenance posture — single-author project; releases
   follow ANL-AI4Dev or Argo upstream changes that affect the
   protocols this script speaks. Abandonment criteria: when the upstream

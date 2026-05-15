@@ -65,7 +65,8 @@ loading set for normal sessions.
 - **Name**: argo-anywhere
 - **Nature**: research-software (CLI orchestrator); single-file bash
   script with inline Python heredocs for structured-data work
-- **Status**: pre-v2.0 release (active development; v1.x line tagged)
+- **Status**: v2.0 ready-to-tag (Phase 2c+3 complete; awaiting final
+  live-test gate then v2.0.0 tag)
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
   `server`, `status`, `stop`, `update-models`, `clean`, `list-tools`,
@@ -74,9 +75,27 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code today; aider/cursor/generic planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: v1.2.0 (last tag); v2.0 in active Phase 2a
-  verification
+- **Current release**: v1.2.0 (last tag); v2.0 in final pre-tag review
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
+
+### Human-facing doc map
+
+For human-facing project docs (audience split per universal conventions
+Section 6.4):
+
+| Doc | Audience | When to read |
+|:----|:---------|:-------------|
+| [`README.md`](README.md) | New + returning humans | Project overview; quick start |
+| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-015 |
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | v1.x users upgrading | What changes for them at v2.0 |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |
+| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Prospective users + contributors | Known limitations + rationale |
+| [`docs/TESTING.md`](docs/TESTING.md) | Maintainers + contributors | Live-verification guide (real SSH + Duo + node) |
+| [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | Maintainers | 43-finding audit + STATUS resolutions |
+| [`docs/AUDIT_2026-05_pre-rebuild.md`](docs/AUDIT_2026-05_pre-rebuild.md) | Maintainers | Archived pre-rebuild audit (provenance only) |
+| [`CONTRIBUTORS.md`](CONTRIBUTORS.md) | Contributors | Authorship + AI co-author trailer convention |
+| [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
+| [`notes/test_plan_phase*.md`](notes/) | Maintainer | Per-phase live-test plans (historical artifact once phase complete) |
 
 ## Project-specific overrides
 
