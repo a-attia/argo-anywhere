@@ -65,11 +65,12 @@ loading set for normal sessions.
 - **Name**: argo-anywhere
 - **Nature**: research-software (CLI orchestrator); single-file bash
   script with inline Python heredocs for structured-data work
-- **Status**: v2.0.0 tagged + released (2026-05-15). Phase 2c+3
-  live-test #1 passed with one mid-test amendment (L4+L5
-  incomplete dedup) and two test-plan defects (workarounds
-  applied; underlying code was correct). Next phases optional:
-  Phase 2d defensive-hardening, Phase 4 multi-tool extension.
+- **Status**: v2.0.0 tagged + released (2026-05-15). Phase 2d
+  defensive-hardening landed (3 batches; 7 audit closures M6-M10
+  + L6 + L10) — awaiting live-test gate then v2.1.0 tag.
+  Project state: 40 of 43 audit findings closed. Next phases
+  optional: Phase 4 (multi-tool: aider / cursor / generic),
+  Phase 2e cosmetic (I2 `_LOGGING` rename).
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
   `server`, `status`, `stop`, `update-models`, `clean`, `list-tools`,
@@ -89,7 +90,7 @@ Section 6.4):
 | Doc | Audience | When to read |
 |:----|:---------|:-------------|
 | [`README.md`](README.md) | New + returning humans | Project overview; quick start |
-| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-015 |
+| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-016 |
 | [`docs/UPGRADING.md`](docs/UPGRADING.md) | v1.x users upgrading | What changes for them at v2.0 |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |
 | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Prospective users + contributors | Known limitations + rationale |

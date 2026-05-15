@@ -621,6 +621,89 @@ proposal is a 1-paragraph addition to
 generalises beyond this script: any CLI tool with multiple
 independently-resident pieces of state benefits from this discipline.
 
+### D-016 — Fail louder, not silently: defensive-hardening discipline (2026-05-15)
+
+**Status**: accepted; codified by Phase 2d (commits `66d2d5c`,
+`4fa2372`, `e6a8a58`).
+
+**Context.** Across the v2.0 audit, multiple findings shared a
+common shape: a code path silently corrupts user data, returns
+empty / zero on edge cases, or executes a destructive action
+without verifying preconditions. Each was individually fixable,
+but the pattern wanted naming as a project-wide convention so
+future code (and future audits) could check against it
+consistently. Phase 2d deferred 7 such findings (M6-M10, L6, L10)
+from Phase 2c+3 specifically because they all changed observable
+behavior in the "fail louder" direction; the user's strict "no
+behavior change" answer for Phase 2c+3 forced the split.
+
+**Decision.** When a code path can encounter an edge case where
+silent default / silent destruction would be wrong, prefer:
+
+1. **Fail-loud die with explicit recovery hint** for cases where
+   the script genuinely can't proceed safely (broken JSON in a
+   user config the script is about to overwrite; missing PyYAML
+   when the writer needs it for safe merge; PROXY_PORT empty
+   when the writer is about to interpolate it into a URL).
+2. **Default-with-WARN** for cases where a default IS safe but
+   the silent-default behavior is invisible to the user (ask()
+   under non-TTY without the legitimate sentinel).
+3. **Per-PID re-classification** for destructive actions
+   (kill, overwrite) where the upstream classification might be
+   wrong (M6 ours-unhealthy-fg kill targeting).
+4. **Defense-in-depth fallback** for fragile parse paths where
+   format drift between OS versions could silently break
+   classification (M7 mux detection).
+
+**Anti-patterns to avoid:**
+
+* `... 2>/dev/null || true` swallows that hide the actual error
+  (audit L1).
+* `data = {}` silent fallbacks in JSON / YAML merge (audit M8 +
+  M9).
+* `xargs -n1 kill` or other unconditional destructive actions
+  on pre-classified PIDs (audit M6).
+* Format-fragile classification regexes without a defense-in-depth
+  fallback (audit M7).
+
+**Alternatives considered.**
+
+1. **Continue silent fallbacks; document in SECURITY.md** —
+   rejected: the silent failures were the audit's largest class
+   of findings precisely BECAUSE they're invisible without
+   reading the code.
+2. **Die hard on every edge case (no defaults at all)** —
+   rejected: would break legitimate non-TTY scenarios
+   (mode_server's tee'd re-exec) and force every user to
+   pre-supply every prompt.
+3. **Refuse-with-prompt instead of die-loud** — rejected:
+   prompts only work in interactive contexts; the scenarios
+   that need fail-loud are often non-interactive
+   (tee'd re-exec, automation).
+
+**Consequences.**
+
+* **Behavior changes in the "fail louder" direction** are an
+  accepted cost of v2.x and beyond. Users upgrading from
+  pre-v2.1 may see new die paths fire on edge cases that
+  silently corrupted before — these surface as a die with a
+  recovery hint, NOT as a regression.
+* **Per-finding test plans** in `notes/test_plan_phase*.md`
+  must verify both (a) the new die-loud / WARN-loud path fires
+  correctly on its edge case, AND (b) the successful-path UX
+  is unchanged.
+* **Audit STATUS blocks** must explicitly call out the
+  behavior-change scope so future readers don't mistake a
+  fail-loud regression report for a Phase 2d-introduced bug.
+
+**Generalisation queued for upstream.** Filed as agent-feedback
+entry on 2026-05-15 (a future entry; not yet drafted at
+PLAN.md edit time); concrete proposal is a paragraph for the
+`research-software-engineering` skill's testing-strategies or
+api-design-for-researchers reference, since the discipline
+applies broadly to any scientific-computing script that
+interacts with user-owned config files or shared state.
+
 ---
 
 ## 8. Code-paper coupling
@@ -634,19 +717,18 @@ project's commit/tag pin; the script itself is downstream-of-nobody.
 
 ## 9. Lifecycle stage
 
-- **Now**: v2.0.0 released 2026-05-15. Audit-coverage state:
-  33 of 43 findings closed (10 CRIT + 11 HIGH + 12 in-scope
-  MED/LOW/INFO). All four phases (1, 2a, 2b, 2c+3) live-tested
-  PASS with mid-test amendments where surfaced (P3 added in
-  Phase 2a; H5/P2/N1 in Phase 2b; L4+L5 in Phase 2c+3). Maintenance
-  posture: gather real-world feedback; respond to upstream Argo /
-  argo-proxy / OpenCode / Claude Code protocol changes as they
-  land.
-- **Next 6 months**: optional Phase 2d defensive-hardening batch
-  (M6/M7/M8/M9/M10/L6/L10) if real-world use surfaces the
-  silent-failure paths those defend against; Phase 2e cosmetic
-  (I2 _LOGGING rename) when convenient. Phase 4 (additional CLI
-  tools — aider, cursor, generic OpenAI-compatible) when there's
+- **Now**: v2.0.0 released 2026-05-15; Phase 2d defensive-hardening
+  landed (3 batches; commits `66d2d5c`, `4fa2372`, `e6a8a58`)
+  awaiting live-test gate then v2.1.0 tag. Audit-coverage state:
+  40 of 43 findings closed (10 CRIT + 11 HIGH + all MED except M4
+  + all LOW except L8 + all INFO except I2). All five phases (1,
+  2a, 2b, 2c+3, 2d) live-tested PASS or pending; mid-test
+  amendments where surfaced (P3 added in Phase 2a; H5/P2/N1 in
+  Phase 2b; L4+L5 in Phase 2c+3).
+- **Next 6 months**: tag v2.1.0 after Phase 2d live-test gate;
+  optional Phase 2e cosmetic (I2 `_LOGGING` env var rename) when
+  convenient. Phase 4 (additional CLI tools — aider, cursor,
+  generic OpenAI-compatible; closes remaining M4) when there's
   user demand or a personal need.
 - **Long term**: Maintenance posture — single-author project; releases
   follow ANL-AI4Dev or Argo upstream changes that affect the
