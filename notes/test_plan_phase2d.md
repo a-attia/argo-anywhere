@@ -410,6 +410,91 @@ and exit can mutate it).
 
 ---
 
+## Live-test #1 results (2026-05-15)
+
+All 8 tests passed; **zero code amendments needed**; two test-plan
+defects identified (workarounds applied).
+
+| Test | Status | Notes |
+|:-----|:-------|:------|
+| Pre-test setup | ✓ | 7 marker comments; commits in place. |
+| 1 — regression smoke | ✓ | All 5 checks pass; ALL GREEN tunnel. Incidental M7 verification: live mux master at compute-01 still classified correctly. |
+| 2 — M8 claudecode JSON refuse | ✓ via 2a + 2b | Die block printed with correct path interpolation + 3 numbered recovery options. **Test-plan defect** (see below). |
+| 3 — M9 PyYAML required | ✓ via 3a + 3b | Code review confirms all 4 case-arms; sys.exit(2) mechanism verified against fake-python stub. Live exercise too disruptive (would require breaking argo-proxy venv). |
+| 4 — L6 PROXY_PORT assert | ✓ via 4a + inline | Code review + direct exercise of the one-line assert. **Test-plan defect** (see below). |
+| 5 — M6 stricter kill | ✓ code-review only | Live exercise deliberately skipped per test plan (requires `ours-unhealthy-fg` state). |
+| 6 — M7 mux fallback | ✓ via 6a + 6b | Live verification on the actual mux master: primary regex matches AND fallback signals (cmd line + socket existence) would match if primary ever drifted. |
+| 7 — M10 TTY-aware ask | ✓ via 7a + 7b | All 3 scenarios pass: non-TTY+default (WARN+default), non-TTY+no-default (WARN+empty), sentinel (silent+default). |
+| 8 — L10 closure | ✓ | Structural verification: single `rc=` assignment in `cleanup_local`; captured at top; emitted at bottom via the captured value. |
+
+### Zero amendments landed mid-test
+
+Unlike Phase 2c+3 (where the L4+L5 amendment landed mid-test
+because the original fix was incomplete), Phase 2d's three batches
+all worked exactly as designed on first verification. No code
+amendments were needed.
+
+### Test-plan defects identified (workarounds applied)
+
+**Both defects share the same family as Phase 2c+3's defects**:
+synthetic test stimulus didn't capture what the assertion was
+asserting against.
+
+| Defect | Where | Symptom | Workaround used |
+|:-------|:------|:--------|:----------------|
+| Test 2b | `bash -c '...' 2>&1 \| tail -15` ate the inner exit code | Reported `exit code: 0` even though the M8 die actually exited with code 2; the trailing `\| tail -15` pipe replaces `$?` with `tail`'s exit code (always 0 for successful tail). | The die output itself was complete and correct; only the exit-code readout was wrong. Underlying fix verified by observing the multi-line err block (which can only be printed by the die path). |
+| Test 4b | `awk '/^write_opencode_config\(\) \{/,/^}$/'` extraction failed | The pattern `/^}$/` matched a `}` line INSIDE the function's JSON heredoc (the heredoc contains literal `}` on lines by itself, ending JSON object literals), capturing only a partial function body. Sourcing the partial body raised `syntax error: unexpected end of file`. | Bypassed the awk extraction entirely; tested the one-line L6 assert directly inline (the assert IS a one-liner; the surrounding function body isn't needed to exercise it). |
+
+For both defects, the test ASSERTION held (M8 fix + L6 fix work
+correctly); only the test STIMULUS was wrong (the chosen
+harness mechanism didn't read the right value / extract the right
+code). The corresponding audit-doc STATUS blocks are accurate;
+the closures stand.
+
+**Lessons for future test plans** (queued for upstream roll-up via
+`notes/agent_feedback.md`):
+
+1. **Exit-code capture through pipes**: when a test pipeline ends
+   in `| tail` / `| head` / similar, the trailing command's exit
+   code is what `$?` reads. To capture the inner command's exit
+   code, use `${PIPESTATUS[0]}` (bash) or drop the pipe entirely.
+   For verification tests where exit code is the assertion, prefer
+   redirecting output to a file or `/dev/null` and reading `$?`
+   directly:
+   ```sh
+   command_under_test arg1 arg2 >/dev/null 2>&1
+   echo "exit code: $?"   # this reads command_under_test's exit code
+   ```
+2. **awk function-body extraction is fragile when bodies contain
+   heredocs with `}` lines**: the `awk '/^funcname\(\) \{/,/^}$/'`
+   pattern relies on the closing `}` being unique-on-a-line, but
+   bash functions whose bodies embed JSON / YAML heredocs break that
+   assumption (the heredoc's closing `}` matches first). For one-line
+   guards, prefer exercising the predicate directly inline:
+   ```sh
+   bash -c '
+   err()  { ...; }
+   die()  { ...; }
+   unset CHECKED_VAR
+   [ -n "${CHECKED_VAR:-}" ] || die "..."
+   '
+   ```
+   For multi-line writers with heredocs, use a brace-counting
+   extraction approach OR have the function under test be designed
+   for testability (e.g., a separate `_check_invariants_<name>`
+   helper that contains only the asserts, callable independently
+   of the writer body).
+
+This is the **second time** a test-plan-design defect of this
+family has surfaced (Phase 2c+3 live-test #1 had two; Phase 2d
+has two more). The pattern is consistent enough that it warrants
+a discipline rule in `human-facing-doc-authoring` or
+`research-software-engineering` covering "test stimulus design
+for shell-script unit tests" -- see the agent-feedback entry
+queued in this commit.
+
+---
+
 ## Reporting back
 
 For each test, paste either "pass" or the relevant verbatim output.
