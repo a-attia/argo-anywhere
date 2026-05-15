@@ -319,11 +319,28 @@ being in a CSPO situation.)
 
 ---
 
-## Test 7: H5 — proxy reuse identity check (Batch 4, `30915ac`)
+## Test 7: H5 — proxy reuse identity check (Batch 4, `30915ac`; amended in a later commit, see below)
 
 The on-node `mode_server` reuse path now refuses to attach to a
 running argo-proxy unless `cfg_user == want_user` (positive match).
 Three explicit refusal branches replace the old single guard.
+
+> **Live-test #1 finding (2026-05-14)**: the initial Batch 4 fix
+> used `awk -F'"' '{print $2}'` to extract `cfg_user`, which only
+> matches the QUOTED YAML scalar form. PyYAML's `safe_dump` (the
+> writer this script uses in the common path) emits PLAIN ASCII
+> scalars unquoted, so the parser silently returned empty and the
+> "config.yaml is missing or unreadable" branch wrongly fired
+> against a perfectly valid config the script itself had verified
+> one log line earlier. Amended via a new `yaml_scalar` helper
+> (handles plain / double-quoted / single-quoted forms; tested via
+> 11-case synthetic harness; same helper now also fixes a
+> previously-latent bug in `_client_common_setup`'s
+> identity-resolution path that silently degraded to `id -un`). The
+> recovery hint was also improved to suggest `kill <pid> && screen
+> -X quit` because the live test also demonstrated that argo-proxy
+> can survive `screen -X quit` in a detached state. Tests 7a/7b
+> below should be re-run against the amended fix.
 
 ### Test 7a: code review (Recommended)
 

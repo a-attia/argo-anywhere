@@ -1364,6 +1364,57 @@ resolve_username() {
   echo "$u"
 }
 
+# Read a top-level YAML scalar value from a file. Handles the three
+# scalar forms PyYAML and humans actually emit:
+#   key: value           (plain ASCII; PyYAML's safe_dump default)
+#   key: "value"         (double-quoted; our fallback writer + example file)
+#   key: 'value'         (single-quoted; some hand-edited configs)
+# Strips surrounding whitespace and comments. Returns empty string if
+# the file doesn't exist, the key is absent, or the value parses to
+# empty.
+#
+# IMPORTANT: this function exists because the awk -F'"' parser used
+# previously (commits 30915ac (H5 fix) and the existing identity-resolution
+# path) only matched the quoted form. PyYAML's safe_dump emits plain
+# ASCII strings unquoted by default, so the previous parser silently
+# returned empty on the common case -- which made H5 fire a false
+# "config.yaml is missing or unreadable" refusal during the first live
+# test of Phase 2b.
+#
+# Usage: yaml_scalar <path> <key>
+yaml_scalar() {
+  local path="$1" key="$2"
+  [ -f "$path" ] || { echo ""; return; }
+  awk -v k="$key" '
+    BEGIN { pat = "^[[:space:]]*" k ":[[:space:]]*" }
+    {
+      if (match($0, pat)) {
+        v = substr($0, RSTART + RLENGTH)
+        # Strip trailing comments (anything after an unquoted `#`).
+        # Cheap heuristic: if the value starts with a quote, find the
+        # closing quote and ignore everything after; else cut at the
+        # first `#`.
+        if (substr(v, 1, 1) == "\"") {
+          # Double-quoted scalar.
+          end = index(substr(v, 2), "\"")
+          if (end > 0) v = substr(v, 2, end - 1)
+        } else if (substr(v, 1, 1) == "'\''") {
+          # Single-quoted scalar.
+          end = index(substr(v, 2), "'\''")
+          if (end > 0) v = substr(v, 2, end - 1)
+        } else {
+          # Plain scalar: strip inline `# comment` and trailing whitespace.
+          h = index(v, "#")
+          if (h > 0) v = substr(v, 1, h - 1)
+          sub(/[[:space:]]+$/, "", v)
+        }
+        print v
+        exit
+      }
+    }
+  ' "$path" 2>/dev/null
+}
+
 # ============================================================================
 # SECTION: 11. CONFIG FILE HANDLING (handle_config_file, k/b/d/m/a prompt)
 # ============================================================================
@@ -3882,10 +3933,20 @@ mode_server() {
     local cfg="${HOME}/.config/argoproxy/config.yaml"
     if [ -f "$cfg" ]; then
       if [ -z "${ARGO_ANYWHERE_USER:-}" ]; then
-        ARGO_ANYWHERE_USER="$(awk -F'"' '/^[[:space:]]*user:/{print $2; exit}' "$cfg" 2>/dev/null)"
+        # H5 fix amendment (2026-05-14): use yaml_scalar (handles both
+        # quoted and unquoted YAML scalars). The previous awk -F'"'
+        # parser silently failed on PyYAML's unquoted output, causing
+        # the resolver to fall through to id -un (which on the laptop
+        # is the OS username, NOT the Argonne username).
+        ARGO_ANYWHERE_USER="$(yaml_scalar "$cfg" "user")"
       fi
       if [ -z "${ARGO_ANYWHERE_PORT:-}" ]; then
-        ARGO_ANYWHERE_PORT="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+/{print $2; exit}' "$cfg" 2>/dev/null)"
+        # port: is always numeric; awk on whitespace works for both
+        # PyYAML's `port: 64742` and the legacy `port: "64742"` forms
+        # (the latter would set $2 = "64742" with quotes -- but we'd
+        # try to use that as a port number and fail loudly elsewhere).
+        # Switch to yaml_scalar for consistency + correctness.
+        ARGO_ANYWHERE_PORT="$(yaml_scalar "$cfg" "port")"
       fi
     fi
   fi
@@ -4116,22 +4177,35 @@ mode_server() {
       # be attaching to anyone's argo-proxy.
       local want_user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
       local cfg_user
-      cfg_user="$(awk -F'"' '/^[[:space:]]*user:/{print $2; exit}' \
-                   "${HOME}/.config/argoproxy/config.yaml" 2>/dev/null)"
+      # H5 fix amendment (2026-05-14): use yaml_scalar (handles both
+      # quoted and unquoted YAML scalars). The original awk -F'"'
+      # parser only matched user: "name", not user: name -- and PyYAML's
+      # safe_dump (the writer used in the common case) emits the
+      # unquoted form, causing this branch to wrongly fire on the very
+      # first Phase 2b live test.
+      cfg_user="$(yaml_scalar "${HOME}/.config/argoproxy/config.yaml" "user")"
+      # Recovery hint shared by all three refusal branches. screen -X
+      # quit alone is INSUFFICIENT when argo-proxy detached itself from
+      # the screen wrapper (observed during the first Phase 2b live
+      # test on 2026-05-14): the screen wrapper exits, the argo-proxy
+      # process survives at the listener pid. Operator must kill the
+      # listener pid directly. We surface BOTH commands so the operator
+      # doesn't have to discover the detached-process case the hard way.
+      local _h5_kill_hint="kill ${listener_pid} && screen -S ${SCREEN_SESSION} -X quit  (the kill targets the listener directly; the screen -X quit cleans up any wrapper session)"
       if [ -z "$want_user" ]; then
         err "Existing argo-proxy on :${PROXY_PORT} (pid ${listener_pid}) is healthy, but ARGO_ANYWHERE_USER (and the legacy ANL_USERNAME) are unset."
         err "  Refusing to reuse it; cannot verify whose calls would be attributed."
-        die "  Set ARGO_ANYWHERE_USER and re-run, or stop it first:  screen -S ${SCREEN_SESSION} -X quit"
+        die "  Set ARGO_ANYWHERE_USER and re-run, or stop it first:  ${_h5_kill_hint}"
       fi
       if [ -z "$cfg_user" ]; then
         err "Existing argo-proxy on :${PROXY_PORT} (pid ${listener_pid}) is healthy, but its config.yaml is missing or unreadable at \${HOME}/.config/argoproxy/config.yaml."
         err "  Refusing to reuse it; cannot verify identity."
-        die "  Stop it first:  screen -S ${SCREEN_SESSION} -X quit   (or pick another --port)"
+        die "  Stop it first:  ${_h5_kill_hint}   (or pick another --port)"
       fi
       if [ "$cfg_user" != "$want_user" ]; then
         err "Existing argo-proxy on :${PROXY_PORT} (pid ${listener_pid}) is configured for user '${cfg_user}', not '${want_user}'."
         err "  Refusing to reuse it; calls would be misattributed."
-        die "  Stop it first:  screen -S ${SCREEN_SESSION} -X quit   (or pick another --port)"
+        die "  Stop it first:  ${_h5_kill_hint}   (or pick another --port)"
       fi
       ok "Existing argo-proxy already serving on 127.0.0.1:${PROXY_PORT} (pid ${listener_pid}); identity verified (user='${cfg_user}'); reusing."
       return
