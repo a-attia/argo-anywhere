@@ -3042,6 +3042,37 @@ local_tunnel_status() {
     *ssh:*argo-opencode-*\[mux\]*)  kind="mux" ;;  # legacy v1.x
   esac
 
+  # M7 fix (audit Phase 2d): defense-in-depth fallback for the mux
+  # detection regex. The exact `ps -o command=` output for an ssh
+  # multiplex master varies between OS versions: macOS Big Sur+ shows
+  # `ssh: <socket-path> [mux]`, older macOS / Linux variants may omit
+  # the `[mux]` tag or use a different prefix. The regex matches above
+  # cover the formats observed today; this fallback catches future
+  # drift by checking two independent signals:
+  #   (a) the command line mentions an argo-{anywhere,opencode} socket
+  #       prefix, AND
+  #   (b) a corresponding socket file exists in SSH_MUX_DIR.
+  # Both signals are required; either alone is not specific enough.
+  # (a) alone: a stale ps output with our prefix in some other context
+  #     could match.
+  # (b) alone: a stranger process happens to bind our port and we'd
+  #     misclassify based on socket presence.
+  # The conjunction is robust against ps format drift while requiring
+  # positive evidence the listener IS our mux master.
+  if [ "$kind" = "none" ]; then
+    case "$cmd" in
+      *argo-anywhere-*|*argo-opencode-*)
+        # Look for ANY argo-* socket file in SSH_MUX_DIR; we don't try
+        # to match the specific socket because the path-in-ps and
+        # path-on-disk can differ in how they render quoting / abbrev.
+        if [ -d "$SSH_MUX_DIR" ] && \
+           ls "$SSH_MUX_DIR"/argo-anywhere-* "$SSH_MUX_DIR"/argo-opencode-* 2>/dev/null | head -n1 >/dev/null; then
+          kind="mux"
+        fi
+        ;;
+    esac
+  fi
+
   if [ "$kind" = "fg-tunnel" ] && [ "$healthy" -eq 1 ]; then
     echo "ours-healthy-fg"
   elif [ "$kind" = "fg-tunnel" ] && [ "$healthy" -eq 0 ]; then
@@ -3331,7 +3362,41 @@ ensure_or_reuse_tunnel() {
     ours-unhealthy-fg)
       warn "Found a local ssh tunnel on port ${PROXY_PORT} but /health is silent;"
       warn "  killing it and starting a fresh one."
-      lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null | xargs -n1 kill 2>/dev/null || true
+      # M6 fix (audit Phase 2d): kill only the specific PID detected,
+      # AND double-check the process command line matches our ssh -L
+      # pattern before killing. Pre-fix the unconditional
+      # `lsof -t | xargs -n1 kill` would kill ANY process bound to
+      # PROXY_PORT, even if the local_tunnel_status classification was
+      # wrong (e.g. some other script's `ssh -L` to the same port that
+      # didn't match our regex but happened to coincide). Defense-in-
+      # depth: classification already said "fg-tunnel"; this re-checks
+      # before destroying. Only kills processes whose ps -o command=
+      # output contains `ssh` AND `-L <port>:` -- the same predicate
+      # local_tunnel_status used to classify in the first place.
+      local _kill_pid _kill_cmd _killed=0
+      while IFS= read -r _kill_pid; do
+        [ -n "$_kill_pid" ] || continue
+        _kill_cmd="$(ps -o command= -p "$_kill_pid" 2>/dev/null)"
+        case "$_kill_cmd" in
+          *ssh*\ -L\ "${PROXY_PORT}:"*|*ssh*-L\ "${PROXY_PORT}:"*|*ssh*-L${PROXY_PORT}:*)
+            kill "$_kill_pid" 2>/dev/null && _killed=$((_killed + 1)) || true
+            ;;
+          *)
+            warn "  refused to kill pid ${_kill_pid}: command line"
+            warn "    \"${_kill_cmd}\""
+            warn "  doesn't match the ssh -L ${PROXY_PORT}: pattern. This is"
+            warn "  unlikely (classification said fg-tunnel) but possible if"
+            warn "  another process raced into the port. Inspect manually:"
+            warn "    lsof -nPi :${PROXY_PORT} -sTCP:LISTEN"
+            ;;
+        esac
+      done < <(lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null)
+      if [ "$_killed" -eq 0 ]; then
+        warn "  no PIDs killed; the listener may be a foreign process not"
+        warn "  matching our ssh -L pattern. Refusing to start a fresh"
+        warn "  tunnel on a port held by an unknown process."
+        die "Refusing to overlay our tunnel on a foreign listener."
+      fi
       sleep 1
       ;;
     ours-unhealthy-mux)
