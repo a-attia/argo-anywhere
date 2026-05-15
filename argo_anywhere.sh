@@ -524,11 +524,23 @@ this_host_fqdn() {
 }
 
 # on_anl_compute_node: prints 'yes' if the local host appears to be one of
-# our compute nodes, 'no' otherwise. Two independent signals -- either is
-# sufficient:
-#   1. our FQDN matches a name in ANL_NODES (the user's configured list)
-#   2. our FQDN ends in '.cels.anl.gov' (broader catch for nodes the user
-#      didn't explicitly add to ANL_NODES)
+# our compute nodes, 'no' otherwise.
+#
+# M1 fix (audit Phase 2c): the function used to attempt two signals --
+#   (1) string comparison of `hostname -f` against ANL_NODES entries
+#   (2) suffix match against '.cels.anl.gov'
+# Signal (1) NEVER fires in practice because ANL_NODES contains aliases
+# (`compute-01.cels.anl.gov`) while `hostname -f` returns physical
+# names (`compute-386-01.cels.anl.gov`), so they never string-match.
+# The dead loop has been removed; signal (2) is now documented as the
+# load-bearing path. If CELS ever moves nodes to a different domain
+# (e.g. .alcf.anl.gov), this function silently returns "no" until the
+# suffix match below is updated -- a known-and-accepted limitation.
+# (The properly-correct fix would be IP-resolution comparison, but that
+# trades off speed for very-rarely-hit correctness; out of scope for the
+# 'no behavior change' Phase 2c+3 batch. host_is_target's signal (3) is
+# the IP-resolution path; it's available to callers that need it.)
+#
 # Cached in a global the first time it's computed because hostname lookups
 # can be slow on stalled-DNS systems.
 _ON_ANL_NODE_CACHE=""
@@ -539,17 +551,9 @@ on_anl_compute_node() {
   local me; me="$(this_host_fqdn)"
   local ans="no"
   if [ -n "$me" ]; then
-    local n
-    for n in "${ANL_NODES[@]:-}"; do
-      if [ "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" = "$me" ]; then
-        ans="yes"; break
-      fi
-    done
-    if [ "$ans" = "no" ]; then
-      case "$me" in
-        *.cels.anl.gov) ans="yes" ;;
-      esac
-    fi
+    case "$me" in
+      *.cels.anl.gov) ans="yes" ;;
+    esac
   fi
   _ON_ANL_NODE_CACHE="$ans"
   printf '%s' "$ans"
@@ -693,7 +697,15 @@ host_is_target() {
 notify_user() {
   # Loud cross-platform notification. Args: title body
   local title="$1" body="$2"
-  printf '\a' >&2  # bell
+  # L3 fix (audit Phase 2c): only emit the BEL character when stderr is
+  # actually a TTY. Pre-fix, the bell would be embedded in log files
+  # captured via redirection -- a cosmetic noise but visible if the log
+  # is later cat'd or grep'd. The desktop notification (osascript /
+  # notify-send) below is unaffected; this only gates the in-terminal
+  # audible alert.
+  if [ -t 2 ]; then
+    printf '\a' >&2  # bell
+  fi
   err "${title}: ${body}"
   case "$(detect_os)" in
     macos)
