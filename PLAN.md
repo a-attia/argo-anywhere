@@ -7,8 +7,10 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: v2.0.0 tagged + released 2026-05-15. v1.x line tagged
-at v1.0.0 / v1.1.0 / v1.2.0; legacy URLs redirect forever.
+**Status**: v2.1.0 tagged + released 2026-05-15 (Phase 2d
+defensive-hardening). v2.0.0 tagged + released earlier same day.
+v1.x line tagged at v1.0.0 / v1.1.0 / v1.2.0; legacy URLs
+redirect forever.
 **Repo**: <https://github.com/a-attia/argo-anywhere>.
 **License**: MIT (matches the repo's existing convention).
 
@@ -717,18 +719,22 @@ project's commit/tag pin; the script itself is downstream-of-nobody.
 
 ## 9. Lifecycle stage
 
-- **Now**: v2.0.0 released 2026-05-15; Phase 2d defensive-hardening
-  landed (3 batches; commits `66d2d5c`, `4fa2372`, `e6a8a58`)
-  awaiting live-test gate then v2.1.0 tag. Audit-coverage state:
-  40 of 43 findings closed (10 CRIT + 11 HIGH + all MED except M4
-  + all LOW except L8 + all INFO except I2). All five phases (1,
-  2a, 2b, 2c+3, 2d) live-tested PASS or pending; mid-test
-  amendments where surfaced (P3 added in Phase 2a; H5/P2/N1 in
-  Phase 2b; L4+L5 in Phase 2c+3).
-- **Next 6 months**: tag v2.1.0 after Phase 2d live-test gate;
-  optional Phase 2e cosmetic (I2 `_LOGGING` env var rename) when
-  convenient. Phase 4 (additional CLI tools — aider, cursor,
-  generic OpenAI-compatible; closes remaining M4) when there's
+- **Now**: v2.1.0 released 2026-05-15 (Phase 2d
+  defensive-hardening landed + live-tested PASS on first try
+  with zero mid-test code amendments). v2.0.0 released earlier
+  the same day. Audit-coverage state: 40 of 43 findings closed
+  (10 CRIT + 11 HIGH + all MED except M4 + all LOW except L8 +
+  all INFO except I2). All five phases (1, 2a, 2b, 2c+3, 2d)
+  live-tested PASS; mid-test amendments where surfaced (P3
+  added in Phase 2a; H5/P2/N1 in Phase 2b; L4+L5 in Phase 2c+3).
+  Phase 2d's clean live-test (zero amendments) suggests the
+  fail-louder-not-silently discipline (D-016) is well-internalized
+  by this point in the project's evolution. Maintenance posture
+  active.
+- **Next 6 months**: optional Phase 2e cosmetic (I2 `_LOGGING`
+  env var rename) when convenient. Phase 4 (additional CLI
+  tools — aider, cursor, generic OpenAI-compatible; closes
+  remaining M4) when there's
   user demand or a personal need.
 - **Long term**: Maintenance posture — single-author project; releases
   follow ANL-AI4Dev or Argo upstream changes that affect the
