@@ -65,13 +65,15 @@ loading set for normal sessions.
 - **Name**: argo-anywhere
 - **Nature**: research-software (CLI orchestrator); single-file bash
   script with inline Python heredocs for structured-data work
-- **Status**: v2.1.0 tagged + released (2026-05-15). Phase 2d
-  defensive-hardening landed (3 batches; 7 audit closures
-  M6-M10 + L6 + L10) + live-tested PASS on first try with zero
-  mid-test code amendments. Project state: 40 of 43 audit
-  findings closed. Next phases optional: Phase 4 (multi-tool:
-  aider / cursor / generic), Phase 2e cosmetic (I2 `_LOGGING`
-  rename).
+- **Status**: v2.1.0 tagged + released (2026-05-15) + Phase 2e
+  cosmetic I2 closure landed (2026-05-15; `_LOGGING` ->
+  `_ARGO_ANYWHERE_REEXEC` rename for clarity). Phase 2d
+  defensive-hardening landed earlier same day (3 batches; 7
+  audit closures M6-M10 + L6 + L10) + live-tested PASS on first
+  try with zero mid-test code amendments. Project state: 41 of
+  43 audit findings closed. Only Phase 4 (multi-tool: aider /
+  cursor / generic; closes M4) remains as deferred-by-trigger
+  work; L8 (curl|bash claude.ai) is documented no-fix.
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
   `server`, `status`, `stop`, `update-models`, `clean`, `list-tools`,
@@ -299,7 +301,6 @@ Canonical names:
 - `ARGO_ANYWHERE_VERBOSE_SERVER`
 - `ARGO_ANYWHERE_KEEP_ORPHANS`
 - `ARGO_ANYWHERE_DROP_ORPHANS`
-- `ARGO_ANYWHERE_LOGGING`
 - `ARGO_BOX_STYLE`
 
 Two generations of legacy names still work with a one-time deprecation

@@ -235,7 +235,8 @@ _legacy_ARGO_OPENCODE_AUTO_PORT="${ARGO_OPENCODE_AUTO_PORT:-}"
 _legacy_ARGO_OPENCODE_PORT_RANGE="${ARGO_OPENCODE_PORT_RANGE:-}"
 _legacy_ARGO_OPENCODE_KEEP_ORPHANS="${ARGO_OPENCODE_KEEP_ORPHANS:-}"
 _legacy_ARGO_OPENCODE_DROP_ORPHANS="${ARGO_OPENCODE_DROP_ORPHANS:-}"
-_legacy_ARGO_OPENCODE_LOGGING="${ARGO_OPENCODE_LOGGING:-}"
+# NOTE: _LOGGING (renamed to _ARGO_ANYWHERE_REEXEC in Phase 2e) was
+# an INTERNAL sentinel never set by users; no legacy snapshot needed.
 
 # ============================================================================
 # SECTION: 2. USER-EDITABLE CONFIG
@@ -343,7 +344,7 @@ die()  { err "$*"; exit 1; }
 # which was correct for the legitimate non-TTY scenario (mode_server
 # under tee'd re-exec) but invisible in other non-TTY scenarios
 # (curl|bash, CI, automation). The WARN is suppressed when
-# ARGO_ANYWHERE_LOGGING=1 (the tee'd re-exec sentinel set by mode_server's
+# _ARGO_ANYWHERE_REEXEC=1 (the tee'd re-exec sentinel set by mode_server's
 # bootstrap) -- in that case the silent-default behavior IS correct and
 # expected. In all other non-TTY cases, the WARN surfaces what got
 # auto-answered so the user can see whether the default is what they
@@ -356,7 +357,7 @@ die()  { err "$*"; exit 1; }
 # they were already doing so via the [-z reply] checks in their loops.
 ask()  {
   local p="$1" def="${2:-}" reply
-  if [ -t 0 ] || [ "${ARGO_ANYWHERE_LOGGING:-0}" = 1 ]; then
+  if [ -t 0 ] || [ "${_ARGO_ANYWHERE_REEXEC:-0}" = 1 ]; then
     # Interactive TTY OR the legitimate tee'd-re-exec scenario:
     # behave exactly as before (no warn; silent default if read fails).
     printf '%s%s%s ' "$C_YLW" "$p" "$C_OFF" >&2
@@ -920,8 +921,11 @@ _warn_legacy_env() {
   { _warn_legacy_env ARGO_OPENCODE_KEEP_ORPHANS ARGO_ANYWHERE_KEEP_ORPHANS; ARGO_ANYWHERE_KEEP_ORPHANS="$_legacy_ARGO_OPENCODE_KEEP_ORPHANS"; }
 [ -z "${ARGO_ANYWHERE_DROP_ORPHANS:-}"     ] && [ -n "$_legacy_ARGO_OPENCODE_DROP_ORPHANS" ] && \
   { _warn_legacy_env ARGO_OPENCODE_DROP_ORPHANS ARGO_ANYWHERE_DROP_ORPHANS; ARGO_ANYWHERE_DROP_ORPHANS="$_legacy_ARGO_OPENCODE_DROP_ORPHANS"; }
-[ -z "${ARGO_ANYWHERE_LOGGING:-}"          ] && [ -n "$_legacy_ARGO_OPENCODE_LOGGING" ] && \
-  { _warn_legacy_env ARGO_OPENCODE_LOGGING ARGO_ANYWHERE_LOGGING; ARGO_ANYWHERE_LOGGING="$_legacy_ARGO_OPENCODE_LOGGING"; }
+# NOTE: ARGO_OPENCODE_LOGGING legacy promotion was removed in
+# Phase 2e (I2 fix; 2026-05-15). The variable was an INTERNAL sentinel
+# (renamed to _ARGO_ANYWHERE_REEXEC) never set by users; the legacy
+# alias was a leftover from the wholesale Phase 1 D4 namespace rename
+# and never actually mattered.
 
 # ============================================================================
 # SECTION: 7. PORT RESOLUTION (config.json baseURL is the source of truth)
@@ -4211,15 +4215,18 @@ mode_server() {
   # starting anything.
   #
   # Capture whether env had values BEFORE we start filling defaults, so
-  # we can decide later whether to prompt. Also gate on the logging
-  # re-exec flag (ARGO_ANYWHERE_LOGGING): once we're past the tee
-  # re-exec, the work is being done in a subprocess. Even though we
-  # export the resolved values below to suppress the second-pass
-  # prompt, this is a belt-and-braces guard against forgetting that
-  # contract in some future refactor.
+  # we can decide later whether to prompt. Also gate on the tee'd-re-exec
+  # sentinel (_ARGO_ANYWHERE_REEXEC; renamed from ARGO_ANYWHERE_LOGGING
+  # in Phase 2e per audit I2): once we're past the tee re-exec, the
+  # work is being done in a subprocess. Even though we export the
+  # resolved values below to suppress the second-pass prompt, this is a
+  # belt-and-braces guard against forgetting that contract in some
+  # future refactor. The variable name now reflects its actual purpose
+  # ("we're inside the tee re-exec subprocess") rather than the
+  # vague-sounding "_LOGGING" it carried over from Phase 1 D4 rename.
   local user_was_in_env="${ARGO_ANYWHERE_USER:+1}"
   local port_was_in_env="${ARGO_ANYWHERE_PORT:+1}"
-  local already_logged="${ARGO_ANYWHERE_LOGGING:+1}"
+  local already_logged="${_ARGO_ANYWHERE_REEXEC:+1}"
 
   # Canonical names; fall back to legacy aliases for one cycle so direct
   # 'bash argo_anywhere.sh server' invocations don't break for anyone who
@@ -4321,9 +4328,9 @@ mode_server() {
   # in-process from _client_common_setup -- a top-level export would
   # leak the resolved identity into anything else that ran in this
   # shell after mode_server returns.
-  if [ -z "${ARGO_ANYWHERE_LOGGING:-}" ]; then
+  if [ -z "${_ARGO_ANYWHERE_REEXEC:-}" ]; then
     mkdir -p "$(dirname "${HOME}/${REMOTE_LOG}")"
-    ARGO_ANYWHERE_LOGGING=1 \
+    _ARGO_ANYWHERE_REEXEC=1 \
       ARGO_ANYWHERE_USER="$ARGO_ANYWHERE_USER" \
       ARGO_ANYWHERE_PORT="$ARGO_ANYWHERE_PORT" \
       bash "$0" server 2>&1 | tee -a "${HOME}/${REMOTE_LOG}"

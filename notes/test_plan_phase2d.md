@@ -362,7 +362,7 @@ bash argo_anywhere.sh status 2>&1 | head -3
 ## Test 7: M10 — TTY-aware ask() default-with-WARN
 
 `ask()` now warns when stdin isn't a TTY and a default is auto-
-returned (unless `ARGO_ANYWHERE_LOGGING=1` is set, the legitimate
+returned (unless `_ARGO_ANYWHERE_REEXEC=1` is set, the legitimate
 tee'd-re-exec sentinel).
 
 ### Test 7a: code review (Recommended)
@@ -371,7 +371,7 @@ tee'd-re-exec sentinel).
 grep -n -A 35 'M10 fix' argo_anywhere.sh
 ```
 
-**Pass**: see the `if [ -t 0 ] || [ "${ARGO_ANYWHERE_LOGGING:-0}" = 1 ]`
+**Pass**: see the `if [ -t 0 ] || [ "${_ARGO_ANYWHERE_REEXEC:-0}" = 1 ]`
 gate. The TTY-or-LOGGING branch is the pre-fix behavior. The
 non-TTY branch prints a 2-line WARN naming the prompt + the
 default, then returns the default (or empty if no default).
@@ -396,8 +396,8 @@ echo "=== B: non-TTY no default ==="
 result=$(ask "Enter your username:" </dev/null)
 echo "result=\"$result\""
 echo
-echo "=== C: ARGO_ANYWHERE_LOGGING=1 sentinel ==="
-ARGO_ANYWHERE_LOGGING=1 result=$(ask "Should be silent:" "default-x" </dev/null)
+echo "=== C: _ARGO_ANYWHERE_REEXEC=1 sentinel ==="
+_ARGO_ANYWHERE_REEXEC=1 result=$(ask "Should be silent:" "default-x" </dev/null)
 echo "result=$result"
 '
 

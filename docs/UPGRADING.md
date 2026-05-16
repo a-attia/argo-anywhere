@@ -118,7 +118,6 @@ shell rc, update them:
 | `ARGO_OPENCODE_PORT_RANGE` | `ARGO_ANYWHERE_PORT_RANGE` |
 | `ARGO_OPENCODE_KEEP_ORPHANS` | `ARGO_ANYWHERE_KEEP_ORPHANS` |
 | `ARGO_OPENCODE_DROP_ORPHANS` | `ARGO_ANYWHERE_DROP_ORPHANS` |
-| `ARGO_OPENCODE_LOGGING` | `ARGO_ANYWHERE_LOGGING` |
 
 The legacy names print one deprecation warning per variable on first
 use, then promote to the new name silently for the rest of the
@@ -368,8 +367,9 @@ Pre-v2.1, when stdin wasn't a TTY (e.g. you piped the script's
 input from a file or ran it under CI / automation), `ask()`
 silently returned the default value. v2.1 prints a one-line WARN
 naming the prompt + the auto-answered default, so you can see
-what got auto-answered. Suppressed when `ARGO_ANYWHERE_LOGGING=1`
-is set (the legitimate `mode_server` tee'd-re-exec scenario).
+what got auto-answered. Suppressed when `_ARGO_ANYWHERE_REEXEC=1`
+is set (the legitimate `mode_server` tee'd-re-exec scenario; this
+is an internal sentinel, not a user-facing variable).
 
 If you've been piping input into the script, you'll see new WARN
 lines like:
