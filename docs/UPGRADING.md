@@ -1,11 +1,18 @@
-# Upgrading from v1.x to v2.0
+# Upgrading from v1.x to v2.x
 
 This document is for users who already have a working `argo_opencode.sh`
-v1.x install and are upgrading to `argo_anywhere.sh` v2.0. It
-describes what changes you will see, what the script does
-automatically on first v2.0 run, and what you may need to do
-manually. New users (no prior install) should follow
-[`README.md`](../README.md) directly.
+v1.x install and are upgrading to `argo_anywhere.sh` v2.x (v2.0.0 or
+v2.1.0; both tagged 2026-05-15). It describes what changes you will
+see, what the script does automatically on first v2.x run, and what
+you may need to do manually. New users (no prior install) should
+follow [`README.md`](../README.md) directly.
+
+The v2.0.0 → v2.1.0 jump is small (7 defensive-hardening fixes; no
+state migration). The bulk of this document covers the v1.x → v2.0
+migration; the
+[Behavior changes in v2.1.0](#behavior-changes-in-v210-phase-2d-defensive-hardening)
+section near the bottom adds the v2.0 → v2.1 deltas. If you're going
+directly v1.x → v2.1.0, read both.
 
 ## TL;DR
 
@@ -38,6 +45,15 @@ The most important changes:
 - **Many CSPO defenses + identity-handling fixes** (see
   [`docs/AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md) for the full audit
   trail). No action needed; defaults are stricter and safer.
+- **v2.1.0 fail-louder defensive-hardening (Phase 2d)**: 7 additional
+  fixes (M6, M7, M8, M9, M10, L6, L10) that change behavior in the
+  "die-loud with recovery hint instead of silent corruption" direction.
+  Successful-path UX unchanged; you'll see new die paths only on
+  edge cases (broken JSON in your claudecode config; missing PyYAML;
+  unset `PROXY_PORT`; a foreign process racing into the script's
+  port; non-TTY stdin without the LOGGING sentinel). See
+  [Behavior changes in v2.1.0](#behavior-changes-in-v210-phase-2d-defensive-hardening)
+  for the per-fix descriptions.
 
 ## Step-by-step migration
 
@@ -264,6 +280,115 @@ to ... See above for recovery instructions"`). v2.0 prints the
 recovery block once + a one-liner identifying which call path
 was aborted.
 
+## Behavior changes in v2.1.0 (Phase 2d defensive-hardening)
+
+v2.1.0 (released 2026-05-15, same day as v2.0.0) introduces a
+"fail louder, not silently" discipline (codified as design
+decision D-016 in `PLAN.md`). The successful-path UX is
+unchanged; the changes are visible only on edge cases that
+silently corrupted user data or used unsafe defaults pre-v2.1.
+
+If you're upgrading directly from v1.x to v2.1.0 (skipping v2.0.0
+in between), you get all the v2.0.0 changes above PLUS these:
+
+### Claude Code config writer refuses to merge broken JSON
+
+Pre-v2.1, if `~/.claude/settings.json` (or
+`./.claude/settings.local.json`) was malformed JSON (e.g. you
+edited it manually and broke a brace), the writer would silently
+treat it as `{}` and overwrite it with a fresh file containing
+only the proxy env keys -- destroying your broken-but-recoverable
+content. v2.1 detects the parse failure and refuses to merge,
+with a recovery message offering three options: (1) fix the JSON
+manually with `python3 -m json.tool`, (2) move the file aside
+with a timestamp backup, or (3) pick `[k]eep` at the next
+config-handling prompt to preserve the file in place while you
+recover content from it.
+
+### argo-proxy config writer requires PyYAML for safe merge
+
+Pre-v2.1, if PyYAML wasn't available in the Python the script
+picked (the argo-proxy venv first, then system `python3`), the
+writer would fall back to writing a hardcoded 6-key defaults
+file -- silently dropping any user-owned keys
+(`argo_embedding_url`, `argo_stream_url`, `concurrent_downloads`,
+`max_payload_size`, etc.) when you picked `[b]ackup` at the
+config prompt. v2.1 dies hard with explicit recovery hints
+(`pip install pyyaml`, `apt install python3-yaml`, or
+`--force-reinstall server` for the venv path).
+
+In practice PyYAML is always present in the script's argo-proxy
+venv (it's a transitive dep of argo-proxy itself), so this die
+fires only on truly minimal compute nodes where the venv is
+missing or corrupted. If you've never seen the warn message
+about "no python available for YAML merge" or "YAML merge
+failed (PyYAML missing)" pre-v2.1, this die won't fire for you
+in v2.1 either.
+
+### opencode config writer asserts PROXY_PORT is set
+
+Pre-v2.1, an empty `PROXY_PORT` would silently interpolate into
+the OpenCode `baseURL` as `http://localhost:/v1` -- a syntactically
+valid URL that points nowhere, and OpenCode would silently fail
+to connect. v2.1 dies at writer entry with a clear message.
+`resolve_port` always runs before this writer in the normal
+client flow, so this die effectively never fires; it's a
+defense against script-internal refactor / direct-call paths
+that would otherwise produce a broken config.
+
+### `ensure_or_reuse_tunnel` refuses to overlay our tunnel on a foreign listener
+
+Pre-v2.1, when the script detected an unhealthy SSH tunnel on
+the configured port AND classified it as ours, an unconditional
+`xargs -n1 kill` would destroy any process bound to that port,
+even if the classification was wrong (e.g. a different script's
+`ssh -L` raced into the port between classification and kill).
+v2.1 re-checks each PID's command line against the same
+`ssh -L <port>:` pattern before killing; if a PID doesn't match,
+the script logs the unmatched command line for inspection and
+dies with "Refusing to overlay our tunnel on a foreign
+listener." rather than silently destroying the foreign process.
+
+### Mux master classification more robust to ps format drift
+
+Pre-v2.1, the `local_tunnel_status` mux detection relied on
+matching `ps -o command=` output against the exact regex
+`*ssh:*argo-anywhere-*[mux]*`. The `ps` format varies across OS
+versions (macOS Big Sur+ shows `ssh: <socket-path> [mux]`; older
+versions may omit the `[mux]` tag). v2.1 adds a defense-in-depth
+fallback: if the primary regex doesn't match but the command
+line mentions `argo-{anywhere,opencode}-` AND a corresponding
+socket file exists in `~/.ssh/sockets/`, classify as mux. This
+prevents false-negative refusal-to-reuse on systems where the
+primary regex stops matching due to format drift.
+
+### `ask()` warns when stdin isn't a TTY
+
+Pre-v2.1, when stdin wasn't a TTY (e.g. you piped the script's
+input from a file or ran it under CI / automation), `ask()`
+silently returned the default value. v2.1 prints a one-line WARN
+naming the prompt + the auto-answered default, so you can see
+what got auto-answered. Suppressed when `ARGO_ANYWHERE_LOGGING=1`
+is set (the legitimate `mode_server` tee'd-re-exec scenario).
+
+If you've been piping input into the script, you'll see new WARN
+lines like:
+
+```
+[warn] non-interactive (stdin is not a TTY); auto-answering prompt
+[warn]   'Pick a node:' with default 'compute-01.cels.anl.gov'.
+```
+
+This is informational only; the script's behavior is unchanged,
+just made visible.
+
+### Action required for v1.x → v2.1 upgraders
+
+Same as v1.x → v2.0 (see [Step-by-step migration](#step-by-step-migration)
+above). v2.1 doesn't add any migration steps beyond what v2.0
+already required. The Phase 2d changes are all behavior
+visibility / defensive correctness, not state migration.
+
 ## Things that did NOT change
 
 - **The CLI surface** for `client` / `setup` / `tunnel` / `server`
@@ -299,4 +424,7 @@ the `client` invocation that failed and the relevant log lines.
 
 *Created 2026-05-15 by Ahmed Attia (with substantial AI assistance
 from Claude per [`CONTRIBUTORS.md`](../CONTRIBUTORS.md)) as part of
-Phase 2c+3 of the v2.0 release.*
+Phase 2c+3 of the v2.0 release. Revised 2026-05-15 (post-Phase 2d)
+to add the "Behavior changes in v2.1.0" section covering the seven
+defensive-hardening fixes shipped in v2.1.0 (M6, M7, M8, M9, M10,
+L6, L10).*
