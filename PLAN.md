@@ -980,6 +980,128 @@ cross-reference to D-020.
 
 ---
 
+### D-021 — Cross-client port-coherence enforcement (2026-05-... [Phase 4 v2.2.0])
+
+**Status**: accepted; codified by Phase 4 B3 (new
+`enumerate_client_ports` + `detect_port_disagreement` helpers in
+Section 7; passive reporting block in `mode_status`; proactive
+prompt block in `_client_common_setup`).
+
+**Context.** D-020 elevated the port to transport-layer state with
+the cache as the source of truth, but said nothing about what
+happens when multiple **installed** client configs disagree with
+the cache (or with each other) at script invocation time. Scenarios
+that produce this:
+
+* User installs opencode at port A, later runs `client --port B`
+  for claudecode → claudecode config gets B, opencode config keeps
+  A; subsequent runs see disagreement.
+* User runs `client` from inside a project directory; a
+  `.claude/settings.local.json` overrides the laptop-global
+  claudecode setting with a stale port.
+* User hand-edits one config file but not others.
+
+Without active detection, the user would silently end up with one
+tool talking to the right tunnel and another tool talking to
+nothing.
+
+**Decision.** Add two-tier cross-client coherence enforcement:
+
+1. **Passive reporting** in `mode_status`. After `render_summary`,
+   call `detect_port_disagreement "$PROXY_PORT"` and emit a
+   warn-level block listing each disagreeing config (tool, scope,
+   port, path). status does NOT prompt (it's a read-only command)
+   and the disagreement does NOT flip the exit code (status remains
+   a pure health check; disagreement is informational).
+2. **Proactive prompt** in `_client_common_setup`. After the
+   existing OpenCode-specific port-mismatch block (which handles
+   the legacy case where `--port` was just changed), check for
+   disagreement across OTHER installed configs and invoke
+   `prompt_port_choice` for `[m]igrate / [u]se-once / [k]eep /
+   [a]bort` with `migrate` canonicalizing on the resolved port
+   (downstream writers run later this invocation), `use-once`
+   skipping downstream writes via `SKIP_CROSS_CLIENT_CONFIG_WRITES`,
+   and `keep` switching `PROXY_PORT` to the alternative + updating
+   the cache.
+
+**Why split the two existing per-tool prompts.** The legacy
+OpenCode block (lines 4502-4513) handles the cache-vs-config case
+(user passed `--port` or the env was set; OpenCode config still
+has the old value). The new block handles the multi-tool case
+(other installed tools disagree with the now-resolved port). They
+COULD be unified, but the legacy block has slightly different
+semantics (no `SKIP_CROSS_CLIENT_CONFIG_WRITES` flag; `use-once`
+sets `SKIP_OPENCODE_CONFIG_WRITE` specifically). Phase 4 keeps
+them separate to minimize blast radius; a future refactor can
+collapse them once all per-tool `setup_<name>_cli_tool` functions
+honor `SKIP_CROSS_CLIENT_CONFIG_WRITES`.
+
+**enumerate_client_ports inventory.** Prints one line per
+installed client config that has a baseURL/env-set port:
+
+```
+<tool> <scope> <port> <path>
+```
+
+Tools currently enumerated:
+
+* `opencode global` (reads `~/.config/opencode/config.json`
+  baseURL).
+* `claudecode global` (reads `~/.claude/settings.json`'s
+  `env.ANTHROPIC_BASE_URL`).
+* `claudecode project` (reads `<cwd>/.claude/settings.local.json`
+  when present).
+
+**Known gap (deferred).** `opencode project` (B1b's new scope) is
+NOT enumerated. The opencode project path is `<git-root>/opencode.json`
+where git-root is walked from cwd; cross-client coherence runs at
+script startup where cwd may not be a project root (a status call
+from an arbitrary directory should still work). Adding it requires
+a git-root walk + `<git-root>/opencode.json` inspector; deferred
+until a user reports being bitten.
+
+**Alternatives considered.**
+
+1. **Make status flip exit code on disagreement**: rejected.
+   status's contract since v1.x is "health of the resolved tunnel
+   + proxy"; folding config-coherence into it would break callers
+   that branch on `argo_anywhere.sh status && ...`. Disagreement
+   is a config-management concern, not a health-of-the-running-
+   stack concern.
+2. **Auto-canonicalize without prompting** (silently rewrite
+   disagreeing configs to match resolved port): rejected per
+   D-016 ("fail louder, not silently"). The user might be running
+   `--port` deliberately for a one-off probe; silent rewrite would
+   surprise them on the next invocation.
+3. **Detect mid-session config edits** (file-mtime polling or
+   inotify): out of scope. Configs are read once per invocation;
+   if the user edits a config while the script is running, the
+   disagreement surfaces on the NEXT invocation. Documented in
+   LIMITATIONS.md as a known foot-gun (matches D-020's "rare,
+   documented" framing for the on-node argo-proxy resolver
+   diverging from laptop cache).
+
+**Consequences.**
+
+* `mode_status` gains a warn-block at the end of its body (after
+  `render_summary`, before the exit-code computation). The block
+  is silent when all installed configs agree with the cache, so
+  the all-green case is unchanged.
+* `_client_common_setup` gains a second prompt block after the
+  OpenCode-specific block. Order matters: the OpenCode block
+  resolves the cache-vs-config case first (which may switch
+  PROXY_PORT or set SKIP_OPENCODE_CONFIG_WRITE); the cross-client
+  block then sees the FINAL `PROXY_PORT` and reports any remaining
+  disagreement.
+* `SKIP_CROSS_CLIENT_CONFIG_WRITES` is a new opt-in flag. For B3,
+  only OpenCode honors it (via the existing SKIP_OPENCODE_CONFIG_WRITE
+  pattern); future per-tool setup functions should check it and
+  skip their config write when set.
+* No new tests in the smoke-test suite; live-test in
+  `notes/test_plan_phase4.md` will cover the prompt path.
+
+---
+
 ## 8. Code-paper coupling
 
 **None.** This is a standalone tool, not a paper-supporting library.

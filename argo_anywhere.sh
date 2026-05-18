@@ -1058,6 +1058,125 @@ read_port_from_opencode_config() {
   printf '%s\n' "$url" | sed -nE 's|^https?://[^:/]+:([0-9]+).*|\1|p'
 }
 
+# B3 (Phase 4): per-tool config inspectors for cross-client coherence
+# enforcement (D-021). Each inspector returns the port the named tool's
+# config is pointing at (parsed from baseURL or env.ANTHROPIC_BASE_URL),
+# OR empty if the config is absent / unparseable / has no relevant key.
+# All inspectors are READ-ONLY and side-effect-free.
+
+# _get_port_from_claudecode_config <path>: parse env.ANTHROPIC_BASE_URL
+# from a Claude Code settings.json file. Reads `env.ANTHROPIC_BASE_URL`
+# which is "http://localhost:PORT" (no trailing /v1 -- per
+# write_claudecode_config's contract; Claude Code appends /v1/messages
+# itself). Returns empty on file absent / parse failure / missing key.
+#
+# Args: $1 -- path to the settings.json (typically CLAUDECODE_GLOBAL_CONFIG
+#       or CLAUDECODE_PROJECT_CONFIG; caller decides which).
+_get_port_from_claudecode_config() {
+  local cfg="$1"
+  [ -f "$cfg" ] || return 0
+  local url=""
+  if command -v jq >/dev/null 2>&1; then
+    url="$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$cfg" 2>/dev/null)"
+  elif command -v python3 >/dev/null 2>&1; then
+    # python3 fallback so we don't silently degrade on systems without jq.
+    url="$(python3 - "$cfg" 2>/dev/null <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    env = data.get("env") if isinstance(data, dict) else None
+    if isinstance(env, dict):
+        v = env.get("ANTHROPIC_BASE_URL", "")
+        if v:
+            print(v)
+except Exception:
+    pass
+PYEOF
+)"
+  else
+    # Last-ditch best-effort grep+sed. Brittle but better than silent miss.
+    url="$(grep -oE '"ANTHROPIC_BASE_URL"[[:space:]]*:[[:space:]]*"[^"]*"' "$cfg" \
+            | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')"
+  fi
+  [ -n "$url" ] || return 0
+  # Extract the port (works for http://host:PORT and http://host:PORT/path).
+  printf '%s\n' "$url" | sed -nE 's|^https?://[^:/]+:([0-9]+).*|\1|p'
+}
+
+# enumerate_client_ports: print one line per installed client config that
+# has a baseURL/env-set port. Format: "<tool> <scope> <port> <path>".
+# Used by both the cross-client coherence checker (D-021) and the
+# port-cache migration's Case 3 detector (D-020).
+#
+# Tools enumerated (in B3): opencode (global only; B1b's project scope
+# is supported as a write path but per-project inspection of `<git-root>/opencode.json`
+# is deferred -- see B3 known gap below), claudecode (global +
+# project-in-cwd).
+#
+# Known gap (B3): only opencode-global, claudecode-global, and
+# claudecode-project-in-cwd are enumerated. opencode-project (B1b's
+# new scope) is NOT enumerated because the project path depends on
+# git-root walking from cwd, and cross-client coherence detection runs
+# at script startup where the cwd may not be a project root (status
+# from anywhere; client from anywhere). Future enhancement: also
+# inspect <git-root>/opencode.json when cwd is in a git repo.
+enumerate_client_ports() {
+  local p
+
+  # opencode global
+  p="$(read_port_from_opencode_config 2>/dev/null || true)"
+  if [ -n "$p" ]; then
+    printf '%s\n' "opencode global $p $OPENCODE_GLOBAL_CONFIG"
+  fi
+
+  # claudecode global
+  p="$(_get_port_from_claudecode_config "$CLAUDECODE_GLOBAL_CONFIG" 2>/dev/null || true)"
+  if [ -n "$p" ]; then
+    printf '%s\n' "claudecode global $p $CLAUDECODE_GLOBAL_CONFIG"
+  fi
+
+  # claudecode project (cwd-relative; only meaningful when invoked from
+  # a directory that has a .claude/settings.local.json)
+  if [ -f "$CLAUDECODE_PROJECT_CONFIG" ]; then
+    p="$(_get_port_from_claudecode_config "$CLAUDECODE_PROJECT_CONFIG" 2>/dev/null || true)"
+    if [ -n "$p" ]; then
+      printf '%s\n' "claudecode project $p $CLAUDECODE_PROJECT_CONFIG"
+    fi
+  fi
+}
+
+# detect_port_disagreement <chosen_port>: enumerate all installed client
+# configs and check whether any of their ports DISAGREE with the chosen
+# port. Returns 0 (silent) when all configs agree (or no configs exist);
+# returns 1 + prints disagreement lines to stdout when at least one
+# config disagrees.
+#
+# Output format on disagreement:
+#   <tool> <scope> <port> <path>     <-- one line per DISAGREEING config
+#
+# Used by status (passive reporting) and client startup (proactive
+# prompt). The caller decides what to do with the disagreement (status
+# just reports; client invokes prompt_port_choice or similar).
+detect_port_disagreement() {
+  local chosen="$1"
+  [ -n "$chosen" ] || return 0
+  local saw_disagreement=0
+  local line tool scope port path
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    tool="$(printf '%s' "$line" | awk '{print $1}')"
+    scope="$(printf '%s' "$line" | awk '{print $2}')"
+    port="$(printf '%s' "$line" | awk '{print $3}')"
+    path="$(printf '%s' "$line" | awk '{for (i=4; i<=NF; i++) printf "%s%s", $i, (i<NF?" ":"")}')"
+    if [ "$port" != "$chosen" ]; then
+      printf '%s %s %s %s\n' "$tool" "$scope" "$port" "$path"
+      saw_disagreement=1
+    fi
+  done < <(enumerate_client_ports)
+  [ "$saw_disagreement" = 0 ] && return 0 || return 1
+}
+
 # read_cached_port: read PROXY_PORT from PORT_CACHE if it exists and
 # parses as a valid integer. Returns empty (no output, exit 0) on
 # missing file / unreadable / non-integer content. Best-effort read;
@@ -1107,21 +1226,77 @@ resolve_port() {
     p="$PORT_FROM_CACHE"; PORT_SOURCE="cached port (${PORT_CACHE})"
   else
     # First-run migration (D-020 three-case refinement). No cache yet;
-    # decide what to seed it with.
-    if [ -n "$PORT_FROM_CONFIG" ]; then
-      # Case 2: exactly one client config (OpenCode) has a baseURL.
-      # Future B3 work will extend this to inspect ALL installed client
-      # configs (claudecode + opencode etc.) and detect Case 3
-      # (multi-config disagreement). For B2's scope, OpenCode is the
-      # only inspector that exists; seed from it.
-      p="$PORT_FROM_CONFIG"
-      PORT_SOURCE="migrated from opencode config baseURL (cached for future runs)"
-      log "Port cache (${PORT_CACHE}) empty on first run; migrating port ${p} from OpenCode config baseURL."
-    else
+    # decide what to seed it with. B3 (Phase 4) extended the inspector
+    # set to cover claudecode (global + project-in-cwd) in addition to
+    # opencode-global; enumerate_client_ports is the single source of
+    # truth for "what client configs exist and what ports do they
+    # report."
+    local _enum; _enum="$(enumerate_client_ports 2>/dev/null || true)"
+    if [ -z "$_enum" ]; then
       # Case 1: no existing client configs with a baseURL; seed default.
       p="$PROXY_PORT_DEFAULT"
       PORT_SOURCE="built-in default (no cache, no existing client configs; seeding ${PORT_CACHE})"
       log "Port cache (${PORT_CACHE}) empty on first run; no existing client configs found. Seeding default port ${p}."
+    else
+      # Count unique ports across all enumerated configs.
+      local _unique_ports
+      _unique_ports="$(printf '%s\n' "$_enum" | awk '{print $3}' | sort -u)"
+      local _num_unique; _num_unique="$(printf '%s\n' "$_unique_ports" | grep -c .)"
+      if [ "$_num_unique" = 1 ]; then
+        # Case 2: all installed configs agree (or only one exists).
+        p="$_unique_ports"  # already a single value
+        local _tool_list; _tool_list="$(printf '%s\n' "$_enum" | awk '{print $1 ":" $2}' | paste -sd ',' -)"
+        PORT_SOURCE="migrated from ${_tool_list} config (cached for future runs)"
+        log "Port cache (${PORT_CACHE}) empty on first run; migrating port ${p} from existing client config(s) [${_tool_list}]."
+      else
+        # Case 3: multiple client configs with DISAGREEING ports.
+        # The user has to pick. Print the inventory + prompt via
+        # prompt_port_choice. The chosen port is then cached and
+        # downstream config writers will update the disagreeing configs
+        # on next run (or the user can pick [u]se-once / [k]eep / [a]bort).
+        warn "Port cache (${PORT_CACHE}) empty on first run; multiple existing client configs disagree on the port:"
+        printf '%s\n' "$_enum" | while IFS= read -r line; do
+          warn "  $line"
+        done
+        # Pick the FIRST inspector's port as the "current" reference for
+        # the prompt; offer canonicalization. Use enumerate_client_ports'
+        # first line's port as the proposed canonical (arbitrary but
+        # deterministic).
+        local _first_port; _first_port="$(printf '%s\n' "$_enum" | head -n1 | awk '{print $3}')"
+        local _other_port; _other_port="$(printf '%s\n' "$_unique_ports" | grep -v "^${_first_port}\$" | head -n1)"
+        # Reuse the existing prompt_port_choice helper. Semantics here:
+        # "new_port" = first config's port (proposed canonical);
+        # "config_port" = the other config's port (alternative).
+        # Result interpretation:
+        #   migrate  -> use _first_port; B3 status/client startup
+        #               disagreement detection will surface the still-
+        #               disagreeing other configs on next invocation.
+        #   use-once -> use _first_port for this run; cache NOT written
+        #               (user wants to test without committing).
+        #   keep     -> use _other_port; same downstream surfacing.
+        local _ppc_choice
+        _ppc_choice="$(prompt_port_choice "$_first_port" "$_other_port" "multiple client configs (see warnings above)")"
+        case "$_ppc_choice" in
+          migrate)
+            p="$_first_port"
+            PORT_SOURCE="user-chosen canonical from multi-config migration (cached)"
+            ok "Will use port ${p} as the canonical; cache will be seeded with this value."
+            ;;
+          use-once)
+            p="$_first_port"
+            PORT_SOURCE="user-chosen for this run only; cache NOT written"
+            # Signal to the cache-write block below that this is a
+            # use-once choice and should NOT update the cache.
+            PORT_OVERRIDE_CLI="$_first_port"  # treats as if user passed --port
+            ok "Using port ${p} for THIS run only; the cache will remain empty."
+            ;;
+          keep)
+            p="$_other_port"
+            PORT_SOURCE="user-chosen alternative from multi-config migration (cached)"
+            ok "Will use port ${p} as the canonical; cache will be seeded with this value."
+            ;;
+        esac
+      fi
     fi
   fi
   # Sanity check: must be a number in valid TCP range.
@@ -4337,6 +4512,60 @@ _client_common_setup() {
     esac
   fi
 
+  # Cross-client port-coherence proactive prompt (D-021, B3). The
+  # OpenCode-specific block above handles the legacy single-tool case.
+  # This block extends coverage to OTHER installed client configs
+  # (claudecode global, claudecode project-in-cwd). When any of them
+  # disagree with the now-resolved PROXY_PORT, surface the situation
+  # and let the user pick canonical via prompt_port_choice. Skip if
+  # only OpenCode disagreed (already handled above) or no configs
+  # disagree.
+  if [ "$with_opencode_setup" = 1 ]; then
+    local _disagree_lines _non_oc_lines
+    _disagree_lines="$(detect_port_disagreement "$PROXY_PORT" || true)"
+    # Filter out the opencode line (handled by the legacy block above).
+    _non_oc_lines="$(printf '%s\n' "$_disagree_lines" | awk 'NF && $1 != "opencode"')"
+    if [ -n "$_non_oc_lines" ]; then
+      warn "Cross-client port disagreement detected (D-021):"
+      warn "  Resolved port: ${PROXY_PORT}"
+      warn "  Disagreeing client config(s):"
+      printf '%s\n' "$_non_oc_lines" | while IFS= read -r _l; do
+        warn "    $_l"
+      done
+      # Pick the first disagreeing port as the alternative for the
+      # prompt. The user's [m]igrate choice means "canonicalize on
+      # PROXY_PORT" (downstream config writers run later in this
+      # invocation and will rewrite the disagreeing configs); [u]se-once
+      # means "this run only" (cache write already happened upstream);
+      # [k]eep means "switch PROXY_PORT to the alternative" (cache will
+      # be updated to match downstream).
+      local _alt_port
+      _alt_port="$(printf '%s\n' "$_non_oc_lines" | head -n1 | awk '{print $3}')"
+      local _ppc_choice2
+      _ppc_choice2="$(prompt_port_choice "$PROXY_PORT" "$_alt_port" "other client config(s) (see warnings above)")"
+      case "$_ppc_choice2" in
+        migrate)
+          ok "Will canonicalize all client configs on port ${PROXY_PORT} this run."
+          ;;
+        use-once)
+          ok "Using port ${PROXY_PORT} for this run only; disagreeing configs untouched."
+          # Do not write through to per-tool configs; signal via the
+          # same SKIP flag the OpenCode block uses, plus a generic one
+          # the per-tool setup_<name> functions can check. For now,
+          # only OpenCode honors SKIP_OPENCODE_CONFIG_WRITE; future
+          # per-tool flags can follow the same pattern.
+          SKIP_CROSS_CLIENT_CONFIG_WRITES=1
+          ;;
+        keep)
+          PROXY_PORT="$_alt_port"
+          # Also rewrite the cache so subsequent runs use the alternative.
+          write_port_cache "$PROXY_PORT" || true
+          ok "Switched to port ${PROXY_PORT} from disagreeing config (cache updated)."
+          ;;
+      esac
+    fi
+  fi
+
   # Order under MFA: pick the node FIRST, then open the mux master against
   # that node. (Cannot open against ANL_JUMP -- jump host is shell-restricted.)
   # Order under --no-mfa: preflight against the jump host first (BatchMode
@@ -5600,7 +5829,28 @@ mode_status() {
 
   render_summary
 
-  # Exit code reflects health for use in && chains.
+  # Cross-client port-coherence (D-021, B3): passively report when any
+  # installed client config disagrees with the resolved PROXY_PORT.
+  # status is a read-only command and never prompts the user; it just
+  # surfaces the situation so a follow-up `client` run can resolve it
+  # via prompt_port_choice. Output goes through warn() so it shows up
+  # in `2>/dev/null`-free invocations but doesn't pollute pipelines
+  # that capture stdout.
+  local _disagree_lines
+  _disagree_lines="$(detect_port_disagreement "$PROXY_PORT" || true)"
+  if [ -n "$_disagree_lines" ]; then
+    warn "Cross-client port disagreement detected (D-021):"
+    warn "  Resolved port (cache / CLI / env / default): ${PROXY_PORT}"
+    warn "  Disagreeing client config(s):"
+    printf '%s\n' "$_disagree_lines" | while IFS= read -r _l; do
+      warn "    $_l"
+    done
+    warn "  Run 'argo_anywhere.sh client' to canonicalize via the [m/u/k/a] prompt."
+  fi
+
+  # Exit code reflects health for use in && chains. D-021 disagreement
+  # is informational; it does NOT flip the exit code (status remains a
+  # pure health check).
   if [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$SUM_MODELS_OK" -eq 1 ]; then
     return 0
   fi
