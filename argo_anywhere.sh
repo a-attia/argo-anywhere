@@ -237,6 +237,11 @@ _legacy_ARGO_OPENCODE_KEEP_ORPHANS="${ARGO_OPENCODE_KEEP_ORPHANS:-}"
 _legacy_ARGO_OPENCODE_DROP_ORPHANS="${ARGO_OPENCODE_DROP_ORPHANS:-}"
 # NOTE: _LOGGING (renamed to _ARGO_ANYWHERE_REEXEC in Phase 2e) was
 # an INTERNAL sentinel never set by users; no legacy snapshot needed.
+# B1a (Phase 4): CLAUDECODE_SCOPE is being deprecated in favor of
+# ARGO_ANYWHERE_SCOPE (matches the project's *_ANYWHERE_* user-facing
+# namespace per D-009). Snapshot it so the Section 6 promotion block
+# can issue the one-time deprecation warning.
+_legacy_CLAUDECODE_SCOPE="${CLAUDECODE_SCOPE:-}"
 
 # ============================================================================
 # SECTION: 2. USER-EDITABLE CONFIG
@@ -921,6 +926,15 @@ _warn_legacy_env() {
   { _warn_legacy_env ARGO_OPENCODE_KEEP_ORPHANS ARGO_ANYWHERE_KEEP_ORPHANS; ARGO_ANYWHERE_KEEP_ORPHANS="$_legacy_ARGO_OPENCODE_KEEP_ORPHANS"; }
 [ -z "${ARGO_ANYWHERE_DROP_ORPHANS:-}"     ] && [ -n "$_legacy_ARGO_OPENCODE_DROP_ORPHANS" ] && \
   { _warn_legacy_env ARGO_OPENCODE_DROP_ORPHANS ARGO_ANYWHERE_DROP_ORPHANS; ARGO_ANYWHERE_DROP_ORPHANS="$_legacy_ARGO_OPENCODE_DROP_ORPHANS"; }
+# B1a (Phase 4): CLAUDECODE_SCOPE -> ARGO_ANYWHERE_SCOPE (D-019).
+# The pre-Phase-4 env var was per-tool-named (CLAUDECODE_SCOPE) per D-009's
+# convention; per-tool naming made sense when only Claude Code consumed
+# scope. Phase 4 generalises scope across tools, so the env var migrates
+# to the shared *_ANYWHERE_* namespace. Legacy CLAUDECODE_SCOPE remains
+# honored with a one-time deprecation warning; removal target = whenever
+# v3.0.0 ships (no fixed schedule).
+[ -z "${ARGO_ANYWHERE_SCOPE:-}"            ] && [ -n "$_legacy_CLAUDECODE_SCOPE" ] && \
+  { _warn_legacy_env CLAUDECODE_SCOPE ARGO_ANYWHERE_SCOPE; ARGO_ANYWHERE_SCOPE="$_legacy_CLAUDECODE_SCOPE"; }
 # NOTE: ARGO_OPENCODE_LOGGING legacy promotion was removed in
 # Phase 2e (I2 fix; 2026-05-15). The variable was an INTERNAL sentinel
 # (renamed to _ARGO_ANYWHERE_REEXEC) never set by users; the legacy
@@ -1643,6 +1657,74 @@ EOF
   rm -f "$proposed"; trap - RETURN
 }
 
+# _validate_scope_for_tool: D-018 per-tool scope vocabulary validation.
+# Called by per-tool <name>_pick_scope() after resolving the explicit
+# --scope / ARGO_ANYWHERE_SCOPE value. Validates against the tool's
+# <name>_scope_values() output (space-separated list). Dies with a
+# clear "Tool X accepts: Y Z" message on rejection.
+#
+# Args:
+#   $1 tool   -- the lowercase tool token (e.g. "claudecode", "opencode")
+#   $2 scope  -- the scope value the user supplied
+#
+# Returns 0 (silent) on success; die on rejection.
+_validate_scope_for_tool() {
+  local tool="$1" scope="$2"
+  local values_fn="${tool}_scope_values"
+  if ! command -v "$values_fn" >/dev/null 2>&1; then
+    die "_validate_scope_for_tool: no scope vocabulary defined for tool '${tool}' (expected function ${values_fn}). This is a script bug (CLI_TOOLS_AVAILABLE registry inconsistency)."
+  fi
+  local allowed; allowed="$("$values_fn")"
+  local v
+  for v in $allowed; do
+    if [ "$v" = "$scope" ]; then
+      return 0
+    fi
+  done
+  die "--scope value '${scope}' is not valid for --cli-tool ${tool}. Accepted values: ${allowed}."
+}
+
+# prompt_scope_switch: D-017 scope-switch prompt. Fires from per-tool
+# <name>_pick_scope() when a conflict is detected between the user's
+# chosen scope and the system state (existing files, OAuth state, etc.).
+#
+# Two-prompt model: this prompt resolves the scope question; the
+# subsequent handle_config_file call resolves the per-file content
+# question via the existing [k/b/d/m/a] vocabulary. The two prompts
+# have stable letter meanings (D-015 alignment); the scope letters are
+# never used in handle_config_file and the content letters are never
+# used here.
+#
+# Args:
+#   $1 conflict_desc  -- short paragraph describing why the conflict matters
+#   $2 current_scope  -- the scope the user intends ("global" / "project" / ...)
+#   $3 other_scope    -- the alternative scope to offer (specific to the tool)
+#
+# Prints (to stdout) one of:
+#   keep    -- user accepts the conflict; proceed with current_scope
+#   switch  -- user switches to other_scope; caller must re-resolve path/name
+# Dies on [a]bort.
+prompt_scope_switch() {
+  local conflict_desc="$1" current_scope="$2" other_scope="$3"
+  warn "Scope conflict detected:"
+  cat >&2 <<EOF
+
+  ${conflict_desc}
+
+  Choose how to resolve:
+    [k] keep current scope (${current_scope}); proceed as-is
+    [s] switch to ${other_scope} scope instead
+    [a] abort; reconcile manually
+EOF
+  local choice; choice="$(ask "Your choice [k/s/a]:" "k")"
+  case "$choice" in
+    k|K) printf '%s' "keep" ;;
+    s|S) printf '%s' "switch" ;;
+    a|A) die "Aborted at scope-conflict step." ;;
+    *)   die "Unrecognized choice; aborting." ;;
+  esac
+}
+
 # ============================================================================
 # SECTION: 12. OPENCODE CONFIG WRITER + INSTALLER (laptop side)
 # ============================================================================
@@ -1786,15 +1868,45 @@ ensure_opencode_installed() {
 # ----------------------------------------------------------------------------
 # OpenCode end-to-end client setup (subsection of 12)
 # ----------------------------------------------------------------------------
+
+# opencode_scope_values: D-018 per-tool scope vocabulary. OpenCode in
+# Phase 4 B1a only supports 'global' scope (writes ~/.config/opencode/config.json).
+# B1b (separate batch) will add 'project' support per the upstream
+# OpenCode docs' project-local <git-root>/opencode.json convention; until
+# then the only legal --scope value for opencode is 'global'. The CLI
+# parser accepts any string for --scope; per-tool validation here
+# rejects unknown values with a clear "accepts: global" message.
+opencode_scope_values() {
+  printf 'global'
+}
+
 # setup_opencode_cli_tool: ensure OpenCode is installed and its config is up to
 # date for the resolved (PROXY_PORT, ANL_USERNAME). Idempotent. Honors the
 # SKIP_OPENCODE_CONFIG_WRITE flag set by mode_client when the user picked [u]
 # at the port-mismatch prompt.
 #
+# B1a (Phase 4): validates --scope value against opencode_scope_values
+# before doing the install/write. opencode_pick_scope is intentionally
+# absent in B1a (opencode is global-only); B1b will add it alongside
+# project-scope support.
+#
 # This is the "per-client" piece of mode_client, extracted so future per-client
 # setup functions (setup_claudecode_cli_tool, setup_aider_cli_tool, ...) can sit
 # next to it as peers and the orchestrator can call any combination.
 setup_opencode_cli_tool() {
+  # Validate --scope value if user supplied one. opencode is global-only
+  # in B1a; rejection happens here (per-tool vocabulary validation)
+  # rather than in the CLI parser (which is per-tool-agnostic).
+  local _intended_scope=""
+  if [ -n "${_SCOPE_OVERRIDE:-}" ]; then
+    _intended_scope="$_SCOPE_OVERRIDE"
+  elif [ -n "${ARGO_ANYWHERE_SCOPE:-}" ]; then
+    _intended_scope="$ARGO_ANYWHERE_SCOPE"
+  fi
+  if [ -n "$_intended_scope" ]; then
+    _validate_scope_for_tool opencode "$_intended_scope"
+  fi
+
   ensure_opencode_installed
   if [ "${SKIP_OPENCODE_CONFIG_WRITE:-0}" = 1 ]; then
     log "Skipping OpenCode config write (--port override + [u] choice)."
@@ -1856,129 +1968,223 @@ ensure_claudecode_installed() {
   ok "Claude Code installed: $(command -v claude)"
 }
 
-# claudecode_pick_scope: decide whether to write the project-local or the
-# global Claude Code settings file. Sets _CLAUDECODE_SCOPE_PATH (the file
-# we'll write) and _CLAUDECODE_SCOPE_NAME (human-readable label) as
-# globals, since the writer (write_claudecode_config) is invoked via
-# handle_config_file and gets only the destination path.
+# =============================================================================
+# claudecode scope handling -- B1a (Phase 4) rewrite per D-017 + D-018
+# =============================================================================
 #
-# Decision tree (H6 fix, audit Phase 2b Batch 4):
-#   1. --scope project|global / CLAUDECODE_SCOPE env -> use that.
-#   2. ~/.claude/settings.json exists AND has a non-empty `env` block
-#      (suggests user has a personal Anthropic subscription configured
-#      globally; we don't want to clobber it) -> project scope.
-#   3. Else -> project scope by DEFAULT (was global pre-H6).
+# Decisions (PLAN.md):
+#   D-017 -- Default scope is per-tool-declared with documented rationale.
+#            claudecode uses HYBRID auto-default (see below). Per-tool
+#            <name>_pick_scope() does conflict-detection before writing
+#            and surfaces conflicts via the scope-switch prompt.
+#   D-018 -- Per-tool scope vocabulary contract. Each tool has
+#            <name>_scope_values() (the list of legal --scope values for
+#            that tool) and <name>_pick_scope() (the picker).
+#   D-019 -- ARGO_ANYWHERE_SCOPE is the user-facing env var (per D-009
+#            namespace); _SCOPE_OVERRIDE is the internal global set by
+#            the --scope CLI flag. Legacy CLAUDECODE_SCOPE auto-promotes
+#            to ARGO_ANYWHERE_SCOPE with one-time WARN (Section 6).
 #
-# H6 rationale: the old default of global-on-fresh-install was a silent
-# correctness landmine. On a fresh Claude Code install the user has not
-# yet run `claude auth login`, so ~/.claude.json doesn't exist, signal 1
-# misses, and we'd land on global. Then the user runs `claude auth
-# login` later -> the OAuth token gets stored in ~/.claude.json. Per
-# Anthropic's docs the OAuth token TAKES PRECEDENCE over
-# ANTHROPIC_AUTH_TOKEN in settings.json, silently neutralizing our
-# config. The user thinks they're talking to argo-proxy but they're
-# actually talking to their personal Anthropic account. New default of
-# project-scope avoids the precedence collision entirely (env in
-# settings.local.json applies regardless of OAuth state).
+# Hybrid default for claudecode (REVISES H6 fix from v2.0.0):
+#   * If --scope / ARGO_ANYWHERE_SCOPE / CLAUDECODE_SCOPE (legacy) is set
+#     explicitly -> use that value (after conflict validation; see below).
+#   * Else if ~/.claude.json exists (OAuth state present; user has run
+#     `claude auth login`) -> default to project. This is the H6 safety
+#     case: writing global would silently shadow the user's personal
+#     Anthropic subscription per Claude Code's OAuth precedence rules
+#     (observed during Phase 2b live test #1; documented at length in
+#     the H6 audit entry).
+#   * Else (fresh install; no OAuth state) -> default to global. This
+#     gives the convenient "claude works from any directory" UX for
+#     users who came to argo-anywhere first and don't have a personal
+#     subscription to protect.
 #
-# Trade-off: project-scope means the user must be IN the project
-# directory to get the proxy config. We mention this explicitly in the
-# post-decision log so first-time users discover --scope global if
-# they actually want machine-wide behavior. Power users with a single
-# "AI work" directory aren't affected; users who want global behavior
-# can set CLAUDECODE_SCOPE=global in their shell rc.
+# Conflict validation runs in BOTH the explicit and auto branches.
+# Detected conflicts trigger the scope-switch prompt
+# (prompt_scope_switch, defined in Section 11 alongside handle_config_file).
+# Conflicts checked:
+#   A.1  intended scope = global; ~/.claude/settings.json exists with content
+#        (let user choose: keep current global / switch to project / abort)
+#   A.2  intended scope = global; ~/.claude.json exists (OAuth state)
+#        (let user choose: proceed with global anyway / switch to project / abort)
+#   A.3  intended scope = global; ./.claude/settings.local.json exists in cwd
+#        with our env keys (project will shadow it when run from cwd)
+#   B.1  intended scope = project; ~/.claude/settings.json exists with our env keys
+#        (global already has our config; project will shadow within cwd)
+#   B.2  intended scope = project; cwd doesn't look like a project (no .git
+#        ancestor + cwd != HOME)
 #
 # Why we never write to ./.claude/settings.json (the COMMITTED project
 # file): doing so would force every collaborator on the user's git repo
 # to also use this proxy. .claude/settings.local.json is gitignored by
 # default by Claude Code itself, so it's the right place for per-machine
 # overrides.
+
+# claudecode_scope_values: declare the legal values for --scope when
+# --cli-tool=claudecode. Used by _validate_scope_for_tool. Space-separated
+# tokens; the validator splits on whitespace.
+claudecode_scope_values() {
+  printf 'project global'
+}
+
 _CLAUDECODE_SCOPE_PATH=""
 _CLAUDECODE_SCOPE_NAME=""
+
+# claudecode_pick_scope: resolve scope per the hybrid + two-prompt model.
+# Sets _CLAUDECODE_SCOPE_PATH (file we'll write) and _CLAUDECODE_SCOPE_NAME
+# (human-readable label) as script-level globals, since the writer
+# (write_claudecode_config) is invoked via handle_config_file and gets
+# only the destination path; the real target is read from
+# _CLAUDECODE_SCOPE_PATH so the writer can merge from the actual existing
+# file (handle_config_file passes a tempfile as $dest for the diff/merge
+# dance).
 claudecode_pick_scope() {
-  if [ -n "${CLAUDECODE_SCOPE:-}" ]; then
-    case "$CLAUDECODE_SCOPE" in
-      project)
-        _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
-        _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
-        log "Claude Code scope: project (--scope project)."
-        return
-        ;;
-      global)
-        _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_GLOBAL_CONFIG"
-        _CLAUDECODE_SCOPE_NAME="global (~/.claude/settings.json)"
-        log "Claude Code scope: global (--scope global)."
-        return
-        ;;
-    esac
+  # Resolve the effective scope source: explicit flag/env > hybrid auto.
+  # Read order: _SCOPE_OVERRIDE (set by --scope CLI flag) >
+  # ARGO_ANYWHERE_SCOPE env (set directly by user OR by Section 6
+  # promotion from legacy CLAUDECODE_SCOPE).
+  local _intended_scope=""
+  local _scope_source=""
+  if [ -n "${_SCOPE_OVERRIDE:-}" ]; then
+    _intended_scope="$_SCOPE_OVERRIDE"
+    _scope_source="--scope ${_intended_scope}"
+  elif [ -n "${ARGO_ANYWHERE_SCOPE:-}" ]; then
+    _intended_scope="$ARGO_ANYWHERE_SCOPE"
+    _scope_source="ARGO_ANYWHERE_SCOPE env"
   fi
 
-  # Auto-detect whether the user has a personal Anthropic subscription.
-  # Two independent signals, checked strongest-first:
-  #
-  #   1. ~/.claude.json exists: Claude Code's auth state file, created by
-  #      `claude auth login`. Its presence means the user has an active
-  #      personal account. Writing ANTHROPIC_AUTH_TOKEN to the GLOBAL
-  #      ~/.claude/settings.json would override the OAuth token stored here
-  #      and break all non-proxy Claude Code usage on the machine.
-  #
-  #   2. ~/.claude/settings.json already has a non-empty `env` block:
-  #      the user (or a previous run) put env vars in the global file.
-  #      Clobbering the whole env block would silently remove those.
-  #
-  # In either case we default to project scope so the global file is
-  # left untouched. The user can override with '--scope global'.
-
-  # Signal 1: personal OAuth account
-  if [ -f "${HOME}/.claude.json" ]; then
-    _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
-    _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
-    log "Claude Code scope: project (auto; ~/.claude.json detected — personal subscription preserved)."
-    log "  Writing to project scope only: ${CLAUDECODE_PROJECT_CONFIG}"
-    log "  Override with '--scope global' only if you want to replace your global Claude settings."
-    return
+  if [ -n "$_intended_scope" ]; then
+    # Explicit scope: validate against per-tool vocabulary first.
+    _validate_scope_for_tool claudecode "$_intended_scope"
+  else
+    # Hybrid auto-default: ~/.claude.json present => project (safety);
+    # absent => global (convenience).
+    if [ -f "${HOME}/.claude.json" ]; then
+      _intended_scope="project"
+      _scope_source="auto (~/.claude.json detected; preserving personal subscription)"
+    else
+      _intended_scope="global"
+      _scope_source="auto (fresh install; no OAuth state)"
+    fi
   fi
 
-  # Signal 2: existing env block in the global settings file
-  local existing_env=0
-  if [ -f "$CLAUDECODE_GLOBAL_CONFIG" ] && command -v python3 >/dev/null 2>&1; then
-    if python3 - "$CLAUDECODE_GLOBAL_CONFIG" >/dev/null 2>&1 <<'PYEOF'
+  # Resolve the path + label from the intended scope.
+  case "$_intended_scope" in
+    project)
+      _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
+      _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
+      ;;
+    global)
+      _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_GLOBAL_CONFIG"
+      _CLAUDECODE_SCOPE_NAME="global (~/.claude/settings.json)"
+      ;;
+    *)
+      # _validate_scope_for_tool should have die'd above; this is paranoia.
+      die "claudecode_pick_scope: internal error -- intended scope '${_intended_scope}' not in vocabulary (claudecode_scope_values returns: $(claudecode_scope_values))."
+      ;;
+  esac
+
+  log "Claude Code scope: ${_intended_scope} (${_scope_source})."
+  if [ "$_intended_scope" = "project" ]; then
+    log "  Config will land at ${CLAUDECODE_PROJECT_CONFIG} and apply only when"
+    log "  'claude' is run from this directory ($(pwd))."
+  else
+    log "  Config will land at ${CLAUDECODE_GLOBAL_CONFIG} and apply when"
+    log "  'claude' is run from any directory."
+  fi
+
+  # Conflict detection: see function-level comment above for the rules.
+  # When a conflict is detected, prompt the user via prompt_scope_switch
+  # (Section 11). The user's choice may MUTATE _intended_scope and trigger
+  # a re-resolution of path + label.
+  _claudecode_check_conflicts "$_intended_scope"
+}
+
+# _claudecode_check_conflicts: per-scope conflict detection + scope-switch
+# prompt invocation. Called by claudecode_pick_scope after the intended
+# scope is resolved; may mutate _CLAUDECODE_SCOPE_PATH / _CLAUDECODE_SCOPE_NAME
+# if the user chooses to switch scope at the prompt.
+_claudecode_check_conflicts() {
+  local intended="$1"
+  local conflict_desc=""
+  local other_scope=""
+  if [ "$intended" = "global" ]; then
+    other_scope="project"
+    # A.2 first (OAuth-state detected) -- highest-stakes because it's the
+    # silent-shadowing landmine H6 was designed to prevent.
+    if [ -f "${HOME}/.claude.json" ]; then
+      conflict_desc="You have an active Claude Code OAuth session (~/.claude.json detected). Writing global proxy config may interact with OAuth precedence: ANTHROPIC_AUTH_TOKEN should win per Anthropic's docs, but we observed shadowing in real-world tests (see audit H6)."
+    # A.1 -- existing global file with content; we'd be overwriting (or
+    # merging via handle_config_file's [k/b/d/m/a] prompt later).
+    elif [ -f "$CLAUDECODE_GLOBAL_CONFIG" ]; then
+      local _has_content=0
+      if command -v python3 >/dev/null 2>&1; then
+        if python3 - "$CLAUDECODE_GLOBAL_CONFIG" >/dev/null 2>&1 <<'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
         data = json.load(f)
-    env = data.get("env") or {}
-    sys.exit(0 if isinstance(env, dict) and len(env) > 0 else 1)
+    sys.exit(0 if (isinstance(data, dict) and len(data) > 0) else 1)
 except Exception:
     sys.exit(2)
 PYEOF
-    then existing_env=1
+        then _has_content=1
+        fi
+      else
+        # No python3 to inspect; assume content present if file is non-empty.
+        [ -s "$CLAUDECODE_GLOBAL_CONFIG" ] && _has_content=1
+      fi
+      if [ "$_has_content" = 1 ]; then
+        conflict_desc="${CLAUDECODE_GLOBAL_CONFIG} already exists and has content. handle_config_file's [k/b/d/m/a] prompt will offer per-file resolution, but you can also switch to project scope to leave your global file untouched."
+      fi
     fi
+    # A.3 -- project file in cwd already has our env keys (project will
+    # shadow global within cwd). Detection requires inspecting the file's
+    # env keys; defer to a later iteration if real-world use surfaces this.
+    # (Recorded as a known gap; not a v2.2.0 blocker.)
+  elif [ "$intended" = "project" ]; then
+    other_scope="global"
+    # B.2 first -- cwd-doesn't-look-like-project check.
+    local _is_project=0
+    if [ -d ".git" ] || [ -d "../.git" ] || [ -d "../../.git" ]; then
+      _is_project=1
+    elif [ -f "package.json" ] || [ -f "pyproject.toml" ] || [ -f "Cargo.toml" ] || [ -f "go.mod" ]; then
+      _is_project=1
+    elif [ "$(pwd)" = "$HOME" ]; then
+      # HOME is an explicit-enough signal: user knows what they're doing.
+      _is_project=1
+    fi
+    if [ "$_is_project" = 0 ]; then
+      conflict_desc="--scope project will write $(pwd)/.claude/settings.local.json, but $(pwd) doesn't look like a project directory (no .git ancestor, no common project manifests). Most users in this situation want --scope global so 'claude' works from any directory."
+    fi
+    # B.1 -- existing global file with our env keys (global already has
+    # our config; project will shadow within cwd). Similar to A.3;
+    # deferred for now.
   fi
 
-  if [ "$existing_env" = 1 ]; then
-    _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
-    _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
-    log "Claude Code scope: project (auto; ~/.claude/settings.json already has an env block)."
-    log "  This keeps your global Anthropic settings intact."
-    log "  Override with '--scope global' if you'd rather replace the global env."
-  else
-    # H6 fix (audit Phase 2b Batch 4): default to project scope even on
-    # fresh installs. See the function-level comment for the OAuth
-    # precedence reasoning. The discoverability hint below makes the
-    # new default visible so users who actually want machine-wide
-    # behavior know how to get it.
-    _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
-    _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
-    log "Claude Code scope: project (auto; default since v2.0)."
-    log "  Config will land at ${CLAUDECODE_PROJECT_CONFIG} and only apply when"
-    log "  'claude' is run from this directory ($(pwd))."
-    log "  Run with '--scope global' (or set CLAUDECODE_SCOPE=global) to write"
-    log "  to ~/.claude/settings.json instead and have the proxy config apply"
-    log "  in every directory on this machine. Note: '--scope global' is"
-    log "  silently neutralized once you run 'claude auth login', because the"
-    log "  OAuth token in ~/.claude.json takes precedence; project scope is"
-    log "  not affected by that precedence rule."
+  if [ -n "$conflict_desc" ]; then
+    local _ssc_choice
+    _ssc_choice="$(prompt_scope_switch "$conflict_desc" "$intended" "$other_scope")"
+    case "$_ssc_choice" in
+      keep)
+        # User accepts the conflict; proceed with intended scope.
+        log "  Proceeding with ${intended} scope despite the conflict (user's choice)."
+        ;;
+      switch)
+        # Re-resolve to the other scope.
+        case "$other_scope" in
+          project)
+            _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_PROJECT_CONFIG"
+            _CLAUDECODE_SCOPE_NAME="project (${CLAUDECODE_PROJECT_CONFIG})"
+            ;;
+          global)
+            _CLAUDECODE_SCOPE_PATH="$CLAUDECODE_GLOBAL_CONFIG"
+            _CLAUDECODE_SCOPE_NAME="global (~/.claude/settings.json)"
+            ;;
+        esac
+        log "  Switched to ${other_scope} scope; will write ${_CLAUDECODE_SCOPE_PATH}."
+        ;;
+    esac
   fi
 }
 
@@ -2088,9 +2294,18 @@ PYEOF
 # setup_claudecode_cli_tool: ensure Claude Code is installed and its
 # settings.json is up to date for the resolved (PROXY_PORT, ANL_USERNAME).
 # Idempotent. Picks scope automatically (or honors --scope).
+#
+# B1a (Phase 4) reordering: claudecode_pick_scope() runs BEFORE
+# ensure_claudecode_installed(). The scope decision doesn't depend on
+# the binary being present; failing fast on scope-related issues (e.g.
+# scope-switch prompt aborted by user, --scope value rejected by
+# vocabulary validation) avoids the expensive curl|bash install when
+# the run will not succeed anyway. The original ordering had install
+# first; the H6 audit comment flagged the issue but the fix landed
+# in Phase 2b kept the order. This reordering completes that fix.
 setup_claudecode_cli_tool() {
-  ensure_claudecode_installed
   claudecode_pick_scope
+  ensure_claudecode_installed
   handle_config_file "$_CLAUDECODE_SCOPE_PATH" \
     "Claude Code config (${_CLAUDECODE_SCOPE_NAME})" \
     write_claudecode_config
@@ -6592,15 +6807,19 @@ main() {
           *) die "--port-range expects LO-HI (e.g. 64742-64842), got '$2'." ;;
         esac ;;
       --scope)
-        # Per-client scope override. Currently consumed only by
-        # setup_claudecode_cli_tool (project|global). Future clients may
-        # define their own scopes; the parser accepts any string here and
-        # leaves validation to the per-client setup function.
-        [ -n "${2:-}" ] || die "--scope expects a value (e.g. 'project' or 'global')."
-        case "$2" in
-          project|global) CLAUDECODE_SCOPE="$2"; shift 2 ;;
-          *) die "--scope must be 'project' or 'global' (got '$2')." ;;
-        esac ;;
+        # B1a (Phase 4): per-tool scope vocabulary contract (D-018).
+        # Parser accepts any non-empty string; validation deferred to the
+        # per-tool <name>_pick_scope function which calls
+        # _validate_scope_for_tool against the tool's <name>_scope_values
+        # list. This is necessary because --scope and --cli-tool may
+        # arrive in either order on the command line; per-tool validation
+        # can only run once both are known. Stored in _SCOPE_OVERRIDE
+        # (internal-global naming convention; matches _INVOKED_MODE etc.).
+        # User-facing env var is ARGO_ANYWHERE_SCOPE (D-009 namespace
+        # convention); legacy CLAUDECODE_SCOPE auto-promotes with a
+        # one-time WARN (Section 6).
+        [ -n "${2:-}" ] || die "--scope expects a value (e.g. 'project' or 'global'; per-tool vocabulary varies)."
+        _SCOPE_OVERRIDE="$2"; shift 2 ;;
       --keep-orphans)
         KEEP_ORPHANS=1; shift ;;
       --drop-orphans)

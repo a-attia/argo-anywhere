@@ -706,6 +706,176 @@ api-design-for-researchers reference, since the discipline
 applies broadly to any scientific-computing script that
 interacts with user-owned config files or shared state.
 
+### D-017 — Per-tool default scope policy; conflict-detection before write (2026-05-... [Phase 4 v2.2.0])
+
+**Status**: accepted; codified by Phase 4 B1a (`claudecode_pick_scope`
+rewrite + new `_claudecode_check_conflicts` + new
+`prompt_scope_switch` helper in Section 11).
+
+**Context.** The v2.0.0 H6 audit fix made claudecode's auto-default
+"always project" to avoid a documented silent-correctness landmine:
+writing `env.ANTHROPIC_AUTH_TOKEN` to global `~/.claude/settings.json`
+could be silently shadowed by Claude Code's `~/.claude.json` OAuth
+token (per docs the env-var should win; in real-world Phase 2b
+live test #1 we observed shadowing). The v2.0.0 fix is correct
+for users WITH a personal subscription, but inconvenient for
+fresh-install users who came to argo-anywhere first (forces them
+to be in a specific directory to invoke `claude`; surprises them
+with an OAuth-flow prompt when they cd elsewhere).
+
+Phase 4 generalises scope handling across multiple tools (opencode,
+claudecode, future aider/cursor) and revisits the default policy
+with the wider lens.
+
+**Decision.** Default scope is **per-tool-declared with documented
+rationale**, NOT script-wide-uniform. Conflict-detection runs in
+ALL branches (explicit `--scope` AND auto-default): if a conflict
+is detected, the user gets a scope-switch prompt
+(`prompt_scope_switch`) to keep / switch / abort.
+
+* **claudecode** uses HYBRID auto-default:
+  * `--scope` / `ARGO_ANYWHERE_SCOPE` / `CLAUDECODE_SCOPE` (legacy)
+    set explicitly → use that value.
+  * Else if `~/.claude.json` exists (OAuth state present) →
+    default to **project** (preserve subscription; H6 rationale).
+  * Else (fresh install, no OAuth state) → default to **global**
+    (convenience: `claude` works from any directory).
+* **opencode** default is **global** (no OAuth-state concern;
+  opencode is global-only in B1a; B1b will add project support but
+  global remains the default).
+* **Future tools** declare their default with an inline rationale
+  comment block in their `<name>_pick_scope()`.
+
+Conflict-detection checks (per claudecode):
+* **A.2** (global): `~/.claude.json` exists (OAuth state) → warn
+  about OAuth precedence; offer switch to project.
+* **A.1** (global): `~/.claude/settings.json` has content → warn
+  about content collision; offer switch to project (or proceed
+  through `handle_config_file`'s `[k/b/d/m/a]` content prompt).
+* **B.2** (project): cwd doesn't look like a project (no `.git`
+  ancestor; no common project manifests; cwd != HOME) → warn;
+  offer switch to global.
+
+**Two-prompt model (D-015 alignment).** The scope-switch prompt
+fires FIRST when `<name>_pick_scope` detects a conflict; it uses
+stable letters `[k]eep-current-scope / [s]witch-to-other / [a]bort`.
+Once scope is resolved, `handle_config_file` runs with its existing
+unchanged `[k/b/d/m/a]` content prompt. Worst case: two simple
+prompts; each unambiguous. D-015's "scope-keyed not action-keyed"
+discipline is preserved (letter meanings never change with
+context).
+
+**Alternatives considered.**
+
+1. **Default global for all tools (proposed but rejected on review)**:
+   would re-expose claudecode users with personal subscriptions to
+   the H6 silent-shadowing landmine on the auto-default path. The
+   conflict-detection prompt is the safety net, not the primary
+   defense; a user who hits the prompt and chooses `[k]eep` walks
+   into the landmine. Per-tool defaults preserve the safe-by-default
+   property.
+
+2. **Combined-prompt extending `[k/b/d/m/a]` with scope letters**
+   (proposed but rejected on review): reintroduces the
+   action-vs-scope-letter confusion D-015 specifically removed; the
+   `[u]se-once` semantic for cross-tool is genuinely ambiguous (three
+   possible interpretations, none cleanly right).
+
+3. **Keep H6 unchanged**: works for claudecode but doesn't generalise
+   to other tools, and doesn't address the legitimate "fresh install
+   convenience" case.
+
+**Consequences.**
+
+* Claudecode users who relied on auto-default project may now see
+  global default on fresh installs (no OAuth state) — `docs/UPGRADING.md`
+  v2.2.0 section documents this. The conflict-detection runs in all
+  branches; users who later run `claude auth login` while having
+  used `--scope global` get the scope-switch prompt on the next
+  `client` invocation.
+* Per-tool API contract gains a new `<name>_scope_values()` function
+  (D-018) and the recommended `<name>_pick_scope()` is augmented
+  with conflict-detection (using `prompt_scope_switch`).
+* H6 audit STATUS gets a "REVISED in Phase 4 v2.2.0" addendum
+  preserving the v2.0.0 history while documenting the design
+  evolution.
+
+### D-018 — Per-tool scope vocabulary contract (2026-05-... [Phase 4 v2.2.0])
+
+**Status**: accepted; codified by Phase 4 B1a (new
+`<name>_scope_values()` per-tool functions; new
+`_validate_scope_for_tool` helper; CLI parser refactored to
+accept any string and defer validation to per-tool stage).
+
+**Context.** Pre-Phase-4, `--scope project|global` was validated
+in the CLI parser against a hardcoded literal set. This worked
+when only Claude Code consumed scope, but doesn't generalise to
+future tools whose scope vocabularies differ (aider has
+`home|project|cwd`; OpenCode has 8 tiers per upstream docs).
+
+**Decision.** Each tool declares its accepted `--scope` values via
+a `<name>_scope_values()` function (returns a space-separated
+list). The CLI parser accepts any non-empty string at parse time
+and stores into `_SCOPE_OVERRIDE`. Per-tool validation happens at
+the picker stage (or at setup-time for tools without a picker)
+via `_validate_scope_for_tool <tool> <scope>`, which calls
+`<tool>_scope_values()` and dies with a clear "accepted values: X
+Y Z" message on rejection. Validation deferred to per-tool stage
+because `--scope` and `--cli-tool` can arrive in either order on
+the command line; both must be known before validation can run.
+
+**Consequences.**
+
+* New per-tool `<name>_scope_values()` function MUST be declared
+  for every tool, even tools with a single-value vocabulary (e.g.
+  opencode in B1a returns just `global`). Single-value vocabulary
+  is still validated to catch typos like `--cli-tool opencode --scope projct`.
+* Test plan for B1a includes per-tool vocabulary validation
+  (acceptance of valid values; clear die on invalid values; clear
+  die on unknown tool name).
+* AGENTS.md per-tool API contract gains a new bullet for
+  `<name>_scope_values()` as the fifth required function.
+
+### D-019 — Deprecate `CLAUDECODE_SCOPE`; replace with `ARGO_ANYWHERE_SCOPE` + internal `_SCOPE_OVERRIDE` (2026-05-... [Phase 4 v2.2.0])
+
+**Status**: accepted; codified by Phase 4 B1a (legacy snapshot in
+Section 1 + promotion in Section 6; new `_SCOPE_OVERRIDE` global;
+`claudecode_pick_scope` reads new names; legacy alias honored with
+one-time WARN per session).
+
+**Context.** Pre-Phase-4, the env var was `CLAUDECODE_SCOPE`
+(per-tool-named per D-009's convention; per-tool naming made sense
+when only Claude Code consumed scope). Phase 4 generalises scope
+across tools, so the env var should migrate to the shared
+`*_ANYWHERE_*` namespace.
+
+**Decision.** Two-layer naming:
+
+* **User-facing env var: `ARGO_ANYWHERE_SCOPE`**. Matches D-009's
+  namespace convention. Settable in shell rc files; settable
+  inline.
+* **Internal script global: `_SCOPE_OVERRIDE`**. Set by the
+  `--scope` CLI flag (per-tool-agnostic storage). Per-tool
+  `<name>_pick_scope` reads `_SCOPE_OVERRIDE` first, then
+  `ARGO_ANYWHERE_SCOPE`, then per-tool auto-default.
+* **Legacy alias: `CLAUDECODE_SCOPE`**. Honored via two-stage
+  promotion (Section 1 snapshot + Section 6 promotion with
+  `_warn_legacy_env CLAUDECODE_SCOPE ARGO_ANYWHERE_SCOPE`).
+  Promotion only fires when the new name is empty AND the legacy
+  is set. One-time WARN per session.
+* **Removal target**: "whenever v3.0.0 ships" (no fixed schedule).
+  Matches D-013's two-generation legacy-alias discipline.
+
+**Consequences.**
+
+* Users with `export CLAUDECODE_SCOPE=global` in their shell rc
+  files see one WARN per session; functionality is preserved until
+  v3.0.0.
+* `docs/UPGRADING.md` v2.2.0 section documents the rename.
+* The internal `_SCOPE_OVERRIDE` follows the underscore-prefix
+  convention already established for `_INVOKED_MODE`,
+  `_INVOKED_CLI_TOOL`, `_PICKED_NODE`, etc.
+
 ---
 
 ## 8. Code-paper coupling

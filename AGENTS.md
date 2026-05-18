@@ -396,8 +396,9 @@ today; aider, cursor, generic planned). Each tool defines:
 
 - **`setup_<name>_cli_tool()`** — top-level entry point invoked by the
   dispatcher (`do_post_tunnel_for_cli_tool`). MUST be idempotent.
-  Calls `ensure_<name>_installed`, then
-  `handle_config_file <path> <desc> write_<name>_config`. Reads
+  Calls `<name>_pick_scope()` (if applicable; B1a Phase 4 moved this
+  BEFORE `ensure_<name>_installed`), then `ensure_<name>_installed`,
+  then `handle_config_file <path> <desc> write_<name>_config`. Reads
   `PROXY_PORT`, `ANL_USERNAME`, `ARGO_ANYWHERE_USER` from script-level
   globals.
 - **`ensure_<name>_installed()`** — install-or-detect the tool binary.
@@ -409,6 +410,13 @@ today; aider, cursor, generic planned). Each tool defines:
   one-arg destination path; everything else flows in via globals. Use
   a Python heredoc for non-trivial JSON/YAML/TOML merging (preserves
   user-owned keys; we only own the few keys we need).
+- **`<name>_scope_values()`** — D-018 (Phase 4 B1a): declares the
+  space-separated list of legal `--scope` values for this tool. Used
+  by `_validate_scope_for_tool` (called from `<name>_pick_scope` for
+  tools with multiple scopes, OR from `setup_<name>_cli_tool` directly
+  for tools with a single scope). Even tools with a single scope MUST
+  declare this so the per-tool vocabulary validation catches typos
+  like `--cli-tool opencode --scope projct`.
 - **`<name>` row in the `CLI_TOOLS_AVAILABLE` array** (display order
   + picker label).
 - **A `<name>` arm in `do_post_tunnel_for_cli_tool`** that calls
@@ -422,7 +430,34 @@ Optional but conventional:
   `_<NAME>_SCOPE_PATH` and `_<NAME>_SCOPE_NAME` for the writer to
   consume — DO NOT capture via `$()` (the function may need to prompt
   the user; subshell capture would eat the prompt). See
-  `claudecode_pick_scope` for the reference implementation.
+  `claudecode_pick_scope` for the reference implementation. Per D-017,
+  the function should (a) resolve the intended scope from
+  `_SCOPE_OVERRIDE` / `ARGO_ANYWHERE_SCOPE` / per-tool auto-default,
+  (b) validate against `<name>_scope_values()`, (c) detect conflicts
+  (existing files; OAuth state; project-shadow), (d) invoke
+  `prompt_scope_switch` on conflict to let the user keep/switch/abort.
+
+### Scope handling: D-017 + D-018 + D-019 (Phase 4 v2.2.0)
+
+- **`--scope <value>`** CLI flag (and `ARGO_ANYWHERE_SCOPE` env var; D-019
+  user-facing namespace). Value semantics are per-tool: each tool
+  declares its accepted values via `<name>_scope_values()`. The CLI
+  parser accepts any non-empty string at parse time; per-tool
+  validation happens at the picker/setup stage so it can run after
+  both `--scope` AND `--cli-tool` have been observed (flag order is
+  not constrained).
+- **`_SCOPE_OVERRIDE`** is the internal global where the CLI parser
+  stores `--scope <value>`. Per-tool pick_scope reads it (preferred)
+  or `ARGO_ANYWHERE_SCOPE` (fallback to env-set value).
+- **`CLAUDECODE_SCOPE`** is deprecated (was the pre-Phase-4 per-tool
+  env var). Honored with one-time WARN per session via the Section 6
+  promotion block (`_warn_legacy_env CLAUDECODE_SCOPE ARGO_ANYWHERE_SCOPE`).
+  Removal target: "whenever v3.0.0 ships" (no fixed schedule).
+- **Per-tool default scope (D-017)** is HYBRID for claudecode: explicit
+  > `~/.claude.json`-present → project (safety; preserves personal
+  subscription) > else global (convenience for fresh installs). For
+  opencode, default is global (no OAuth state to preserve; opencode is
+  global-only until B1b adds project support).
 
 ### Single-instance constraint (one argo-proxy + one tunnel per user per node)
 
