@@ -449,7 +449,7 @@ place by design — see the per-test cleanup note at the end of
 Test 7).
 
 **Important behavioral clarification** (post-Test-8 amendment;
-commit `<filled below>`): the original v2.2.0-RC `[m]igrate`
+commit `acf0722`): the original v2.2.0-RC `[m]igrate`
 confirmation message said "Will canonicalize all client configs
 on port N this run", which overpromised. `[m]igrate`'s actual
 semantic is narrower:
