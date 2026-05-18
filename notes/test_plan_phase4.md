@@ -83,8 +83,25 @@ zsh tokenizes `(parens)` inside `#` comments as filename-attribute
 modifiers and aborts the line. Read the per-line annotations as
 narrative above each block instead.)
 
-`port` may not exist if you've never run a v2.2.x build; `user`
-and `node` exist from any prior v2.x run.
+Three categories of state to capture:
+
+* **Script state** — `~/.config/argo_anywhere/` cache files (`port`,
+  `user`, `node`). The `port` file may not exist if you've never
+  run a v2.2.x build; `user` and `node` exist from any prior v2.x
+  run.
+* **Claudecode files** — two SEPARATE files with similar names
+  that the test plan keeps distinct:
+  * `~/.claude.json` — the OAuth state cache (single file at
+    HOME). Mere presence is D-017 signal; we never read its
+    contents for proxy settings.
+  * `~/.claude/settings.json` — the global SETTINGS file (inside
+    the `.claude/` directory). This is what
+    `CLAUDECODE_GLOBAL_CONFIG` (argo_anywhere.sh:342) points at
+    and what `_get_port_from_claudecode_config` reads for D-021
+    enumeration. May or may not exist depending on whether you've
+    ever run `--cli-tool claudecode client` through us.
+* **Opencode file** — `~/.config/opencode/config.json` (always at
+  this path; opencode has no separate OAuth state).
 
 ```sh
 ls -la ~/.config/argo_anywhere/
@@ -94,7 +111,10 @@ cat ~/.config/argo_anywhere/node
 ls ~/.claude.json 2>/dev/null && echo "claudecode OAuth state present" \
                               || echo "no claudecode OAuth state"
 ls ~/.claude/settings.json 2>/dev/null \
-   && python3 -c 'import json; print(json.load(open("/Users/'$USER'/.claude/settings.json")).get("env", {}))'
+   && python3 -c 'import json; print(json.load(open("/Users/'$USER'/.claude/settings.json")).get("env", {}))' \
+   || echo "no ~/.claude/settings.json (claudecode global proxy config); check for .anl backup"
+ls ~/.claude/settings.json.anl 2>/dev/null \
+   && echo "  ... but settings.json.anl backup exists (Test 7 scenario b)"
 ls ~/.config/opencode/config.json 2>/dev/null \
    && grep baseURL ~/.config/opencode/config.json
 ```
@@ -307,23 +327,75 @@ fix; no behavior change.
 
 ## Test 7: cross-client coherence — status reports disagreement
 
-Verify D-021 passive reporting. Requires deliberate misconfiguration.
+Verify D-021 passive reporting. Requires deliberate misconfiguration
+of an active claudecode global config that disagrees with the
+resolved PROXY_PORT.
 
-Setup (only if claudecode global config exists; otherwise SKIP):
+**File-name clarification** (important; the snapshot block at the
+top of this test plan was historically ambiguous):
+
+* `~/.claude.json` — Claude Code's OAuth state cache (single JSON
+  file at HOME). We treat its mere PRESENCE as a D-017 signal
+  (present → claudecode default scope flips to project for OAuth
+  safety) but never read its contents for proxy settings.
+* `~/.claude/settings.json` — Claude Code's global SETTINGS file
+  (inside the `.claude/` directory). This is what
+  `CLAUDECODE_GLOBAL_CONFIG` points at (argo_anywhere.sh line 342)
+  and what `_get_port_from_claudecode_config` reads to surface
+  the configured proxy port for D-021 enumeration.
+
+Test 7 operates on the SETTINGS file, not the OAuth state file.
+
+**Setup — three scenarios depending on what's on disk:**
+
+(a) `~/.claude/settings.json` exists AND has `env.ANTHROPIC_BASE_URL`:
+the test plan's original path. Capture the port, edit to a wrong
+port, restore in cleanup.
+
+(b) `~/.claude/settings.json` is missing but a backup exists at
+`~/.claude/settings.json.anl` (a parked claudecode config from a
+prior setup): copy `.anl` to `settings.json`, edit the port, run
+the test, `rm settings.json` to return to baseline state.
+
+(c) Neither file exists and you've never set up claudecode through
+us: SKIP this test (creating a fresh `~/.claude/settings.json`
+would make Claude Code itself start reading it, which is a
+side-effect you may not want).
+
+Use the snippet matching your scenario.
+
+**Scenario (a)** — settings.json present:
 
 ```sh
-ORIG_CC_PORT="$(python3 -c 'import json; \
-  print(json.load(open("/Users/'$USER'/.claude/settings.json"))["env"].get("ANTHROPIC_BASE_URL", "MISSING"))')"
-# Capture current; if MISSING skip this test.
-
-# Edit claudecode global to a wrong port:
-python3 -c '
+ORIG_CC_URL="$(python3 -c "
 import json, pathlib
-p = pathlib.Path("/Users/'$USER'/.claude/settings.json")
+d = json.loads(pathlib.Path.home().joinpath('.claude/settings.json').read_text())
+print(d.get('env', {}).get('ANTHROPIC_BASE_URL', 'MISSING'))
+")"
+echo "captured original: $ORIG_CC_URL"
+# Edit claudecode global to a wrong port (no /v1 suffix; Claude Code
+# appends /v1/messages itself per the write_claudecode_config
+# contract):
+python3 -c "
+import json, pathlib
+p = pathlib.Path.home() / '.claude/settings.json'
 d = json.loads(p.read_text())
-d.setdefault("env", {})["ANTHROPIC_BASE_URL"] = "http://localhost:65999/v1"
+d.setdefault('env', {})['ANTHROPIC_BASE_URL'] = 'http://localhost:65999'
 p.write_text(json.dumps(d, indent=2))
-'
+"
+```
+
+**Scenario (b)** — settings.json.anl backup present:
+
+```sh
+cp ~/.claude/settings.json.anl ~/.claude/settings.json
+python3 -c "
+import json, pathlib
+p = pathlib.Path.home() / '.claude/settings.json'
+d = json.loads(p.read_text())
+d.setdefault('env', {})['ANTHROPIC_BASE_URL'] = 'http://localhost:65999'
+p.write_text(json.dumps(d, indent=2))
+"
 ```
 
 Trigger:
@@ -338,7 +410,7 @@ bash argo_anywhere.sh status 2>&1 | tail -20
 [warn] Cross-client port disagreement detected (D-021):
 [warn]   Resolved port (cache / CLI / env / default): <N>
 [warn]   Disagreeing client config(s):
-[warn]     claudecode global 65999 /Users/.../claude/settings.json
+[warn]     claudecode global 65999 /Users/.../.claude/settings.json
 [warn]   Run 'argo_anywhere.sh client' to canonicalize via the [m/u/k/a] prompt.
 ```
 
@@ -347,14 +419,23 @@ from v2.1 semantics).
 
 **Cleanup**:
 
+Scenario (a) — restore the captured original:
+
 ```sh
-python3 -c '
+python3 -c "
 import json, pathlib
-p = pathlib.Path("/Users/'$USER'/.claude/settings.json")
+p = pathlib.Path.home() / '.claude/settings.json'
 d = json.loads(p.read_text())
-d.setdefault("env", {})["ANTHROPIC_BASE_URL"] = "'$ORIG_CC_PORT'"
+d.setdefault('env', {})['ANTHROPIC_BASE_URL'] = '$ORIG_CC_URL'
 p.write_text(json.dumps(d, indent=2))
-'
+"
+```
+
+Scenario (b) — delete the temporary file to return to baseline
+(`.anl` backup remains parked):
+
+```sh
+rm ~/.claude/settings.json
 ```
 
 ---
@@ -365,7 +446,8 @@ Verify D-021 proactive prompt. Requires deliberate misconfiguration
 (reuse Test 7's setup) **and** a willingness to either accept the
 canonical-rewrite outcome or abort the prompt.
 
-Setup: re-introduce the disagreement per Test 7.
+Setup: re-introduce the disagreement per Test 7's matching scenario
+(a or b).
 
 Trigger:
 
