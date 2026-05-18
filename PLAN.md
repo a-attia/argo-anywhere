@@ -1228,6 +1228,39 @@ Release process:
    a CSPO threshold of ~10 attempts/hour as the floor. The actual
    threshold isn't published. If the assumption proves wrong (either
    way), TTL constants need adjustment.
+6. **argo-shim comparative-audit follow-up (SH-* items)**:
+   `docs/AUDIT_2026-05-18_argo-shim-comparison.md` files the
+   comparative audit + scrutiny + per-item disposition. v2.2.1 picks
+   up SH-04 (inline `lsof`+`ps` in port-collision) + SCOPE-NOOP
+   (spurious scope-conflict prompt when writer would no-op; surfaced
+   during Phase 4 Test 12 live test). v2.3 picks up SH-01 (random
+   `apiKeyHelper` token; supersedes H7 privacy warning), SH-02
+   (`CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default), SH-03 (`no_proxy`
+   injection + `HTTP_PROXY` detection), and the opus-4-7
+   auto-default fix (pre-populate
+   `env.ANTHROPIC_MODEL=claude-sonnet-4-6` per the upstream-stack
+   limitation documented in `docs/LIMITATIONS.md`). Phase C
+   local-shim mode is REJECTED with the four-point rationale in
+   the audit Section 4. As each SH-* item closes, a STATUS block
+   appended to the audit Section 7 records the closure commit
+   (mirrors `AUDIT_2026-05-12.md` STATUS convention).
+7. **Upstream-stack opus-4-7 + `thinking.type.enabled`**: surfaced
+   during the v2.2.0 release-gate live test. Anthropic Vertex
+   rejects `thinking.type.enabled` for `claude-opus-4-7` (requires
+   `thinking.type.adaptive`); argo-proxy correctly surfaces as
+   SSE `event: error` with HTTP 200; Claude Code 2.1.x fails to
+   parse the SSE error event and reports "API returned empty or
+   malformed response (HTTP 200)." Documented in
+   `docs/LIMITATIONS.md` "Upstream stack" section with verified
+   workarounds (`claude --model claude-sonnet-4-6` or
+   `env.ANTHROPIC_MODEL=claude-sonnet-4-6`). Auto-default fix
+   queued for v2.3. Not actionable at the argo-anywhere layer
+   beyond the auto-default; the root cause sits at Anthropic
+   Vertex (model-specific `thinking.type` validation) and at
+   Claude Code 2.1.x (SSE `event: error` parsing). Potential
+   `Oaklight/argo-proxy` upstream fix would be a translation-layer
+   workaround (rewrite `thinking.type.enabled` →
+   `thinking.type.adaptive` for opus-4-7 on the fly).
 
 ---
 

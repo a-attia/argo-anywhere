@@ -292,17 +292,192 @@ won't overwrite the mode on subsequent writes (it uses `cp` /
 
 **Roadmap**: not changing.
 
+## Upstream stack: argo-proxy + AI CLI tools
+
+These are limitations rooted in the upstream stack (Anthropic Argo
+gateway, `Oaklight/argo-proxy`, the AI CLI tools themselves) rather
+than in argo-anywhere. They surface through argo-anywhere because
+that's the layer the user invokes, but the root cause + the fix
+sit upstream.
+
+### Claude Code v2.1.x + `claude-opus-4-7` returns "API returned empty or malformed response (HTTP 200)"
+
+**Surfaced** during the v2.2.0 release-gate live test
+(2026-05-18). The user runs `claude` against the proxy and gets:
+
+```
+API Error: API returned an empty or malformed response (HTTP 200)
+— check for a proxy or gateway intercepting the request
+```
+
+**Diagnosed** by enabling `verbose: true` on the on-node argo-proxy
+and tracing the request/response cycle:
+
+1. Claude Code 2.1.143 sends `POST /v1/messages` with
+   `thinking: {"type": "enabled", "budget_tokens": N}` when
+   targeting `claude-opus-4-7`.
+2. ANL's Argo / Vertex deployment rejects with HTTP 400:
+   ```
+   "thinking.type.enabled" is not supported for this model.
+   Use "thinking.type.adaptive" and "output_config.effort" to
+   control thinking behavior.
+   ```
+3. argo-proxy v3.x correctly surfaces the upstream error as a
+   SSE `event: error` payload with HTTP 200 status (which is the
+   correct shape per the SSE specification — the HTTP transport
+   succeeded; the application-level error is the body).
+4. Claude Code 2.1.143 fails to parse the `event: error` SSE
+   shape (it expects `message_start` / `content_block_*` /
+   `message_stop`) and surfaces "API returned an empty or
+   malformed response (HTTP 200)."
+
+**Verified workaround**: run Claude Code with any non-opus-4-7
+model. We tested:
+
+```sh
+claude --model claude-sonnet-4-6      # works
+claude --model claude-haiku-4-5       # works
+claude --model claude-opus-4-1        # works
+claude --model claude-opus-4-7        # fails reliably
+```
+
+Switching to opus-4-7 mid-session via `/model claude-opus-4-7`
+also reliably reproduces the failure.
+
+**Persistent workaround**: add to the `env` block in
+`~/.claude/settings.json` (or the project-scope equivalent):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_MODEL": "claude-sonnet-4-6",
+    "ANTHROPIC_BASE_URL": "http://localhost:64742",
+    "ANTHROPIC_AUTH_TOKEN": "your-anl-username"
+  }
+}
+```
+
+The `ANTHROPIC_MODEL` setting overrides Claude Code's default
+model selection for every session.
+
+**Why we don't fix it upstream-of-us**:
+
+- The bug is in the Anthropic Vertex deployment's `thinking.type`
+  validation (rejecting `enabled` for opus-4-7) AND in Claude Code
+  2.1.x's SSE error-event handling. Neither is something argo-anywhere
+  can fix at our layer.
+- argo-proxy is doing the right thing by surfacing the upstream
+  error as an SSE error event (RFC-compliant; the SSE spec
+  explicitly defines `event: error` as a valid payload type).
+- Hiding the error by retrying without `thinking` would be a
+  silent correctness regression (the user asked for thinking;
+  giving them a response without it is wrong).
+
+**Auto-default fix queued for v2.3**: pre-populate
+`env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `write_claudecode_config`
+(with a one-line comment marker the user can delete to opt back
+into Claude Code's default). This eliminates the foot-gun for
+every user without requiring them to know about the underlying
+bug. See [`PLAN.md`](../PLAN.md) Section 4 (Milestones) v2.3 row.
+
+**Tracking**: candidate upstream issue at `Oaklight/argo-proxy`
+issue #120 ("Opus 4.7 not working with claude-code"); the root
+cause is upstream of argo-proxy too (Anthropic Vertex model
+validation + Claude Code SSE parsing), so an argo-proxy fix would
+have to be a translation-layer workaround (rewrite
+`thinking.type.enabled` → `thinking.type.adaptive` for opus-4-7
+on the fly).
+
+### Vertex returns HTTP 500 on large non-streaming `/messages` requests
+
+**Symptom**: Anthropic Messages requests with `stream: false` and
+large input (typically a file-read tool result of ~100KB+ or a
+web-search tool result of comparable size) fail with HTTP 500
+after ~10 minutes of upstream processing. Originally documented
+by the `argo-shim` project's README as a fixed known issue.
+
+**Status in argo-anywhere**: **already mitigated upstream** by
+`argo-proxy` v3.x's `anthropic_stream_mode: force` default. When
+`argo-proxy` sees `stream: false`, it transparently forces
+`stream: true` on the upstream Vertex request and reassembles the
+SSE event stream back into a single JSON response for the client.
+This bypasses Vertex's 10-minute non-streaming timeout entirely.
+
+**What you need to do**: ensure your on-node `argo-proxy` is
+v3.0.0 or newer. The script's bootstrap installs `argo-proxy` via
+`pip` from PyPI without a version pin, so fresh installs get the
+latest stable; you can verify with:
+
+```sh
+ssh -J <user>@logins.cels.anl.gov <user>@<node> 'argo-proxy --version'
+```
+
+Older `argo-proxy` versions (pre-v3.0.0) had different schema
+defaults and may not have this mitigation. If you see Vertex 500
+errors on large non-streaming requests, the fix is to update
+`argo-proxy` on the compute node:
+
+```sh
+ssh -J <user>@logins.cels.anl.gov <user>@<node> 'argo-proxy update install'
+```
+
+You can also override the behavior explicitly by adding
+`anthropic_stream_mode: passthrough` (or `retry`) to
+`~/.config/argoproxy/config.yaml` on the node, but the default
+`force` is the right value for almost all users.
+
+**Why we don't add a local-shim layer**: see
+[`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](AUDIT_2026-05-18_argo-shim-comparison.md)
+Section 4. Briefly: the `argo-shim` project does this at the
+laptop layer; we don't because (a) argo-proxy already solves it
+at the right layer (server-side), (b) adding a second proxy layer
+on the laptop would break our single-file `curl`-and-run
+distribution (D-001), and (c) the maintenance cost of a second
+lifecycle / second crash mode is much larger than the user-facing
+benefit.
+
+### Empty `thinking` blocks in cached conversation turns (open question)
+
+**Reported pattern** (in the `argo-shim` project, not yet
+independently verified by us): when extended-thinking is enabled
+across multiple turns, Argo / Vertex may strip the `thinking`
+content from cached previous turns but preserve the empty block
+structure. When the next request replays those turns, the empty
+blocks trigger an API rejection that silently breaks the session.
+
+**Status in argo-anywhere**: **not independently confirmed**. We
+haven't surfaced this pattern in any of our own live tests through
+v2.2.0. If you encounter it, please file an issue at
+<https://github.com/a-attia/argo-anywhere/issues> with the
+session transcript + the argo-proxy verbose log entries; we'll
+escalate to `Oaklight/argo-proxy` with the supporting evidence.
+
+**Tracking**: not currently filed at `Oaklight/argo-proxy`; would
+need a real-world reproducer to file.
+
+**Why we don't pre-emptively work around it**: see Vertex 500
+above. The fix belongs upstream (at argo-proxy or at Anthropic);
+adding a local-shim layer in argo-anywhere to compensate is the
+wrong layer and would break D-001.
+
 ## Where to read more
 
 - [`README.md`](../README.md) — top-level user-facing entry point.
-- [`docs/UPGRADING.md`](UPGRADING.md) — v1.x → v2.0 migration guide.
+- [`docs/UPGRADING.md`](UPGRADING.md) — v1.x → v2.x migration guide
+  (covers v2.0, v2.1, v2.2 deltas).
 - [`docs/SECURITY.md`](SECURITY.md) — threat model + privacy posture.
 - [`docs/TESTING.md`](TESTING.md) — live-verification guide.
-- [`docs/AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md) — full audit
-  trail with all 43 findings + their resolutions.
-- [`PLAN.md`](../PLAN.md) — design decisions D-001 through D-014;
-  Open Questions section enumerates known limitations queued for
-  v2.x consideration.
+- [`docs/AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md) — fresh-eyes
+  audit with all 43 findings + their resolutions (42-of-43 closed
+  at v2.2.0).
+- [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](AUDIT_2026-05-18_argo-shim-comparison.md)
+  — comparative audit `argo-anywhere` ↔ `argo-shim` (5 SH-*
+  findings; Phase C local-shim REJECTED; slide-ready Executive
+  comparison section at the top).
+- [`PLAN.md`](../PLAN.md) — design decisions D-001 through D-021;
+  Section 4 (Milestones) enumerates v2.2.1 / v2.3 / Phase 5 / Phase 6+
+  follow-up work; Section 11 (Open Questions) enumerates broader
+  known limitations queued for consideration.
 
 If you hit a limitation that isn't documented here, file an issue
 at <https://github.com/a-attia/argo-anywhere/issues>.
@@ -311,4 +486,11 @@ at <https://github.com/a-attia/argo-anywhere/issues>.
 
 *Created 2026-05-15 by Ahmed Attia (with substantial AI assistance
 from Claude per [`CONTRIBUTORS.md`](../CONTRIBUTORS.md)) as part of
-Phase 2c+3 of the v2.0 release.*
+Phase 2c+3 of the v2.0 release. Revised 2026-05-18 (Phase 4 /
+v2.2.0) to add the "Upstream stack" section covering (a) the Claude
+Code 2.1.x + `claude-opus-4-7` + `thinking.type.enabled` HTTP-200
+silent-failure surfaced during the v2.2.0 release-gate live test,
+(b) the already-mitigated Vertex 500 on large non-streaming
+requests (handled by argo-proxy's `anthropic_stream_mode: force`
+default), and (c) the open-but-unconfirmed empty-thinking-blocks
+pattern from the argo-shim comparative audit.*

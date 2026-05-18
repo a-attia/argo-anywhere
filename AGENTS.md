@@ -127,12 +127,13 @@ Section 6.4):
 | Doc | Audience | When to read |
 |:----|:---------|:-------------|
 | [`README.md`](README.md) | New + returning humans | Project overview; quick start |
-| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-016 |
-| [`docs/UPGRADING.md`](docs/UPGRADING.md) | v1.x users upgrading | What changes for them at v2.0 |
+| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-021 |
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | v1.x users upgrading | What changes for them across v2.0 / v2.1 / v2.2 |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |
-| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Prospective users + contributors | Known limitations + rationale |
+| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Prospective users + contributors | Known limitations + rationale (includes "Upstream stack" section for argo-proxy / Claude Code limitations as of v2.2.0) |
 | [`docs/TESTING.md`](docs/TESTING.md) | Maintainers + contributors | Live-verification guide (real SSH + Duo + node) |
-| [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | Maintainers | 43-finding audit + STATUS resolutions |
+| [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | Maintainers | 43-finding fresh-eyes audit + STATUS resolutions (42-of-43 closed at v2.2.0) |
+| [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Maintainers + presenters | Comparative audit `argo-anywhere` ↔ `argo-shim` (5 SH-* findings; Phase C local-shim REJECTED; slide-ready "Executive comparison" section at top) |
 | [`docs/AUDIT_2026-05_pre-rebuild.md`](docs/AUDIT_2026-05_pre-rebuild.md) | Maintainers | Archived pre-rebuild audit (provenance only) |
 | [`CONTRIBUTORS.md`](CONTRIBUTORS.md) | Contributors | Authorship + AI co-author trailer convention |
 | [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
