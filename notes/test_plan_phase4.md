@@ -280,7 +280,7 @@ from prior runs.
 
 **Pass**: output contains exactly one line like
 ```
-[warn] CLAUDECODE_SCOPE is deprecated; use ARGO_ANYWHERE_SCOPE instead.
+[warn] env var 'CLAUDECODE_SCOPE' is deprecated; use 'ARGO_ANYWHERE_SCOPE' instead (still honored for now)
 ```
 
 **Code-review fallback**: if the WARN doesn't trigger via `status`,
@@ -292,6 +292,16 @@ grep -n "CLAUDECODE_SCOPE" argo_anywhere.sh
 
 Confirm the `_warn_legacy_env CLAUDECODE_SCOPE ARGO_ANYWHERE_SCOPE`
 call is present in the env-promotion block.
+
+**Test 6 amendment landed mid-test** (commit `1249924`): the
+grep used to spot-check `CLAUDECODE_SCOPE` references surfaced a
+stale `Canonical env: CLAUDECODE_SCOPE` line in the `--scope`
+long-help block, plus two related descriptions of the pre-D-017
+"always project" default policy and a "Currently consumed only by
+Claude Code setup" claim that B1b had invalidated. All three
+fixed; help text now reflects D-017 hybrid default + D-018
+per-tool vocabulary + D-019 canonical env. Pure documentation
+fix; no behavior change.
 
 ---
 
