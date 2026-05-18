@@ -4545,7 +4545,24 @@ _client_common_setup() {
       _ppc_choice2="$(prompt_port_choice "$PROXY_PORT" "$_alt_port" "other client config(s) (see warnings above)")"
       case "$_ppc_choice2" in
         migrate)
-          ok "Will canonicalize all client configs on port ${PROXY_PORT} this run."
+          # B3-amend (Test 8): the original message claimed "will
+          # canonicalize all client configs on port N this run" which
+          # overpromised. [m]igrate's actual semantic is narrower:
+          # the per-tool setup that THIS invocation runs (e.g. the
+          # claudecode writer if --cli-tool claudecode was chosen)
+          # will write port N to whichever scope file it's targeting.
+          # OTHER disagreeing configs across the system (e.g. opencode
+          # global when this run is claudecode-only, or claudecode
+          # global when this run resolved to claudecode project scope)
+          # remain stale. The next 'status' call will still surface
+          # them via D-021 passive reporting; the user can run
+          # 'client' again with the appropriate --cli-tool / --scope
+          # to canonicalize each remaining file. Message corrected
+          # accordingly.
+          ok "Will write port ${PROXY_PORT} to the config(s) this invocation"
+          ok "  touches. Other disagreeing configs surfaced above will"
+          ok "  remain stale until canonicalized in a separate 'client' run"
+          ok "  with the matching --cli-tool / --scope."
           ;;
         use-once)
           ok "Using port ${PROXY_PORT} for this run only; disagreeing configs untouched."

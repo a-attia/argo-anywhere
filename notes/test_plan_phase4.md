@@ -442,12 +442,40 @@ rm ~/.claude/settings.json
 
 ## Test 8: cross-client coherence — `client` proactively prompts
 
-Verify D-021 proactive prompt. Requires deliberate misconfiguration
-(reuse Test 7's setup) **and** a willingness to either accept the
-canonical-rewrite outcome or abort the prompt.
+Verify D-021 proactive prompt. Requires the same deliberate
+misconfiguration as Test 7 (and you can chain straight from Test 7
+without re-running setup, since Test 7's fixture is already in
+place by design — see the per-test cleanup note at the end of
+Test 7).
+
+**Important behavioral clarification** (post-Test-8 amendment;
+commit `<filled below>`): the original v2.2.0-RC `[m]igrate`
+confirmation message said "Will canonicalize all client configs
+on port N this run", which overpromised. `[m]igrate`'s actual
+semantic is narrower:
+
+* The per-tool setup that THIS invocation runs (e.g. the
+  claudecode writer when `--cli-tool claudecode` is chosen)
+  writes port N to whichever scope file it's targeting.
+* OTHER disagreeing configs across the system (e.g. opencode
+  global when this run is claudecode-only, or claudecode global
+  when this run resolved to claudecode project scope per D-017
+  hybrid default) remain stale.
+* The next `status` invocation will surface the still-disagreeing
+  configs via D-021 passive reporting. To canonicalize each
+  remaining file, run `client` again with the matching
+  `--cli-tool` / `--scope` combination.
+
+Updated `[m]igrate` confirmation message now says:
+```
+[ ok ] Will write port N to the config(s) this invocation
+[ ok ]   touches. Other disagreeing configs surfaced above will
+[ ok ]   remain stale until canonicalized in a separate 'client' run
+[ ok ]   with the matching --cli-tool / --scope.
+```
 
 Setup: re-introduce the disagreement per Test 7's matching scenario
-(a or b).
+(a or b) if Test 7 was cleaned up; otherwise reuse the fixture.
 
 Trigger:
 
@@ -456,26 +484,49 @@ bash argo_anywhere.sh --cli-tool claudecode client
 ```
 
 Watch for the proactive prompt around the "Cross-client port
-disagreement" warn block, then:
+disagreement" warn block. Prompt text comes from prompt_port_choice
+in Section 7 of the script and reads:
 
 ```
-[?] Resolved=<N>, claudecode global=65999. Pick one:
-    [m]igrate (rewrite to <N>), [u]se-once, [k]eep (switch to 65999), [a]bort
+[warn] Port mismatch:
+[warn]   Script wants to use         : N
+[warn]   other client config(s) (see warnings above) currently says: 65999
+
+  The client reads its baseURL once at launch, so a tunnel on N
+  while config still says 65999 means the client will fail to
+  connect (refused/wrong port). Choose:
+    [m] migrate config to N, then continue (writes the config file)
+    [u] use N for THIS run only; do NOT touch config
+        (parallel/test tunnel; the client will keep talking to 65999)
+    [k] keep config at 65999; use that port for the tunnel too
+    [a] abort; resolve manually
+Your choice [m/u/k/a]:
 ```
 
 Answer `[a]bort` to leave configs untouched, OR `[m]igrate` to let
-the script canonicalize (recommended for the test to also exercise
-the rewrite path).
+the script write the matching config file (recommended for the
+test to also exercise the write path).
 
 **Pass**:
-- The prompt fires AFTER node selection / MFA acceptance but
-  BEFORE per-tool config write.
-- `[m]igrate` choice results in claudecode config now showing the
-  canonical port; `status` afterwards shows no disagreement.
+- The prompt fires AFTER username/port resolution but BEFORE node
+  selection / MFA. (This was originally documented as "AFTER node
+  selection / MFA acceptance" but the live test on 2026-05-18
+  showed it fires earlier; updated.)
+- `[m]igrate` triggers the corrected confirmation block (above).
+- Post-`[m]igrate`, the per-tool config file the current invocation
+  targets (e.g. `./.claude/settings.local.json` under D-017's
+  OAuth-present → project branch) contains the resolved port.
+- The OTHER disagreeing config (e.g. `~/.claude/settings.json`
+  global, used as the Test 7 fixture) is unchanged; a follow-up
+  `status` still surfaces it via D-021 passive reporting.
 - `[a]bort` cleanly exits with no state changes.
 
 **Cleanup**: if `[a]bort`'d, restore per Test 7. If `[m]igrate`'d,
-nothing to clean up.
+Test 7's fixture file (e.g. `~/.claude/settings.json` from
+scenario b) remains in place and still holds the disagreeing port;
+run Test 7's cleanup snippet (`rm ~/.claude/settings.json` for
+scenario b, or the restore-from-ORIG_CC_URL snippet for scenario
+a) to return to baseline.
 
 ---
 
