@@ -1,18 +1,25 @@
 # Upgrading from v1.x to v2.x
 
 This document is for users who already have a working `argo_opencode.sh`
-v1.x install and are upgrading to `argo_anywhere.sh` v2.x (v2.0.0 or
-v2.1.0; both tagged 2026-05-15). It describes what changes you will
-see, what the script does automatically on first v2.x run, and what
-you may need to do manually. New users (no prior install) should
-follow [`README.md`](../README.md) directly.
+v1.x install and are upgrading to `argo_anywhere.sh` v2.x (v2.0.0,
+v2.1.0, or v2.2.0). It describes what changes you will see, what the
+script does automatically on first v2.x run, and what you may need to
+do manually. New users (no prior install) should follow
+[`README.md`](../README.md) directly.
 
 The v2.0.0 → v2.1.0 jump is small (7 defensive-hardening fixes; no
-state migration). The bulk of this document covers the v1.x → v2.0
-migration; the
+state migration). The v2.1.0 → v2.2.0 jump adds the per-tool scope
+framework, port-as-state caching, OpenCode project-scope, and
+cross-client port-coherence; one new on-disk artifact
+(`~/.config/argo_anywhere/port`) is created on first v2.2.0 run via
+a one-shot migration that surfaces any pre-existing disagreement.
+
+The bulk of this document covers the v1.x → v2.0 migration;
 [Behavior changes in v2.1.0](#behavior-changes-in-v210-phase-2d-defensive-hardening)
-section near the bottom adds the v2.0 → v2.1 deltas. If you're going
-directly v1.x → v2.1.0, read both.
+adds the v2.0 → v2.1 deltas, and
+[Behavior changes in v2.2.0](#behavior-changes-in-v220-phase-4-multi-tool-framework)
+adds the v2.1 → v2.2 deltas. If you're going directly v1.x → v2.2.0,
+read all three.
 
 ## TL;DR
 
@@ -389,6 +396,189 @@ above). v2.1 doesn't add any migration steps beyond what v2.0
 already required. The Phase 2d changes are all behavior
 visibility / defensive correctness, not state migration.
 
+## Behavior changes in v2.2.0 (Phase 4 multi-tool framework)
+
+v2.2.0 lands the **per-tool scope framework**, promotes the
+proxy port to **transport-layer state**, adds **OpenCode
+project-scope** support, and adds **cross-client port-coherence**
+enforcement. Five design decisions in PLAN.md cover the wire:
+D-017 (per-tool default scope policy), D-018 (per-tool scope
+vocabulary contract), D-019 (`ARGO_ANYWHERE_SCOPE` user-facing +
+`_SCOPE_OVERRIDE` internal), D-020 (port-as-state), D-021
+(cross-client coherence).
+
+### `--scope <value>` is now per-tool (not claudecode-specific)
+
+v2.0 introduced `--scope project|global` for Claude Code only.
+v2.2 generalizes the flag: each tool declares its accepted
+`--scope` values via a `<name>_scope_values()` function, and the
+CLI parser validates per-tool at the picker stage.
+
+* **claudecode** accepts `project` or `global` (unchanged from v2.0).
+* **opencode** now accepts `project` or `global` (new in v2.2; see
+  next subsection). Default is `global`.
+
+If you pass `--cli-tool X --scope Y` where `Y` is not in `X`'s
+vocabulary, the script dies with a clear "unknown scope Y for
+tool X; valid values: ..." message instead of silently writing
+the wrong file.
+
+### `CLAUDECODE_SCOPE` env var deprecated; use `ARGO_ANYWHERE_SCOPE`
+
+The v2.0 `CLAUDECODE_SCOPE` env var still works but prints a
+one-time WARN per shell session:
+
+```
+[warn] CLAUDECODE_SCOPE is deprecated; use ARGO_ANYWHERE_SCOPE instead.
+[warn]   (Honored for now; planned removal in v3.0.0.)
+```
+
+To silence the warning, update your shell rc:
+
+```sh
+# old
+export CLAUDECODE_SCOPE=global
+
+# new
+export ARGO_ANYWHERE_SCOPE=global
+```
+
+`ARGO_ANYWHERE_SCOPE` is per-invocation; you can still pass
+`--scope ...` to override it on individual commands.
+
+### OpenCode project-scope is now supported
+
+Pre-v2.2, `--cli-tool opencode` always wrote
+`~/.config/opencode/config.json` (global). v2.2 adds
+`--cli-tool opencode --scope project` which writes
+`<git-root>/opencode.json` (walked from cwd; falls back to cwd
+when not in a git repo).
+
+Default remains `global` to avoid surprising existing users.
+Conflict detection (existing files; project-shadow-of-global)
+runs in all branches; you'll get a `[k]eep / [s]witch / [a]bort`
+prompt if the project-scope write would shadow your global config.
+
+### New on-disk artifact: `~/.config/argo_anywhere/port`
+
+v2.2 promotes the proxy port to transport-layer state. Pre-v2.2,
+`PROXY_PORT` was derived from `--port` > env > **OpenCode config
+baseURL** > default. v2.2 inserts a **port cache** between env
+and OpenCode config:
+
+  1. `--port` flag
+  2. `ARGO_ANYWHERE_PORT` env
+  3. cached port (`~/.config/argo_anywhere/port`)
+  4. one-shot first-run migration (no cache; existing client
+     configs)
+  5. `PROXY_PORT_DEFAULT` (64742; true cold start)
+
+**First v2.2 run** finds the cache empty and runs the migration:
+
+* **Case 1** — no existing client configs with a baseURL: seed
+  cache with `PROXY_PORT_DEFAULT` (64742); log "no existing
+  client configs; cached default port".
+* **Case 2** — exactly one configured tool (or all agree): seed
+  cache from that config; log "migrated port N from `<tool>`
+  config to `~/.config/argo_anywhere/port`".
+* **Case 3** — multiple installed configs disagree on port: get
+  prompted with `[m]igrate / [u]se-once / [k]eep / [a]bort` to
+  pick the canonical port. `[m]igrate` seeds the cache with the
+  first-listed port; `[k]eep` seeds it with the alternative;
+  `[u]se-once` uses the first port for this run only without
+  writing the cache.
+
+**Subsequent runs** read the cache and skip the migration. The
+cache is write-through: any time `resolve_port` chooses a port
+via something other than the cache, the new value is written
+back.
+
+`clean` already sweeps the state directory as a unit; no new
+entry is needed. To delete the cache manually:
+
+```sh
+rm ~/.config/argo_anywhere/port
+```
+
+The next `client` invocation will re-run the one-shot migration.
+
+### Cross-client port-coherence is now actively enforced
+
+When you have multiple AI CLI tools installed (e.g. opencode +
+claudecode), their config files all need to point at the same
+proxy port. Pre-v2.2, only the OpenCode-vs-resolved-port case
+was detected; claudecode disagreements were silent.
+
+v2.2 adds two layers of detection (per D-021):
+
+* **`status` is now noisier** when configs disagree. After the
+  health/models box, you may see:
+
+  ```
+  [warn] Cross-client port disagreement detected (D-021):
+  [warn]   Resolved port (cache / CLI / env / default): 64742
+  [warn]   Disagreeing client config(s):
+  [warn]     claudecode global 64750 /Users/.../claude/settings.json
+  [warn]   Run 'argo_anywhere.sh client' to canonicalize via the [m/u/k/a] prompt.
+  ```
+
+  status's exit code is unchanged (disagreement is informational;
+  the proxy/tunnel can still be healthy).
+
+* **`client` startup proactively prompts** when other installed
+  configs disagree. You'll see a `[m]igrate / [u]se-once /
+  [k]eep / [a]bort` prompt with the same semantics as the
+  pre-existing OpenCode-specific prompt. `[m]igrate` rewrites
+  disagreeing configs to match the resolved port on this run;
+  `[u]se-once` skips downstream writes (configs untouched);
+  `[k]eep` switches `PROXY_PORT` to the alternative and updates
+  the cache.
+
+**Known gap**: `opencode --scope project` configs are not yet
+enumerated by the disagreement detector (only opencode-global +
+claudecode-global + claudecode-project-in-cwd). If you use
+opencode project-scope across multiple projects with different
+ports, you'll need to canonicalize manually for now. Deferred
+until a user reports being bitten.
+
+### `mode_stop` correctly identifies our own tunnels
+
+A latent v2.1.x bug: `mode_stop`'s case labels (`ours-healthy`,
+`ours-unhealthy`) never matched `local_tunnel_status`'s actual
+return values (the F1/F5 refactor in v2.1 added `-fg`/`-mux`
+suffixes:  `ours-healthy-fg`, `ours-unhealthy-fg`,
+`ours-healthy-mux`, `ours-unhealthy-mux`). Result: every "stop
+my tunnel" run fell through to the external-listener branch's
+blast-radius warning (which is the wrong message for the
+laptop-tunnel case). v2.2 fixes the labels. The user-visible
+effect: stopping your own tunnel now prints the correct concise
+"killed your tunnel; argo-proxy survives on the remote node"
+message instead of the multi-paragraph blast-radius warning.
+
+### Action required for v1.x → v2.2 upgraders
+
+The state-cache migration is automatic but you may be prompted
+on first v2.2 run if Case 3 applies (multiple installed configs
+disagree). Pick `[m]igrate` if you want the script-resolved port
+to be canonical; pick `[k]eep` if you want the alternative
+config's port to win.
+
+If you have `export CLAUDECODE_SCOPE=...` in your shell rc,
+rename it to `ARGO_ANYWHERE_SCOPE` at your leisure (the script
+will keep working with the old name until v3.0.0).
+
+If you don't use OpenCode and want to keep your existing port
+without seeding the cache to the default, run the migration
+explicitly:
+
+```sh
+mkdir -p ~/.config/argo_anywhere
+echo 64742 > ~/.config/argo_anywhere/port   # whichever port you want
+```
+
+This is equivalent to picking Case 2 with the port of your
+choice on first run.
+
 ## Things that did NOT change
 
 - **The CLI surface** for `client` / `setup` / `tunnel` / `server`
@@ -427,4 +617,8 @@ from Claude per [`CONTRIBUTORS.md`](../CONTRIBUTORS.md)) as part of
 Phase 2c+3 of the v2.0 release. Revised 2026-05-15 (post-Phase 2d)
 to add the "Behavior changes in v2.1.0" section covering the seven
 defensive-hardening fixes shipped in v2.1.0 (M6, M7, M8, M9, M10,
-L6, L10).*
+L6, L10). Revised 2026-05-18 (Phase 4 / v2.2.0) to add the
+"Behavior changes in v2.2.0" section covering the per-tool scope
+framework (D-017+D-018+D-019), port-as-state (D-020), OpenCode
+project-scope, cross-client port-coherence (D-021), and the
+`mode_stop` case-label fix.*

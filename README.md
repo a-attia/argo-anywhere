@@ -62,23 +62,29 @@ package, no multi-file install.
 
 ## Status
 
-**v2.0.0 released 2026-05-15.** The v1.x line is tagged at
-`v1.0.0`, `v1.1.0`, and `v1.2.0`; legacy users with pinned URLs to
-those tags keep working forever. v2.0 closes a 43-finding fresh-eyes
+**v2.2.0 released 2026-05-18.** Prior tags: `v1.0.0`, `v1.1.0`,
+`v1.2.0` (v1.x line; pinned URLs keep working forever), `v2.0.0`
+and `v2.1.0` (both 2026-05-15). v2.0 closed a 43-finding fresh-eyes
 audit (10 critical, 11 high, 10 medium, 10 low, 3 info) covering
 CSPO defenses, identity-handling correctness, privacy posture, and
-multi-tool support — 33 of 43 findings closed (all CRIT + all HIGH
-+ in-scope MED/LOW/INFO; 10 deferred to optional follow-up phases).
+multi-tool support. v2.1.0 added 7 defensive-hardening fixes
+(Phase 2d). v2.2.0 lands the per-tool scope framework (D-017+D-018+
+D-019), port-as-state caching (D-020, closes audit M4), OpenCode
+project-scope, and cross-client port-coherence (D-021).
+
+Audit status: **42 of 43 findings closed**; only L8 (curl|bash
+from claude.ai with no checksum) remains as documented no-fix.
 See [`PLAN.md`](PLAN.md) Section 4 (Milestones) for the full
 phase-by-phase status and roadmap;
 [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) is the audit
-trail with each finding's resolution.
+trail with each finding's resolution; [`docs/UPGRADING.md`](docs/UPGRADING.md)
+covers v1.x → v2.x and the v2.0 → v2.1 → v2.2 deltas.
 
 ## Quick start
 
 ```sh
 # 1. Download (pin to a release; tags are immutable):
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.0.0/argo_anywhere.sh \
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.2.0/argo_anywhere.sh \
      -o argo_anywhere.sh && chmod +x argo_anywhere.sh
 
 # 2. Run with explicit tool selection:
@@ -111,12 +117,24 @@ pick a compute node. Subsequent runs reuse the cached values.
 ### Currently supported `--cli-tool` values
 
 - `opencode` — [OpenCode](https://opencode.ai/) (sst/opencode-style
-  OpenAI-compatible client)
+  OpenAI-compatible client). Supports `--scope project|global` as of
+  v2.2.0; default is `global`.
 - `claudecode` — [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-  (Anthropic CLI; uses `ANTHROPIC_BASE_URL` env)
+  (Anthropic CLI; uses `ANTHROPIC_BASE_URL` env). Supports
+  `--scope project|global`; default is hybrid per [D-017](PLAN.md)
+  (`~/.claude.json` present → project for safety; absent → global
+  for convenience). See [Claude Code config scope](#claude-code-config-scope-project-vs-global)
+  below.
 
-More tools (aider, Cursor, generic OpenAI-compatible) planned for
-post-v2.0 work.
+**Roadmap**: `aider` integration is deferred to Phase 5 (no
+scheduled trigger; the v2.2 scope framework + per-tool API
+contract make it a clean ~5-function addition when a user
+requests it). Cursor is **not planned as an integrated tool**
+(upstream guidance discourages routing through LLM gateways);
+the workaround is `bash argo_anywhere.sh tunnel` and point
+cursor's OpenAI-compatible endpoint at `http://localhost:<port>/v1`
+manually. A `generic` OpenAI-compatible `--cli-tool` is under
+consideration for later releases.
 
 ## Prerequisites
 
@@ -324,28 +342,39 @@ Anthropic chose not to deep-merge it):
 
 The script writes EITHER the global file OR the project-local file
 (never the committed file — that would force your collaborators to
-also use this proxy). Since v2.0 the default is **project scope**,
-checked in this order:
+also use this proxy). Since v2.2 the default policy is **hybrid**
+(per PLAN.md decision D-017): the script picks project or global
+based on the safety risk in each situation. Checked in this order:
 
-1. **`--scope project|global` flag (or `CLAUDECODE_SCOPE` env)** —
-   explicit override wins.
+1. **`--scope project|global` flag (or `ARGO_ANYWHERE_SCOPE` env;
+   `CLAUDECODE_SCOPE` deprecated but still honored)** — explicit
+   override wins. No conflict detection is silenced; you'll still
+   be prompted `[k]eep / [s]witch / [a]bort` if the chosen scope
+   would shadow an existing config or OAuth state.
 2. **`~/.claude.json` exists** — Claude Code's auth state file,
    created by `claude auth login`. Its presence means you have a
    personal Anthropic subscription. Writing `ANTHROPIC_AUTH_TOKEN`
    to the global `~/.claude/settings.json` would shadow your OAuth
-   token and break all non-proxy Claude Code usage → **project scope
-   automatically**.
-3. **`~/.claude/settings.json` already has an `env` block** — you (or
-   another tool) put env vars in the global file; clobbering it would
-   silently remove them → **project scope automatically**.
-4. **None of the above** → **project scope** (changed in v2.0; was
-   global pre-v2.0). The new default closes a silent-correctness
-   regression: pre-v2.0 the script wrote to `~/.claude/settings.json`
-   on fresh installs; if the user later ran `claude auth login`, the
-   resulting OAuth token in `~/.claude.json` would silently take
-   precedence over `ANTHROPIC_AUTH_TOKEN` in `settings.json`,
-   neutralizing the proxy config without warning. Project scope is
-   not affected by that precedence rule.
+   token and break all non-proxy Claude Code usage → **project
+   scope automatically** (safety wins).
+3. **`~/.claude/settings.json` already has an `env` block** — you
+   (or another tool) put env vars in the global file; clobbering
+   it would silently remove them → **project scope automatically**
+   (safety wins).
+4. **None of the above** → **global scope** (changed in v2.2; was
+   project pre-v2.2). The new default is more convenient for fresh
+   installs (no per-directory `claude` invocation requirement) and
+   has no OAuth-precedence risk because there's no `~/.claude.json`
+   to be shadowed. If you later run `claude auth login`, the next
+   `client` invocation hits branch 2 and switches to project scope
+   automatically; the user is informed via the `[k/s/a]` prompt.
+
+This **revises the pre-v2.2 "always project" default** (formerly
+audit recommendation H6, closed by D-017's revised policy). The
+v2.0 / v2.1 default was strictly safer but penalized the common
+case (fresh Claude Code install with no OAuth subscription); the
+v2.2 hybrid restores convenience for that case while preserving
+all of v2.0's safety guarantees for users with OAuth state.
 
 To force one or the other:
 
@@ -358,9 +387,11 @@ When the script writes the project scope, **you must run `claude`
 from that same directory** to pick up the settings. The script prints
 which directory at the end of the setup step.
 
-If you opt back into `--scope global`, accept that you must NOT run
-`claude auth login` from that machine — the OAuth precedence rule
-will silently neutralize the proxy config the moment you do.
+If you opt back into `--scope global` AFTER `~/.claude.json`
+exists, accept that you must NOT run `claude auth login` from that
+machine — the OAuth precedence rule will silently neutralize the
+proxy config the moment you do. The conflict-detection prompt
+(branch 1 above) warns you about this.
 
 The script always preserves any non-Anthropic-Argo keys in the target
 file's `env` block (and the file's other top-level keys: `model`,

@@ -35,6 +35,7 @@ Conventions follow
 | Phase 2b | [`test_plan_phase2b.md`](test_plan_phase2b.md) | passed (2026-05-15; 3 amendments H5+P2+N1 added + verified) | H1-H8, P2, N1 |
 | Phase 2c+3 | [`test_plan_phase2c3.md`](test_plan_phase2c3.md) | passed (2026-05-15; 1 amendment L4+L5 landed mid-test) | M1-M3, M5, L1-L5, L7, L9, I1, I3 + new docs (UPGRADING/SECURITY/LIMITATIONS) + doc rewrites |
 | Phase 2d | [`test_plan_phase2d.md`](test_plan_phase2d.md) | passed (2026-05-15; 0 amendments + 2 test-plan defects identified) | M6, M7, M8, M9, M10, L6, L10 (defensive-hardening: fail louder, not silently) |
+| Phase 4 | [`test_plan_phase4.md`](test_plan_phase4.md) | queued (2026-05-18; awaiting live verification before v2.2.0 tag) | M4 (port-as-state); design decisions D-017 + D-018 + D-019 + D-020 + D-021; B0 latent `mode_stop` regression fix; B1b OpenCode project-scope |
 
 ## Index of impl + section notes
 

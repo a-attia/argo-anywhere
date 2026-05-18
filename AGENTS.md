@@ -67,13 +67,18 @@ loading set for normal sessions.
   script with inline Python heredocs for structured-data work
 - **Status**: v2.1.0 tagged + released (2026-05-15) + Phase 2e
   cosmetic I2 closure landed (2026-05-15; `_LOGGING` ->
-  `_ARGO_ANYWHERE_REEXEC` rename for clarity). Phase 2d
-  defensive-hardening landed earlier same day (3 batches; 7
-  audit closures M6-M10 + L6 + L10) + live-tested PASS on first
-  try with zero mid-test code amendments. Project state: 41 of
-  43 audit findings closed. Only Phase 4 (multi-tool: aider /
-  cursor / generic; closes M4) remains as deferred-by-trigger
-  work; L8 (curl|bash claude.ai) is documented no-fix.
+  `_ARGO_ANYWHERE_REEXEC` rename for clarity). **Phase 4
+  v2.2.0 in flight** (HEAD `549cb93`, 5 commits ahead of
+  origin): B0 (port-prompt helper factoring; `mode_stop` label
+  fix), B1a (scope framework D-017+D-018+D-019), B1b (opencode
+  project-scope), B2 (port-as-state D-020; closes audit M4),
+  B3 (cross-client coherence D-021) all landed; B4 (cursor
+  out-of-integration docs) deferred to v2.3 (docs.cursor.com is
+  webfetch-unreachable; needs manually-collected citations); B5
+  (final docs + test plan + tag) in progress. Project state:
+  42 of 43 audit findings closed (M4 newly closed by B2). Only
+  L8 (curl|bash claude.ai) remains as documented no-fix; aider
+  integration deferred to Phase 5 (no scheduled trigger).
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
   `server`, `status`, `stop`, `update-models`, `clean`, `list-tools`,

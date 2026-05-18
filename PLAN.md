@@ -1182,11 +1182,26 @@ Release process:
 1. **CITATION.cff + Zenodo handshake**: defer until first DOI release
    (v2.0.0 tag is the natural moment). Need to decide concept-DOI
    strategy (per-version vs single concept).
-2. **Phase 4 scope**: which AI CLI tools to add next, in which order?
-   Candidates: aider, cursor, generic OpenAI-compatible (would let
-   any tool that takes `OPENAI_BASE_URL` work without per-tool code).
-   Generic-first might obviate aider/cursor specific support; needs
-   investigation.
+2. **Post-Phase-4 tool expansion**: Phase 4 (v2.2.0) landed the
+   per-tool scope framework (D-017+D-018+D-019), port-as-state
+   (D-020), and cross-client coherence (D-021), establishing the
+   contract for adding new tools as ~5-function applications. Remaining
+   candidates split into three tiers by integration cost:
+   * **Phase 5 (deferred, no trigger)**: aider as a clean application
+     of the established 5-function contract (`setup_aider_cli_tool`,
+     `ensure_aider_installed`, `write_aider_config`, `aider_pick_scope`
+     if multi-scope, `aider_scope_values`). Fires when a user requests it.
+   * **v2.3 documentation work**: cursor out-of-integration docs
+     (LIMITATIONS.md section + README "Not supported" subsection +
+     PLAN entry). B4 of Phase 4 was deferred to v2.3 because
+     docs.cursor.com is JS-only and webfetch-unreachable; needs
+     manually-collected citations for upstream guidance against
+     LLM-gateway routing.
+   * **Even later**: generic OpenAI-compatible (`--cli-tool generic`
+     with a `--config-path` flag). Considered orthogonal to per-tool
+     work; would let any `OPENAI_BASE_URL`-aware tool work without
+     per-tool code, but the per-tool path remains the higher-quality
+     option for tools we explicitly support.
 3. **`update-models` per-tool generalization**: currently OpenCode-only
    because it's the only tool with a model registry the script
    manages. Claude Code uses Anthropic's resolution; aider auto-detects.
