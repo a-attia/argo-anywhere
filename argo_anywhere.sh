@@ -6805,24 +6805,31 @@ Options:
                        interactive [n]ext-free-port choice. Default:
                        PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100.
                        Canonical env: ARGO_ANYWHERE_PORT_RANGE=LO-HI.
-  --scope project|global  Per-client scope override. Currently consumed
-                       only by Claude Code setup:
-                         project -> ./.claude/settings.local.json (per-repo;
-                                    gitignored by Claude Code defaults).
-                         global  -> ~/.claude/settings.json (all projects).
-                       If unset, the script defaults to PROJECT scope
-                       (changed in v2.0; was global on fresh installs).
-                       The new default avoids a silent correctness bug
-                       where the OAuth token in ~/.claude.json (created
-                       by 'claude auth login') takes precedence over
-                       env.ANTHROPIC_AUTH_TOKEN in settings.json,
-                       neutralizing the proxy config; project scope is
-                       not affected by that precedence rule.
-                       Use --scope global if you'd rather have the
-                       config apply machine-wide (and accept that you
-                       must NOT run 'claude auth login' from this
-                       machine, or it'll silently override us).
-                       Canonical env: CLAUDECODE_SCOPE.
+  --scope project|global  Per-client scope override. Consumed by both
+                       Claude Code and OpenCode setup (per-tool vocabularies
+                       declared via <name>_scope_values(); typo'd values
+                       die loud at parse time via _validate_scope_for_tool):
+                         claudecode + project -> ./.claude/settings.local.json
+                                    (per-repo; gitignored by Claude Code defaults).
+                         claudecode + global  -> ~/.claude/settings.json
+                                    (all projects).
+                         opencode + project   -> <git-root>/opencode.json
+                                    (per-repo; cwd-anchored; falls back to cwd
+                                    when not in a git repo).
+                         opencode + global    -> ~/.config/opencode/config.json
+                                    (all directories).
+                       Default policy (per PLAN.md D-017, Phase 4 v2.2.0):
+                         * claudecode is HYBRID: explicit --scope wins; else
+                           ~/.claude.json present (OAuth state) -> project
+                           (safety; avoids shadowing your OAuth token); else
+                           global (convenience for fresh installs).
+                         * opencode default is global (no OAuth-state concern).
+                       Conflict detection (existing files; OAuth state; project
+                       shadowing global) runs in ALL branches and prompts
+                       [k]eep / [s]witch / [a]bort when applicable.
+                       Canonical env: ARGO_ANYWHERE_SCOPE. Legacy CLAUDECODE_SCOPE
+                       is honored once per session with a deprecation WARN
+                       (planned removal: v3.0.0).
   --verbose-server     Enable argo-proxy verbose logging on the compute
                        node. By default (since v2.0) the script writes
                        \`verbose: false\` in the argo-proxy config to
