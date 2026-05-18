@@ -7390,6 +7390,45 @@ main() {
     esac
   fi
 
+  # B1a-amend (Phase 4 v2.2.0 release-gate, Test 5 amendment): D-016
+  # "fail louder, not silently". The parser at line 7324 deliberately
+  # accepts any non-empty --scope value because validation depends on
+  # which tool the user picked, and --scope + --cli-tool may arrive
+  # in either order. The per-tool <name>_pick_scope functions validate
+  # via _validate_scope_for_tool when they run -- but they only run
+  # under client/setup. For other subcommands (status/stop/clean/...),
+  # a typo'd --scope was silently accepted and ignored, violating D-016.
+  #
+  # Fix: validate eagerly here once both --cli-tool and --scope are
+  # known. Branches:
+  #   * both set + subcommand consumes --cli-tool -> validate now (die
+  #     loud on typo BEFORE we touch any tunnel/config state)
+  #   * --scope set, --cli-tool set, subcommand doesn't consume tool
+  #     (e.g. status) -> validate against the named tool's vocabulary
+  #     anyway (the user's intent was clearly tool-scoped)
+  #   * --scope set, --cli-tool UNSET (will pick interactively) ->
+  #     defer to <name>_pick_scope (the picker hasn't fired yet; we
+  #     don't know which tool's vocabulary to validate against)
+  #   * --scope set, subcommand entirely ignores --scope (status/stop/
+  #     clean/list-tools/help/update-models without per-tool dispatch)
+  #     -> add an "ignored" warn alongside the existing --cli-tool one
+  #     so the user knows the typo would have died loud under client/setup
+  if [ -n "${_SCOPE_OVERRIDE:-}" ]; then
+    if [ -n "${CLI_TOOL_OVERRIDE:-}" ]; then
+      # Validate against the named tool's vocabulary regardless of mode;
+      # the user's intent was specific. _validate_scope_for_tool die's
+      # loud with a clear message including the valid values list.
+      _validate_scope_for_tool "$CLI_TOOL_OVERRIDE" "$_SCOPE_OVERRIDE"
+    fi
+    # Warn when --scope is set but the subcommand won't ACT on it
+    # (no per-tool config write happens). Matches the --cli-tool
+    # ignored-warn pattern above for consistency.
+    case "$mode" in
+      client|setup) ;;  # consumes --scope via <name>_pick_scope
+      *) warn "--scope ignored for subcommand '${mode}' (only used by client/setup)." ;;
+    esac
+  fi
+
   # Expose the invoked subcommand to cleanup_local (audit finding N1)
   # so the Ctrl+C exit summary can branch on whether we actually owned
   # a local tunnel (client/setup/tunnel) vs not (status/stop/help/...).

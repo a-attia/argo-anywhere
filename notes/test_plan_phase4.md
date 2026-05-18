@@ -77,13 +77,20 @@ grep -cE 'B0 fix|B1a|B1b|B2 (fix|refactor)|B3 (Phase 4)|D-017|D-018|D-019|D-020|
 
 Expect: 15+ marker comments.
 
-Snapshot pre-test state so any cleanup is easy:
+Snapshot pre-test state so any cleanup is easy. (Inline `# ...`
+comments are deliberately omitted from the code blocks below;
+zsh tokenizes `(parens)` inside `#` comments as filename-attribute
+modifiers and aborts the line. Read the per-line annotations as
+narrative above each block instead.)
+
+`port` may not exist if you've never run a v2.2.x build; `user`
+and `node` exist from any prior v2.x run.
 
 ```sh
 ls -la ~/.config/argo_anywhere/
-cat ~/.config/argo_anywhere/port  # may not exist if never run v2.2
-cat ~/.config/argo_anywhere/user  # exists from prior v2.x runs
-cat ~/.config/argo_anywhere/node  # exists from prior v2.x runs
+cat ~/.config/argo_anywhere/port
+cat ~/.config/argo_anywhere/user
+cat ~/.config/argo_anywhere/node
 ls ~/.claude.json 2>/dev/null && echo "claudecode OAuth state present" \
                               || echo "no claudecode OAuth state"
 ls ~/.claude/settings.json 2>/dev/null \
@@ -129,12 +136,13 @@ Verify the D-020 one-shot port migration when one tool's config
 exists and the cache is empty. **This test recreates the cache from
 scratch.**
 
-Setup:
+Setup: note the current OpenCode baseURL port before moving the
+cache aside so you have a reference value for the migration.
 
 ```sh
 mv ~/.config/argo_anywhere/port ~/.config/argo_anywhere/port.bak 2>/dev/null \
    || true
-grep baseURL ~/.config/opencode/config.json   # note current port
+grep baseURL ~/.config/opencode/config.json
 ```
 
 Trigger (no live tunnel needed; resolve_port runs in any subcommand
@@ -195,8 +203,11 @@ ARGO_ANYWHERE_PORT=65501 bash argo_anywhere.sh status 2>&1 \
 **Pass**: log line shows `Using port: 65501` with source mentioning
 `ARGO_ANYWHERE_PORT env`.
 
+Verify the cache was write-through-updated to `65501`, then restore
+the pre-test value:
+
 ```sh
-cat ~/.config/argo_anywhere/port    # should also be 65501 now (write-through)
+cat ~/.config/argo_anywhere/port
 echo "$ORIG_CACHE" > ~/.config/argo_anywhere/port
 ```
 
@@ -206,28 +217,53 @@ echo "$ORIG_CACHE" > ~/.config/argo_anywhere/port
 
 Verify D-018: per-tool vocabulary validation catches typos.
 
+**Test 5 amendment landed mid-test** (Phase 4 v2.2.0 release-gate):
+the original v2.2.0-RC at HEAD `9a0834c` deferred validation to
+each tool's `<name>_pick_scope()` function, which only ran under
+`client`/`setup`. A typo'd `--scope projct status` was therefore
+silently accepted (validator never reached), violating D-016
+"fail louder, not silently". Amendment commit `<filled-in-below>`
+adds eager validation in `main()` right after argument parsing,
+so any `--cli-tool X --scope Y` combination is validated against
+`X`'s vocabulary BEFORE the subcommand dispatches, regardless of
+mode. Subcommands that don't consume `--scope` (status/stop/
+clean/list-tools/help/update-models) additionally emit an
+"ignored for subcommand 'X'" warn alongside the existing
+`--cli-tool ignored` warn, matching the symmetry pattern.
+
+Subtests:
+
 ```sh
-bash argo_anywhere.sh --cli-tool opencode --scope projct status 2>&1 \
-  | grep -iE 'scope|invalid|valid values' || echo "NO MATCH"
+bash argo_anywhere.sh --cli-tool opencode --scope projct status
+echo "exit=$?"
 ```
 
-(Even though `status` doesn't write configs, the parser still
-validates `--scope` against the picked tool's vocabulary.)
-
-Note: validation may or may not fire at parse time depending on
-where in the picker chain status calls land; if it doesn't fire,
-re-run the same against `setup` or `client`:
+**Pass 5a**: dies loud with `[err] --scope value 'projct' is not
+valid for --cli-tool opencode. Accepted values: global project.`
+Exit code is 1.
 
 ```sh
-bash argo_anywhere.sh --cli-tool opencode --scope projct setup 2>&1 \
-  | head -20
+bash argo_anywhere.sh --cli-tool opencode --scope global status 2>&1 \
+  | grep -E 'ignored|scope|listener' | head -5
 ```
 
-Use `^C` immediately after the picker fires.
+**Pass 5b**: two warns appear in order, then the listener block
+proceeds normally:
 
-**Pass**: dies with a message naming the unknown scope and listing
-the valid values (`global project` for opencode; `global project`
-for claudecode).
+```
+[warn] --cli-tool ignored for subcommand 'status' (only used by client/setup/update-models).
+[warn] --scope ignored for subcommand 'status' (only used by client/setup).
+[argo_anywhere] Local listener on :PORT:
+```
+
+```sh
+echo | bash argo_anywhere.sh --cli-tool claudecode --scope projct setup 2>&1 | head -5
+echo "exit=$?"
+```
+
+**Pass 5c**: dies loud BEFORE the picker fires, with the same
+`Accepted values: project global` message (claudecode vocabulary
+order may differ from opencode's). Exit code is 1.
 
 ---
 
@@ -424,11 +460,11 @@ desired (use the `*.bak.*` backup the script writes automatically).
 
 Verify B0's `mode_stop` regression fix. Requires our own tunnel up.
 
-Setup:
+Setup: confirm the tunnel is up AND the listener is one of ours
+(the pid on the LISTEN row is an `ssh` process).
 
 ```sh
 bash argo_anywhere.sh status 2>&1 | grep -E 'ALL GREEN|listener'
-# Confirm tunnel is up and listener is OURS (pid is an ssh process).
 ```
 
 Trigger:
