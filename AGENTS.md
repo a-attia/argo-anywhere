@@ -65,20 +65,49 @@ loading set for normal sessions.
 - **Name**: argo-anywhere
 - **Nature**: research-software (CLI orchestrator); single-file bash
   script with inline Python heredocs for structured-data work
-- **Status**: v2.1.0 tagged + released (2026-05-15) + Phase 2e
-  cosmetic I2 closure landed (2026-05-15; `_LOGGING` ->
-  `_ARGO_ANYWHERE_REEXEC` rename for clarity). **Phase 4
-  v2.2.0 in flight** (HEAD `549cb93`, 5 commits ahead of
-  origin): B0 (port-prompt helper factoring; `mode_stop` label
-  fix), B1a (scope framework D-017+D-018+D-019), B1b (opencode
-  project-scope), B2 (port-as-state D-020; closes audit M4),
-  B3 (cross-client coherence D-021) all landed; B4 (cursor
-  out-of-integration docs) deferred to v2.3 (docs.cursor.com is
-  webfetch-unreachable; needs manually-collected citations); B5
-  (final docs + test plan + tag) in progress. Project state:
-  42 of 43 audit findings closed (M4 newly closed by B2). Only
-  L8 (curl|bash claude.ai) remains as documented no-fix; aider
-  integration deferred to Phase 5 (no scheduled trigger).
+- **Status**: **v2.2.0 RELEASED 2026-05-18** (tag at commit
+  `737563d`). Phase 4 lands the per-tool scope framework + port-
+  as-transport-state + OpenCode project-scope + cross-client
+  port-coherence on top of v2.1.0's defensive-hardening base; five
+  new design decisions D-017..D-021 in PLAN.md codify the new
+  contracts. Phase 4 batches: B0 (`ea94042`; port-prompt helper +
+  `mode_stop` case-label fix), B1a (`46c19a7`; scope framework
+  D-017+D-018+D-019) + amendments `e221847` (D-016 violation: eager
+  `--scope` validation; Test 5) + `1249924` (stale `--scope` help
+  text; Test 6), B1b (`ecc6c64`; opencode project-scope), B2
+  (`108e5d6`; port-as-state D-020; closes audit M4), B3 (`549cb93`;
+  cross-client coherence D-021) + amendment `acf0722` (`[m]igrate`
+  confirmation message overpromise correction; Test 8), B5 docs +
+  test plan + tag (`9a0834c` + `4fe613a` + `f9cbb18` + `6c0c2e4` +
+  `737563d`). Live verification per `notes/test_plan_phase4.md`:
+  ALL 12 TESTS PASS with 3 code amendments + 2 doc-only commits +
+  2 SHA backfills landed mid-test. Project state: **42 of 43 audit
+  findings closed** (M4 closed by B2; only L8 `curl|bash claude.ai`
+  remains as documented no-fix).
+- **v2.2.x roadmap**: B4 cursor out-of-integration docs deferred
+  to v2.3 (docs.cursor.com webfetch-unreachable; needs manually-
+  collected citations); SH-04 (port-collision inline `lsof`+`ps`
+  per 2026-05-18 argo-shim comparative audit) + **SCOPE-NOOP**
+  (suppress `_<tool>_check_conflicts` A.1 prompts when the
+  writer would produce a no-op against the existing target;
+  surfaced during Test 12 live test where opencode-global prompted
+  even though the existing file was already up to date) queued for
+  v2.2.1; SH-01/02/03 (auth-token rotation; `no_proxy` injection;
+  `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default) queued for v2.3.
+  Phase 5 aider integration deferred (no scheduled trigger). Phase
+  C local-shim mode REJECTED (would break D-001 single-file UX
+  and address problems already handled upstream by argo-proxy's
+  `anthropic_stream_mode: force` default).
+- **Known upstream-stack limitation surfaced during v2.2.0
+  release-gate live test**: Claude Code 2.1.x + ANL Argo gateway
+  rejects `thinking.type.enabled` on `claude-opus-4-7` (requires
+  `thinking.type.adaptive`); argo-proxy surfaces the error as a
+  SSE `event: error` with HTTP 200 (correct per SSE spec); Claude
+  Code mis-parses and reports "API returned empty or malformed
+  response (HTTP 200)". Workaround: `claude --model claude-sonnet-4-6`
+  or set `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `~/.claude/settings.json`.
+  Auto-default fix queued for v2.3 (pre-populate `env.ANTHROPIC_MODEL`
+  in `write_claudecode_config`).
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
   `server`, `status`, `stop`, `update-models`, `clean`, `list-tools`,
@@ -87,7 +116,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code today; aider/cursor/generic planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: v2.1.0 (tagged 2026-05-15)
+- **Current release**: v2.2.0 (tagged 2026-05-18)
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
 
 ### Human-facing doc map

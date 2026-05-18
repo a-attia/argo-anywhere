@@ -192,25 +192,38 @@ distribution: the per-tool API contract") for the full spec.
 
 ## 4. Milestones
 
-The active development cycle is v2.0 (audit-driven hardening + adoption
-of the scicomp-research-skills framework). Phase status as of
-2026-05-14:
+Phase status as of **2026-05-18** (post-v2.2.0 release):
 
 | Phase | Goal | Status |
 |:---|:---|:---|
-| **v1.0–v1.2** | First audited release through the per-client-symlink era | done (tagged) |
+| **v1.0–v1.2** | First audited release through the per-client-symlink era | **done** (tagged `v1.0.0`, `v1.1.0`, `v1.2.0`) |
 | **Phase 0 (v2.0 baseline)** | Pre-rewrite snapshot; audit doc | done |
 | **Phase 1 (v2.0)** | D1+D2+D4: remove symlinks, add `--cli-tool`, rename internals to `*anywhere*` | done |
-| **Phase 2a (v2.0 critical)** | Audit fixes C1, C4, C5, C7 + the P1 SIGPIPE hotfix | done; **awaiting live-test** |
-| **Phase 2b (v2.0 high)** | Audit fixes H1–H9 + P2 (verbose-default privacy) + N1 (Ctrl+C exit hint) | queued (gates on Phase 2a green light) |
-| **Phase 2c (v2.0 medium/low)** | M1–M10 + L1–L10 + I1–I3 (~23 items) | queued |
-| **Phase 3 (v2.0 docs)** | UPGRADING.md + SECURITY.md + LIMITATIONS.md + final doc rewrites | queued |
-| **v2.0.0 tag** | After all above + final live-test | queued |
-| **Phase 4 (post-v2.0)** | Add aider, cursor, generic OpenAI-compatible CLI tools | future |
+| **Phase 2a (v2.0 critical)** | Audit fixes C1, C4, C5, C7 + the P1 SIGPIPE hotfix | done (live-test passed 2026-05-14) |
+| **Phase 2b (v2.0 high)** | Audit fixes H1–H9 + P2 (verbose-default privacy) + N1 (Ctrl+C exit hint) | done (live-test passed 2026-05-15; 3 mid-test amendments H5+P2+N1) |
+| **Phase 2c+3 (v2.0 medium/low + docs)** | M1–M5, L1–L9, I1+I3 (~17 items) + UPGRADING.md + SECURITY.md + LIMITATIONS.md | done (live-test passed 2026-05-15; 1 mid-test amendment L4+L5) |
+| **v2.0.0 tag** | First v2 release | **done** (tagged `v2.0.0` 2026-05-15 at HEAD post-Phase-2c+3) |
+| **Phase 2d (v2.1)** | Defensive-hardening: M6+M7+M8+M9+M10+L6+L10 (fail louder, not silently) | done (live-test passed 2026-05-15; 0 mid-test code amendments; 2 test-plan defects) |
+| **Phase 2e (v2.1 cosmetic)** | I2 closure (`_LOGGING` → `_ARGO_ANYWHERE_REEXEC` rename) | done (commit `431c8e4`) |
+| **v2.1.0 tag** | Defensive-hardening release | **done** (tagged `v2.1.0` 2026-05-15) |
+| **Phase 4 (v2.2)** | Per-tool scope framework (D-017+D-018+D-019); port-as-state (D-020; closes audit M4); OpenCode project-scope (B1b); cross-client port-coherence (D-021); B0 latent `mode_stop` fix | done (live-test passed 2026-05-18; 3 code amendments + 2 doc-only commits + 2 SHA backfills) |
+| **v2.2.0 tag** | Multi-tool framework + scope generalization release | **done** (tagged `v2.2.0` 2026-05-18 at HEAD `737563d`) |
+| **v2.2.1 (queued)** | SH-04 inline `lsof`+`ps` in port-collision; SCOPE-NOOP suppression for `_<tool>_check_conflicts` A.1 prompts when writer would no-op (Test 12 finding) | queued; no scheduled trigger |
+| **v2.3 (queued)** | SH-01 random `apiKeyHelper` token (eliminates H7 warning); SH-02 `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default; SH-03 `no_proxy` injection + `HTTP_PROXY` detection; B4 cursor out-of-integration docs (needs manually-collected citations); auto-default `env.ANTHROPIC_MODEL=claude-sonnet-4-6` to work around the upstream-stack opus-4-7 limitation surfaced during v2.2.0 release-gate | queued |
+| **Phase 5 (deferred)** | aider integration as application of established 5-function per-tool API contract | deferred (no scheduled trigger; fires when user requests) |
+| **Phase 6+ (under consideration)** | Generic OpenAI-compatible `--cli-tool` (e.g. `--cli-tool generic --config-path <PATH>`) | under consideration |
+| **Phase C local-shim mode** | Local HTTP shim layer (stream forcing + thinking-block stripping + transparent retry) per 2026-05-18 argo-shim comparative audit | **REJECTED** — would break D-001 single-file UX and address problems already handled upstream by argo-proxy's `anthropic_stream_mode: force` default (v3.x). Documented in `docs/AUDIT_2026-05-18_argo-shim-comparison.md` (Step 4 of v2.2.0 release sequence). |
 
 Milestones are **shippable**, not commit-sized. Each phase ends with a
 live-test gate before the next starts, per the post-CSPO discipline
 adopted in the audit.
+
+**Audit closure trajectory**: 0/43 at audit (Phase 0) → 22/43 at v2.0.0
+(Phase 2c+3) → 33/43 at v2.0.0 release (corrected count) → 40/43 at
+v2.1.0 (Phase 2d) → 41/43 at v2.1.0 + Phase 2e (I2 closure) →
+**42/43 at v2.2.0** (M4 closed by Phase 4 B2's port-as-state). Only
+L8 (`curl|bash claude.ai` with no checksum) remains as documented
+no-fix (upstream installer choice; not actionable at our layer).
 
 ---
 
