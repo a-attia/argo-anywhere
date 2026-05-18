@@ -876,6 +876,108 @@ across tools, so the env var should migrate to the shared
   convention already established for `_INVOKED_MODE`,
   `_INVOKED_CLI_TOOL`, `_PICKED_NODE`, etc.
 
+### D-020 — Port as transport-layer state; closes audit M4 (2026-05-... [Phase 4 v2.2.0])
+
+**Status**: accepted; codified by Phase 4 B2 (new
+`~/.config/argo_anywhere/port` cache file + read_cached_port /
+write_port_cache helpers + resolve_port refactor + one-shot
+first-run migration).
+
+**Context.** Pre-Phase-4, the script derived `PROXY_PORT` from the
+OpenCode config baseURL: precedence was `--port flag` >
+`ARGO_ANYWHERE_PORT env` > `OpenCode config baseURL` >
+`PROXY_PORT_DEFAULT`. Audit finding M4 critiqued this as
+"OpenCode-specific in a multi-client world": a user running
+claudecode-only (no OpenCode installed) silently got
+`PROXY_PORT_DEFAULT`; if they later installed OpenCode at a
+different port the configs would drift silently. The OpenCode
+config was the de-facto source of truth for the port -- but only
+because OpenCode was the first/only tool whose config the script
+read.
+
+**Decision.** Promote the port to **transport-layer state** owned
+by the script itself, alongside the existing user / node / SSH-lock
+cache files in `~/.config/argo_anywhere/`. Per-tool client configs
+become **downstream renderings** that receive the port from the
+cache via their writers. New precedence:
+
+  1. `PORT_OVERRIDE_CLI` (set by `--port` flag)
+  2. `ARGO_ANYWHERE_PORT` env
+  3. cached port (`~/.config/argo_anywhere/port`)
+  4. one-shot first-run migration (no cache; existing client configs)
+  5. `PROXY_PORT_DEFAULT` (true cold start; no cache, no configs)
+
+The cache is write-through: whenever `resolve_port` chooses a port
+via something OTHER than the cache, the new value is written to
+the cache so subsequent invocations see it.
+
+**Three-case first-run migration** (when cache is empty):
+
+* **Case 1**: no existing client configs have a baseURL anywhere.
+  Seed cache with `PROXY_PORT_DEFAULT` (64742); log "no existing
+  client configs; cached default port N".
+* **Case 2**: exactly one client config has a baseURL (typically
+  OpenCode at this point in the project's evolution; B3 will add
+  inspectors for other tools). Seed cache from that config; log
+  "migrated port N from <tool> config to ~/.config/argo_anywhere/port".
+* **Case 3**: multiple client configs with DISAGREEING baseURLs.
+  B2 inherits the OpenCode-only inspector from pre-Phase-4; B3
+  adds per-tool inspectors and the disagreement-prompt machinery
+  (extends the existing `prompt_port_choice` from B0 to cover
+  cross-client cases). For B2, Case 3 doesn't fire because only
+  one inspector exists.
+
+**Alternatives considered.**
+
+1. **Read from all known client configs at every invocation; pick
+   first/canonical**: the original "M4 closure ambition" proposal
+   from the planning phase. Rejected because it doesn't solve the
+   underlying issue (configs ARE downstream renderings of the
+   port; the port deserves a primary home). Caching elevates the
+   port architecturally; reading-from-configs entrenches the
+   "configs are the source of truth" model.
+
+2. **Keep status quo for Phase 4; defer M4 to a later phase**:
+   considered. Rejected because Phase 4's per-tool scope framework
+   makes the cross-client port-coherence question more visible
+   (now there's a clear path to add tool N), and addressing M4
+   alongside the framework is cheaper than splitting.
+
+3. **Per-tool port cache (separate file per tool)**: never seriously
+   considered -- conflicts with the project's single-instance
+   constraint (one argo-proxy per user per node; one port per
+   tunnel; one port to rule them all). Per-tool port cache would
+   imply per-tool tunnels, which the architecture doesn't support.
+
+**Consequences.**
+
+* New cache file `~/.config/argo_anywhere/port` joins user / node /
+  ssh-fail-lock files in the same state directory. `clean` already
+  sweeps STATE_DIR as a unit; no new entry needed in the clean
+  enumeration.
+* `_ensure_state_dir` helper added in Section 5 (centralizes the L1
+  mkdir-with-stderr-capture pattern from `resolve_username` so
+  write_port_cache + future state-dir writers share the discipline).
+* `resolve_username` refactored to call `_ensure_state_dir` instead
+  of repeating the inline mkdir + die boilerplate.
+* `mode_server`'s separate port resolver (uses `yaml_scalar` against
+  argo-proxy config on the compute node) is NOT affected by D-020.
+  Documented precedence: argo-proxy config wins on-node (it's the
+  actual listener); laptop cache wins elsewhere. The two resolvers
+  can disagree if a user manually edits one of them; this is rare
+  and documented in LIMITATIONS.md (mid-session config edits are a
+  known foot-gun; not actively detected).
+* `update-models` and `status`'s "OpenCode config" line still
+  reference `OPENCODE_CONFIG` (= the global path); project-scope
+  opencode users (per B1b) will see status point at the wrong file.
+  Generalization of these consumers is out of scope for B2; would
+  need a per-tool scope-discovery pass + a --scope flag on
+  update-models (separate concern from M4's port-source question).
+
+**Closes audit finding M4** ("port resolution is OpenCode-specific
+in a multi-client world"). STATUS block added to audit doc with
+cross-reference to D-020.
+
 ---
 
 ## 8. Code-paper coupling

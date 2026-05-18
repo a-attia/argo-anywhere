@@ -299,6 +299,14 @@ STATE_DIR="${HOME}/.config/argo_anywhere"
 LEGACY_STATE_DIR="${HOME}/.config/argo_opencode"
 USER_CACHE="${STATE_DIR}/user"
 NODE_CACHE="${STATE_DIR}/node"
+# B2 (Phase 4): port becomes a transport-layer cache file per D-020.
+# Pre-Phase-4 the script derived PROXY_PORT from the OpenCode config
+# baseURL (which made the OpenCode config the de-facto source of truth
+# for the port -- M4 audit finding called this out as OpenCode-specific
+# in a multi-client world). Phase 4 elevates the port to script-managed
+# state alongside user + node; per-tool client configs become downstream
+# renderings that receive the port from the cache. Closes M4.
+PORT_CACHE="${STATE_DIR}/port"
 
 # OpenCode config paths (read by us, written by setup_opencode_cli_tool +
 # update-models). Centralized constants so future renames touch one site.
@@ -603,6 +611,27 @@ _git_root_or_cwd() {
   else
     printf '%s' "$(pwd)"
   fi
+}
+
+# _ensure_state_dir: create STATE_DIR if missing. Captures stderr from
+# mkdir and surfaces it via die() on failure, matching the L1 fix's
+# discipline (audit Phase 2c) at resolve_username -- now centralized so
+# every state-dir writer (user-cache, node-cache, port-cache, ssh-fail-lock)
+# benefits without duplicating the mkdir + die boilerplate.
+#
+# B2 (Phase 4): introduced when port-cache write joined user-cache +
+# node-cache as a third state-dir writer. Pre-B2, the L1 capture lived
+# only in resolve_username; the node-cache + lock-file writes used the
+# older `mkdir -p ... 2>/dev/null || true` no-fail pattern, which is
+# silently lossy if the state dir actually can't be created.
+#
+# Args: none. Reads STATE_DIR.
+# Returns: 0 on success; die's on failure with the actual mkdir stderr.
+_ensure_state_dir() {
+  [ -d "$STATE_DIR" ] && return 0
+  local _mk_err
+  _mk_err="$(mkdir -p "$STATE_DIR" 2>&1)" \
+    || die "Cannot create state dir '$STATE_DIR': ${_mk_err}. Set ARGO_ANYWHERE_USER + ARGO_ANYWHERE_PORT in env to skip caching."
 }
 
 # on_anl_compute_node: prints 'yes' if the local host appears to be one of
@@ -979,18 +1008,41 @@ _warn_legacy_env() {
 # and never actually mattered.
 
 # ============================================================================
-# SECTION: 7. PORT RESOLUTION (config.json baseURL is the source of truth)
+# SECTION: 7. PORT RESOLUTION (cache file is the source of truth; per D-020)
 # ============================================================================
+# B2 (Phase 4) reframes port resolution per D-020: the script's own
+# cache file at ~/.config/argo_anywhere/port (PORT_CACHE) is the source
+# of truth for "what port should we use." Per-tool client configs become
+# DOWNSTREAM RENDERINGS that receive the port from the cache via their
+# writers. Pre-B2 the script derived PROXY_PORT from the OpenCode config
+# baseURL (M4 audit finding: "port resolution is OpenCode-specific in a
+# multi-client world"); B2 closes M4.
+#
 # resolve_port writes the chosen port into PROXY_PORT (global). Order:
-#   1. PORT_OVERRIDE_CLI         (set by --port flag)
+#   1. PORT_OVERRIDE_CLI                  (set by --port flag)
 #   2. ARGO_ANYWHERE_PORT env
-#   3. baseURL in ~/.config/opencode/config.json
-#   4. PROXY_PORT_DEFAULT
+#   3. cached port (PORT_CACHE file)
+#   4. one-shot first-run migration       (no cache, but client configs exist)
+#   5. PROXY_PORT_DEFAULT                 (true cold start)
+#
+# Migration handles three cases (D-020 three-case refinement):
+#   Case 1: no client configs exist anywhere -> cache PROXY_PORT_DEFAULT;
+#           log "no existing client configs; cached default port N".
+#   Case 2: exactly one client config has a baseURL -> seed cache from it;
+#           log "migrated port N from <tool> config to ~/.config/argo_anywhere/port".
+#   Case 3: multiple client configs with DISAGREEING ports -> invoke
+#           prompt_port_choice to let the user pick canonical; write cache
+#           + offer to update disagreeing configs (deferred to B3's
+#           cross-client coherence enforcement).
 PORT_OVERRIDE_CLI=""              # set by main() when --port given
-PORT_FROM_CONFIG=""               # cached so we can detect mismatch later
+PORT_FROM_CONFIG=""               # populated by read_port_from_opencode_config
+                                  # for cross-client coherence checks elsewhere
+PORT_FROM_CACHE=""                # populated by read_cached_port
 PORT_SOURCE=""                    # diagnostic: which source above won
 
 # Read the port from the OpenCode config's baseURL. Empty if unparseable.
+# Kept as-is (B2 doesn't change this; per-tool config inspectors land
+# in B3 for the cross-client coherence work).
 read_port_from_opencode_config() {
   local cfg="${OPENCODE_CONFIG}" url=""
   [ -f "$cfg" ] || return 0
@@ -1006,24 +1058,70 @@ read_port_from_opencode_config() {
   printf '%s\n' "$url" | sed -nE 's|^https?://[^:/]+:([0-9]+).*|\1|p'
 }
 
+# read_cached_port: read PROXY_PORT from PORT_CACHE if it exists and
+# parses as a valid integer. Returns empty (no output, exit 0) on
+# missing file / unreadable / non-integer content. Best-effort read;
+# the on-disk cache is a UX nicety, not load-bearing.
+read_cached_port() {
+  [ -f "$PORT_CACHE" ] || return 0
+  local v
+  v="$(cat "$PORT_CACHE" 2>/dev/null | tr -d '[:space:]')"
+  # Validate as a positive integer to avoid downstream surprises if the
+  # cache file got corrupted somehow.
+  case "$v" in
+    ''|*[!0-9]*) return 0 ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+# write_port_cache: persist the chosen port to PORT_CACHE atomically
+# (tmp-write + mv). Creates STATE_DIR if missing (delegates to
+# _ensure_state_dir, which die's with a clear message on mkdir failure
+# per the L1 audit-fix discipline). Idempotent: writing the same value
+# is a no-op effect on the user's environment.
+#
+# Args: $1 -- port (positive integer; caller is responsible for validation)
+# Returns: 0 on success; die's on STATE_DIR or write failure.
+write_port_cache() {
+  local p="$1"
+  [ -n "$p" ] || die "write_port_cache: refusing to cache empty port."
+  _ensure_state_dir
+  local _tmp; _tmp="$(mktemp -t argo_anywhere_port.XXXXXX 2>/dev/null || mktemp /tmp/argo_anywhere_port.XXXXXX)"
+  printf '%s\n' "$p" > "$_tmp" || die "write_port_cache: failed to write tempfile ${_tmp}."
+  mv -f "$_tmp" "$PORT_CACHE" || die "write_port_cache: failed to rename ${_tmp} -> ${PORT_CACHE}."
+}
+
 resolve_port() {
   local p=""
-  # M3 fix (audit Phase 2c): hoist read_port_from_opencode_config call
-  # to the top so the result is computed once and reused. Pre-fix, the
-  # override-flag path (--port / ARGO_ANYWHERE_PORT env) would skip the
-  # initial read and then the post-if-block "always read config too"
-  # line would run a SECOND jq invocation. Same correctness, fewer
-  # subprocesses, immune to config-edited-mid-run race.
+  # M3 fix (audit Phase 2c) preserved: hoist read_port_from_opencode_config
+  # call to the top so PORT_FROM_CONFIG is populated for downstream
+  # cross-client coherence checks (regardless of which source actually
+  # won the precedence race).
   PORT_FROM_CONFIG="$(read_port_from_opencode_config || true)"
+  PORT_FROM_CACHE="$(read_cached_port || true)"
   if [ -n "$PORT_OVERRIDE_CLI" ]; then
     p="$PORT_OVERRIDE_CLI"; PORT_SOURCE="--port flag"
   elif [ -n "${ARGO_ANYWHERE_PORT:-}" ]; then
     p="$ARGO_ANYWHERE_PORT"; PORT_SOURCE="ARGO_ANYWHERE_PORT env"
+  elif [ -n "$PORT_FROM_CACHE" ]; then
+    p="$PORT_FROM_CACHE"; PORT_SOURCE="cached port (${PORT_CACHE})"
   else
+    # First-run migration (D-020 three-case refinement). No cache yet;
+    # decide what to seed it with.
     if [ -n "$PORT_FROM_CONFIG" ]; then
-      p="$PORT_FROM_CONFIG"; PORT_SOURCE="opencode config baseURL"
+      # Case 2: exactly one client config (OpenCode) has a baseURL.
+      # Future B3 work will extend this to inspect ALL installed client
+      # configs (claudecode + opencode etc.) and detect Case 3
+      # (multi-config disagreement). For B2's scope, OpenCode is the
+      # only inspector that exists; seed from it.
+      p="$PORT_FROM_CONFIG"
+      PORT_SOURCE="migrated from opencode config baseURL (cached for future runs)"
+      log "Port cache (${PORT_CACHE}) empty on first run; migrating port ${p} from OpenCode config baseURL."
     else
-      p="$PROXY_PORT_DEFAULT"; PORT_SOURCE="built-in default"
+      # Case 1: no existing client configs with a baseURL; seed default.
+      p="$PROXY_PORT_DEFAULT"
+      PORT_SOURCE="built-in default (no cache, no existing client configs; seeding ${PORT_CACHE})"
+      log "Port cache (${PORT_CACHE}) empty on first run; no existing client configs found. Seeding default port ${p}."
     fi
   fi
   # Sanity check: must be a number in valid TCP range.
@@ -1040,6 +1138,18 @@ resolve_port() {
     die "Resolved port '$p' is privileged (<1024); use 1024-65535. argo-proxy cannot bind these without root."
   fi
   PROXY_PORT="$p"
+
+  # Write-through cache: if we resolved via something OTHER than the cache,
+  # update the cache so subsequent invocations have the right value. This
+  # includes:
+  #   * --port flag chosen (user's explicit choice; cache it)
+  #   * ARGO_ANYWHERE_PORT env (same; cache for next run)
+  #   * First-run migration cases (Case 1 and Case 2 above)
+  # Skip the cache write if PROXY_PORT already equals PORT_FROM_CACHE
+  # (no actual change; avoids unnecessary disk writes).
+  if [ -z "$PORT_FROM_CACHE" ] || [ "$PROXY_PORT" != "$PORT_FROM_CACHE" ]; then
+    write_port_cache "$PROXY_PORT"
+  fi
 }
 
 # prompt_port_choice: interactive [m/u/k/a] prompt for port-disagreement
@@ -1547,15 +1657,11 @@ resolve_username() {
     [[ "$u" =~ ^[a-zA-Z][a-zA-Z0-9._-]*$ ]] && break
     err "Invalid username. Use letters, digits, dot, underscore, hyphen."
   done
-  # L1 fix (audit Phase 2c): surface the actual mkdir error instead of
-  # swallowing stderr. Pre-fix: the user saw a generic "permission
-  # denied? \$HOME read-only?" guess; whatever mkdir actually said
-  # (the precise reason: ENOSPC, EROFS, EACCES on a specific component,
-  # SELinux denial, NFS hiccup) was discarded. Now: capture stderr,
-  # include it in the die message verbatim.
-  local _mk_err
-  _mk_err="$(mkdir -p "$STATE_DIR" 2>&1)" \
-    || die "Cannot create state dir '$STATE_DIR': ${_mk_err}. Set ARGO_ANYWHERE_USER in env to skip caching."
+  # L1 fix (audit Phase 2c) -- refactored in B2 (Phase 4) to call
+  # _ensure_state_dir, which centralizes the mkdir-with-stderr-capture
+  # pattern (was inline here; now shared with write_port_cache and
+  # other state-dir writers).
+  _ensure_state_dir
   printf '%s\n' "$u" > "$USER_CACHE"
   echo "$u"
 }
