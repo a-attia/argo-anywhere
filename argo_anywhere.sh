@@ -991,6 +991,59 @@ resolve_port() {
   PROXY_PORT="$p"
 }
 
+# prompt_port_choice: interactive [m/u/k/a] prompt for port-disagreement
+# scenarios. Factored from the two prior call sites (ensure_or_reuse_tunnel
+# post-auto-port + _client_common_setup at startup) into a single helper to
+# stop drift across sites; D-021 (Phase 4) will add a third call site for
+# cross-client coherence enforcement and benefits from a unified vocabulary.
+#
+# Args:
+#   $1 new_port     -- the port the script wants to use (chosen / probed)
+#   $2 config_port  -- the port currently in the client config
+#   $3 config_label -- human-readable description of the config source
+#                      (e.g. "OpenCode config" or "~/.config/opencode/config.json")
+#
+# Prints (to stdout) one of:
+#   migrate   -- caller writes config to new_port
+#   use-once  -- caller uses new_port; does NOT touch config
+#                (caller is responsible for setting any SKIP_*_CONFIG_WRITE flag
+#                 appropriate to the affected client)
+#   keep      -- caller uses config_port (and decides whether to loop / re-probe;
+#                returned without modifying PROXY_PORT -- callers MUST set
+#                PROXY_PORT="$config_port" themselves)
+#
+# Dies on [a]bort. The caller's flow continues for the other three choices.
+#
+# B0 fix (Phase 4 pre-work, 2026-05-...): factored from inline prompts at
+# (old) lines 3500-3524 and 3786-3825. The text below is the merged "best
+# of both sites" wording (the longer, more explanatory variant from the
+# startup site, since it's the more common path).
+prompt_port_choice() {
+  local new_port="$1" config_port="$2" config_label="$3"
+  warn "Port mismatch:"
+  warn "  Script wants to use         : ${new_port}"
+  warn "  ${config_label} currently says: ${config_port}"
+  cat >&2 <<EOF
+
+  The client reads its baseURL once at launch, so a tunnel on ${new_port}
+  while config still says ${config_port} means the client will fail to
+  connect (refused/wrong port). Choose:
+    [m] migrate config to ${new_port}, then continue (writes the config file)
+    [u] use ${new_port} for THIS run only; do NOT touch config
+        (parallel/test tunnel; the client will keep talking to ${config_port})
+    [k] keep config at ${config_port}; use that port for the tunnel too
+    [a] abort; resolve manually
+EOF
+  local choice; choice="$(ask "Your choice [m/u/k/a]:" "k")"
+  case "$choice" in
+    m|M) printf '%s' "migrate" ;;
+    u|U) printf '%s' "use-once" ;;
+    k|K) printf '%s' "keep" ;;
+    a|A) die "Aborted at port-reconciliation step." ;;
+    *)   die "Unrecognized choice; aborting." ;;
+  esac
+}
+
 # ============================================================================
 # SECTION: 8. JUMP HOST HANDLING (ssh_jump_args, jump_descr)
 # ============================================================================
@@ -3497,9 +3550,11 @@ ensure_or_reuse_tunnel() {
           newport="$(prompt_port_collision "$user" "$node" "$PROXY_PORT" "$owner" "$owner_pid")"
           [ -n "$newport" ] || die "Aborted at port-collision prompt."
         fi
-        # Re-route through the existing port-mismatch [m/u/k/a] prompt
-        # against the new port, so the user has a chance to update or
-        # not update their OpenCode config. We invoke it inline.
+        # Re-route through the unified [m/u/k/a] prompt against the new
+        # port, so the user has a chance to update or not update their
+        # OpenCode config. B0 fix (Phase 4 pre-work): factored to
+        # prompt_port_choice (shared helper) -- was inline duplicate of
+        # the startup-time prompt.
         if [ "$newport" != "$PROXY_PORT" ]; then
           # Override CLI port + clear any cached config-source state so
           # the prompt fires.
@@ -3507,18 +3562,18 @@ ensure_or_reuse_tunnel() {
           PORT_OVERRIDE_CLI="$newport"
           PORT_SOURCE="auto-pick / collision prompt"
           # The OpenCode-config migration prompt is in _client_common_setup;
-          # since we've already passed that point, fire it inline.
+          # since we've already passed that point, fire it inline via the
+          # shared helper.
           if [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
-            warn "New port ${PROXY_PORT} differs from your OpenCode config (${PORT_FROM_CONFIG})."
-            local choice; choice="$(ask "  [m]igrate config / [u]se for this run only / [k]eep config (use it instead) / [a]bort:" "m")"
-            case "$choice" in
-              m|M) ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
-              u|U) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
-                   SKIP_OPENCODE_CONFIG_WRITE=1 ;;
-              k|K) PROXY_PORT="$PORT_FROM_CONFIG"; ok "Using port ${PROXY_PORT} from config."
-                   # Loop back: recheck collision on the config port.
-                   continue ;;
-              a|A) die "Aborted at port-migration step." ;;
+            local _ppc_choice
+            _ppc_choice="$(prompt_port_choice "$PROXY_PORT" "$PORT_FROM_CONFIG" "OpenCode config")"
+            case "$_ppc_choice" in
+              migrate)  ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
+              use-once) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
+                        SKIP_OPENCODE_CONFIG_WRITE=1 ;;
+              keep)     PROXY_PORT="$PORT_FROM_CONFIG"; ok "Using port ${PROXY_PORT} from config."
+                        # Loop back: recheck collision on the config port.
+                        continue ;;
             esac
           fi
         fi
@@ -3797,30 +3852,20 @@ _client_common_setup() {
   # for the OpenCode side. When Phase 4 adds aider/cursor we should
   # generalize PORT_FROM_CONFIG to "port from any known client config"
   # and reword the prompt.
+  # B0 fix (Phase 4 pre-work): port-mismatch prompt factored to
+  # prompt_port_choice (shared helper); see argo_anywhere.sh Section 7
+  # for the helper definition. Previously this site had its own inline
+  # prompt that drifted from the auto-port-collision site's version.
   if [ "$with_opencode_setup" = 1 ] \
      && [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
-    warn "Port mismatch:"
-    warn "  --port / env requested : ${PROXY_PORT}"
-    warn "  ~/.config/opencode/config.json baseURL: ${PORT_FROM_CONFIG}"
-    cat >&2 <<EOF
-
-  OpenCode reads its baseURL once at launch, so a tunnel on ${PROXY_PORT}
-  while config still says ${PORT_FROM_CONFIG} means OpenCode will fail to
-  connect (refused/wrong port). Choose:
-    [m] migrate config to ${PROXY_PORT}, then continue (writes config.json)
-    [u] use ${PROXY_PORT} for THIS run only; do NOT touch config
-        (parallel/test tunnel; OpenCode will keep talking to ${PORT_FROM_CONFIG})
-    [k] keep config at ${PORT_FROM_CONFIG}; use that port for the tunnel too
-    [a] abort; resolve manually
-EOF
-    local choice; choice="$(ask "Your choice [m/u/k/a]:" "k")"
-    case "$choice" in
-      m|M) ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
-      u|U) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
-           SKIP_OPENCODE_CONFIG_WRITE=1 ;;
-      k|K) PROXY_PORT="$PORT_FROM_CONFIG"; ok "Using port ${PROXY_PORT} from config (override ignored)." ;;
-      a|A) die "Aborted at port-reconciliation step." ;;
-      *)   die "Unrecognized choice; aborting." ;;
+    local _ppc_choice
+    _ppc_choice="$(prompt_port_choice "$PROXY_PORT" "$PORT_FROM_CONFIG" "OpenCode config (~/.config/opencode/config.json baseURL)")"
+    case "$_ppc_choice" in
+      migrate)  ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
+      use-once) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
+                SKIP_OPENCODE_CONFIG_WRITE=1 ;;
+      keep)     PROXY_PORT="$PORT_FROM_CONFIG"
+                ok "Using port ${PROXY_PORT} from config (override ignored)." ;;
     esac
   fi
 
@@ -5116,8 +5161,21 @@ mode_stop() {
 
   local lstatus; lstatus="$(local_tunnel_status "$PROXY_PORT")"
   case "$lstatus" in
-    ours-healthy|ours-unhealthy)
-      # Listener is an SSH tunnel we own. The classic laptop case.
+    # B0 fix (Phase 4 pre-work, 2026-05-...): case labels updated to match
+    # local_tunnel_status's actual return values. Pre-fix used
+    # `ours-healthy|ours-unhealthy` which NEVER MATCHED -- the function
+    # returns the four-value set with `-fg`/`-mux` suffixes
+    # (ours-healthy-fg, ours-unhealthy-fg, ours-healthy-mux,
+    # ours-unhealthy-mux) since the F1/F5 refactor that split mux from
+    # fg detection. Result of the drift: every "our tunnel" run fell
+    # through to the `external-healthy|other-or-broken` branch's
+    # blast-radius warning at the bottom of this case, which is the
+    # WRONG message for the laptop-tunnel scenario. This was a
+    # pre-existing v2.1.x latent bug surfaced during Phase 4 planning
+    # review.
+    ours-healthy-fg|ours-unhealthy-fg|ours-healthy-mux|ours-unhealthy-mux)
+      # Listener is an SSH tunnel (foreground or mux master) we own.
+      # The classic laptop case.
       log "Killing local SSH tunnel listening on :${PROXY_PORT}..."
       echo "$pids" | xargs -n1 kill 2>/dev/null || true
       sleep 1
