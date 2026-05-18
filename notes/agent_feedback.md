@@ -606,6 +606,330 @@ site" entry (same family, different layer).
 
 ---
 
+## 2026-05-18 — release-gate live test as a real correctness gate (Phase 4 v2.2.0)
+
+**Project context**: Phase 4 v2.2.0 release-gate live test. Ran
+the 12-test live-verification plan (`notes/test_plan_phase4.md`)
+against the real ANL infrastructure (one Duo prompt; real
+`argo-proxy` on a real compute node) before tagging. Three of the
+twelve tests surfaced real defects in code that had passed all of
+the inline smoke tests + had been reviewed before commit; the
+amendments were landed mid-test as separate commits per the
+project's amendment-mid-test convention (matches Phase 2b/2c+3
+cadence).
+
+**Trigger**: every release; the gate is documented in
+`AGENTS.md` "Smoke tests" + `docs/TESTING.md` + per-phase test
+plans in `notes/test_plan_phase*.md`.
+
+**Skill(s) involved**: `research-software-engineering`
+(testing-strategy discipline); `human-facing-doc-authoring`
+(test-plan-authoring conventions); `agent-resource-discipline`
+(amendment-mid-test cadence as a discoverable pattern across
+sessions via the test-plan + commit-log indices).
+
+**Observation**: across four consecutive release-gate live tests
+(Phase 2a + 2b + 2c+3 + 2d + 4 = five tests total), the
+amendment-mid-test cadence has produced:
+
+| Phase | Tests | Mid-test code amendments | Mid-test test-plan amendments |
+|:--|:--|:--|:--|
+| Phase 2a | several | 0 | 1 (P3 added) |
+| Phase 2b | several | 3 (H5 yaml_scalar + P2 setdefault + N1 scope-keyed) | 0 |
+| Phase 2c+3 | several | 1 (L4+L5 incomplete dedup) | 2 defects identified |
+| Phase 2d | several | 0 | 2 defects identified |
+| Phase 4 (v2.2.0) | 12 | 3 (D-016 eager scope validation + stale --scope help + [m]igrate overpromise) | 2 (paren-in-comment defect + ambiguous-file-references) |
+
+Pattern: a release-gate live test that produces ZERO amendments
+is the exception, not the rule. The defects are always real
+(D-016 violations, doc regressions, UX overpromises) and always
+caught BEFORE tagging. The amendment-mid-test cadence works as
+designed: the test is doing its job.
+
+The discipline rule worth surfacing: **a release tag should NOT
+be a fixed pre-test SHA**. The amendment-mid-test cadence means
+the final HEAD is determined by what the live test surfaces; the
+tag points at the final-amended HEAD, not at a hypothetical
+"release candidate" that may not match what was actually verified.
+This is the Phase 4 v2.2.0 release: tag `v2.2.0` points at
+`737563d` (the SHA-backfill of the last mid-test amendment) rather
+than at the pre-test HEAD `9a0834c`.
+
+**Proposed actions** (companion rules for
+`research-software-engineering`'s testing-strategy reference):
+
+1. **Pre-tag inspection includes the amendment count**. The
+   release-gate checklist should explicitly enumerate "how many
+   amendments landed mid-test"; that count goes into the tag's
+   annotated message as evidence of what the test caught vs let
+   through.
+2. **The tag points at the FINAL HEAD, not the pre-test HEAD**.
+   Even if no amendments fire, this is the safe default; with
+   amendments, it's the only correct one.
+3. **The test plan records each amendment's commit SHA** via a
+   backfill commit (small, doc-only, no behavior change). This
+   keeps the test plan a self-contained artifact of what
+   happened, not a snapshot of what was hoped for.
+
+**Pattern-detection observation**: the amendment cadence isn't a
+sign that the smoke tests are inadequate or the reviewers were
+sloppy. It's a sign that **smoke tests + code review have a
+different reachability profile than end-to-end live tests**: the
+former exercise individual functions; the latter exercise the
+flag-parser → mode-dispatcher → main-mode-function → per-tool
+setup → handle_config_file → write_*_config chain in its actual
+ordering. Defects that hide behind "fires under client but never
+under status" or "stale help text that no inline test exercises"
+only surface when something walks through the actual user flow.
+
+**Evidence / minimal repro**:
+
+- Phase 4 Test 5: `bash argo_anywhere.sh --cli-tool opencode
+  --scope projct status` silently accepted the typo (the
+  parser deferred validation to per-tool pick_scope, which only
+  ran under client/setup). Fixed by amendment `e221847`: eager
+  `_validate_scope_for_tool` call in `main()` after argument
+  parsing.
+- Phase 4 Test 6: `bash argo_anywhere.sh -h | sed -n '/--scope/,+20p'`
+  printed `Currently consumed only by Claude Code setup` (false
+  since B1b added opencode project-scope), `defaults to PROJECT
+  scope` (false since D-017 changed the default), and `Canonical
+  env: CLAUDECODE_SCOPE` (backwards since D-019 made
+  `ARGO_ANYWHERE_SCOPE` canonical). Fixed by `1249924`: help-text
+  rewrite per D-017+D-018+D-019.
+- Phase 4 Test 8: D-021 proactive prompt's `[m]igrate` confirmation
+  said `Will canonicalize all client configs on port N this run`,
+  but the code only rewrites the per-tool config the current
+  invocation's setup function touches; OTHER disagreeing configs
+  remained stale. Fixed by `acf0722`: corrected the confirmation
+  to accurately describe the narrower semantic.
+
+**Status**: open (queued for upstream roll-up). Composes with the
+"test stimulus must exercise the assertion site" + "shell-script
+unit-test mechanics" entries above into a coherent
+release-gate-testing reference.
+
+---
+
+## 2026-05-18 — test-plan defect family: zsh tokenization of inline `# (parens)` comments
+
+**Project context**: Phase 4 v2.2.0 release-gate live test
+(`notes/test_plan_phase4.md`). User pasted code blocks from the
+test plan into a zsh terminal; several commands errored or
+behaved unexpectedly because of how zsh tokenizes parenthesized
+comments inline with commands.
+
+**Trigger**: external-failure (user ran the tests; multiple
+commands didn't behave as the test plan described).
+
+**Skill(s) involved**: `human-facing-doc-authoring` (test-plan
+authoring); secondarily `research-software-engineering` (test-
+plan mechanics).
+
+**Observation**: across five pre-test snapshot commands + Test 2
++ Test 4 + Test 11, the test plan contained inline `# comment`
+text inside ```sh code blocks. In zsh, the pattern:
+
+```
+cat ~/.config/argo_anywhere/port    # should also be 65501 now (write-through)
+```
+
+triggers a `zsh: unknown file attribute: i` error because zsh's
+parser treats `(write-through)` as a filename-attribute modifier
+expression even though it appears inside what bash would consider
+a comment. The result: zsh aborts the line silently, the next
+line runs (often a cleanup `echo ... > file`), and the user sees
+the "after-cleanup" state rather than the "during-test" state —
+producing apparent test failures that are really test-plan
+defects.
+
+A second, related defect: the pre-test snapshot block conflated
+`~/.claude.json` (the Anthropic OAuth state cache file) with
+`~/.claude/settings.json` (the Claude Code SETTINGS file inside
+the `.claude/` directory). These are SEPARATE files for
+SEPARATE concerns. The snapshot block checked one but Test 7
+operated on the other; users couldn't tell from the snapshot
+whether Test 7's preconditions were met.
+
+**Proposed actions**:
+
+1. **Move comments OUT of code blocks** in test plans. Narrative
+   prose ABOVE the block explains what each line does; the code
+   block itself stays comment-free. Doubles as the rule for
+   `human-facing-doc-authoring`'s test-plan-authoring guidance.
+2. **When two files have similar names**, disambiguate them
+   explicitly in the test plan's pre-test snapshot AND in every
+   test that operates on either. Categorize the snapshot block
+   (script state / per-tool files / OAuth state) so users can
+   tell at a glance which file each command is touching.
+3. **For Test 7-style scenario-dependent setups**, document
+   explicit scenarios (a/b/c) with matching cleanup paths.
+   The original "if MISSING, SKIP" framing is too coarse; users
+   may have a backup file at `<path>.anl` that turns Test 7's
+   SKIP branch into a "use scenario (b)" branch. Phase 4 Test 7
+   was rewritten this way during the live test (commit
+   `6c0c2e4`).
+
+**Pattern-detection observation**: this defect class is shell-
+specific (zsh parses comments differently from bash inside
+certain contexts; bash itself wouldn't trip on the same
+construct). Since the test plan's audience runs commands in their
+own shell (which on macOS defaults to zsh since Catalina), the
+test plan must be **shell-agnostic-safe**: no constructs that
+parse differently in bash vs zsh vs fish.
+
+**Evidence / minimal repro**:
+
+```zsh
+% cat /tmp/x  # try parens (in a comment)
+zsh: unknown file attribute: i
+```
+
+vs:
+
+```bash
+$ cat /tmp/x  # try parens (in a comment)
+(file contents)
+```
+
+The bash output is what the test-plan author assumed; the zsh
+output is what the user actually sees on macOS.
+
+**Status**: open (queued for upstream roll-up); fits cleanly into
+the `human-facing-doc-authoring` skill's notes on test-plan
+authoring.
+
+---
+
+## 2026-05-18 — upstream-stack findings need a "not our bug, here's the workaround" framing
+
+**Project context**: Phase 4 v2.2.0 release-gate live test Test 10.
+User invoked `claude` after the script wrote the proxy config and
+got `API Error: API returned an empty or malformed response (HTTP
+200) — check for a proxy or gateway intercepting the request`.
+The error looked like an `argo-anywhere` defect; the test plan's
+"Pass" criteria assumed the downstream `claude` invocation would
+work without further intervention.
+
+The bug turned out to be an upstream-stack issue: Claude Code
+2.1.143 sends `thinking: {type: "enabled"}` for `claude-opus-4-7`;
+ANL's Argo / Vertex deployment rejects with HTTP 400 + message
+`"thinking.type.enabled" is not supported for this model. Use
+"thinking.type.adaptive" and "output_config.effort" to control
+thinking behavior.`; `argo-proxy` v3.x correctly surfaces the
+upstream error as a SSE `event: error` payload with HTTP 200;
+Claude Code 2.1.143 fails to parse the `event: error` SSE shape
+and reports "API returned empty/malformed."
+
+**Trigger**: external-failure surfaced during live test;
+diagnosis required enabling verbose argo-proxy logging on the
+node, capturing the request/response cycle, and probing the
+hypothesis space (bare curl probe → +27 tools → +max_tokens
+64000 → +anthropic-beta headers → **+ thinking.type.enabled**).
+
+**Skill(s) involved**: `research-software-engineering`
+(numerical-launch + debug protocols, even though there's no
+numerical work here — the discipline of bisecting a hypothesis
+space cleanly is the same); secondarily `agent-resource-
+discipline` (the diagnosis required pulling the verbose log
+once + analyzing locally, not repeated remote round-trips).
+
+**Observation**: this is the FIRST time the v2.2.0 release-gate
+live test surfaced a finding that's NOT actionable at the
+`argo-anywhere` layer. The natural reaction was to treat it as a
+v2.2.0 release blocker; the right reaction (after diagnosis) was
+to:
+
+1. Document the finding + workaround in
+   `docs/LIMITATIONS.md` "Upstream stack" section.
+2. Cross-reference from `README.md` "Heads up before you start" so
+   users see it BEFORE hitting it.
+3. Queue an auto-default fix (pre-populate
+   `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in
+   `write_claudecode_config`) for v2.3 — eliminates the foot-gun
+   for every user without requiring them to know about the
+   underlying bug.
+4. Identify the root cause's actual layer (Anthropic Vertex
+   validation + Claude Code SSE parsing) so we don't try to fix
+   it at the wrong layer.
+
+**Proposed actions** (companion rule for
+`human-facing-doc-authoring`'s LIMITATIONS-style docs):
+
+1. **Layer-the-blame discipline**: when a user-visible bug is
+   surfaced at our layer but rooted upstream, document it with
+   an explicit "this is what each layer is doing right"
+   paragraph. The Phase 4 LIMITATIONS entry includes "argo-proxy
+   is doing the right thing by surfacing the upstream error as
+   an SSE error event (RFC-compliant; the SSE spec explicitly
+   defines `event: error` as a valid payload type)" — that's the
+   shape of the right framing.
+
+2. **Provide BOTH a runtime workaround and a persistent
+   workaround**. Users in a hurry want
+   `claude --model claude-sonnet-4-6`; users who want to never
+   see the bug again want the `env.ANTHROPIC_MODEL` injection in
+   `settings.json`. Document both side-by-side.
+
+3. **Queue an auto-default fix even when the bug is upstream**, if
+   the at-our-layer mitigation is low-cost (a single config-writer
+   key). Eliminating the foot-gun for every user is worth more
+   than holding the line on "this is upstream's fault." The user
+   doesn't care which layer; they care whether it works.
+
+4. **Add a prominent README-level callout** ("Heads up before you
+   start") so users see the workaround BEFORE hitting the bug.
+   The natural placement is the second TOC item, immediately
+   after Contents — high enough to be unmissable, low enough to
+   not bury the project's main value-prop.
+
+**Pattern-detection observation**: this is the THIRD upstream-stack
+finding documented in this project (the others: H5 yaml_scalar
+on plain scalars, P2 setdefault-for-security-defaults). The
+consistent shape — "our integration looks broken; turns out the
+upstream behavior is what we have to work around" — suggests a
+class of finding worth its own discipline rule rather than ad-hoc
+documentation each time.
+
+**Evidence / minimal repro**:
+
+```sh
+# Reproduces the bug (any non-opus-4-7 model works):
+claude --model claude-opus-4-7
+# After typing any prompt: "API Error: API returned an empty or
+# malformed response (HTTP 200) — check for a proxy or gateway..."
+
+# Workaround:
+claude --model claude-sonnet-4-6
+# Works cleanly.
+```
+
+```sh
+# Direct argo-proxy curl probe confirms the upstream rejection:
+curl -sS -H "Authorization: Bearer aattia" -H "Content-Type: application/json" \
+     -H "anthropic-version: 2023-06-01" \
+     -X POST "http://localhost:64742/v1/messages" \
+     -d '{"model":"claude-opus-4-7","max_tokens":50,"stream":true,
+          "thinking":{"type":"enabled","budget_tokens":10000},
+          "messages":[{"role":"user","content":"hi"}]}'
+# Returns:
+# event: error
+# data: {"type": "error", "error": {"type": "api_error",
+#        "message": "Error code: 400 - {'type': 'error', 'error': {
+#        'type': 'invalid_request_error', 'message':
+#        '\"thinking.type.enabled\" is not supported for this model.
+#        Use \"thinking.type.adaptive\" and \"output_config.effort\"
+#        to control thinking behavior.'}, ...}}"}}
+```
+
+**Status**: open (queued for upstream roll-up). Discipline rule
+candidate: when an upstream-stack finding surfaces, document it
+in BOTH the per-project LIMITATIONS doc (full diagnosis) AND the
+top-of-README quick-orient callout (workaround only). Auto-default
+fix queued separately for v2.3.
+
+---
+
 *Created 2026-05-14 by Ahmed Attia (with substantial AI assistance from
 Claude per `CONTRIBUTORS.md`) from
 [`scicomp-research-skills/templates/software-skeleton/notes/agent_feedback.md`](https://github.com/a-attia/scicomp-research-skills/tree/main/templates/software-skeleton/notes/agent_feedback.md).*
