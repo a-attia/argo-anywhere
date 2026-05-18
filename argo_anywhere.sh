@@ -300,9 +300,25 @@ LEGACY_STATE_DIR="${HOME}/.config/argo_opencode"
 USER_CACHE="${STATE_DIR}/user"
 NODE_CACHE="${STATE_DIR}/node"
 
-# OpenCode config path (read by us, written by setup_opencode_cli_tool +
-# update-models). Centralized constant so future renames touch one site.
-OPENCODE_CONFIG="${HOME}/.config/opencode/config.json"
+# OpenCode config paths (read by us, written by setup_opencode_cli_tool +
+# update-models). Centralized constants so future renames touch one site.
+#
+# B1b (Phase 4): added OPENCODE_PROJECT_CONFIG_BASENAME for the
+# new --scope project support. The global is the existing path; the
+# project basename is what we write at the git-root (or cwd fallback)
+# when --scope project is chosen for opencode. OPENCODE_CONFIG is kept
+# as an alias for the global path (existing callers; e.g. update-models)
+# so nothing else needs to change for the global-only path.
+#
+# Filename note: the current OpenCode upstream docs reference
+# `opencode.json` as the canonical name; this script has historically
+# written `config.json`. Both are accepted by recent OpenCode versions.
+# Phase 4 keeps `config.json` for backward compatibility with users'
+# existing configs; a future audit (or a real-world report of the
+# rename biting) can flip the global path with a one-shot migration.
+OPENCODE_GLOBAL_CONFIG="${HOME}/.config/opencode/config.json"
+OPENCODE_CONFIG="${OPENCODE_GLOBAL_CONFIG}"  # legacy alias; existing callers
+OPENCODE_PROJECT_CONFIG_BASENAME="opencode.json"
 
 # Claude Code config paths.
 #
@@ -566,6 +582,27 @@ this_host_fqdn() {
   h="$(hostname -f 2>/dev/null || true)"
   [ -n "$h" ] || h="$(hostname 2>/dev/null || true)"
   printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
+# _git_root_or_cwd: prints the absolute path of the nearest enclosing
+# git repo (if any), else the current working directory. Used by
+# per-tool pick_scope functions that resolve "project scope" -- the
+# convention is "write at git-root if in a git repo; else write at cwd."
+# Silent on failure (best-effort); always prints SOMETHING (cwd in the
+# worst case).
+#
+# B1b (Phase 4): introduced for opencode_pick_scope. Generic helper so
+# future per-tool pickers (aider, ...) can reuse the same resolution.
+_git_root_or_cwd() {
+  local root=""
+  if command -v git >/dev/null 2>&1; then
+    root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
+  if [ -n "$root" ]; then
+    printf '%s' "$root"
+  else
+    printf '%s' "$(pwd)"
+  fi
 }
 
 # on_anl_compute_node: prints 'yes' if the local host appears to be one of
@@ -1869,15 +1906,137 @@ ensure_opencode_installed() {
 # OpenCode end-to-end client setup (subsection of 12)
 # ----------------------------------------------------------------------------
 
-# opencode_scope_values: D-018 per-tool scope vocabulary. OpenCode in
-# Phase 4 B1a only supports 'global' scope (writes ~/.config/opencode/config.json).
-# B1b (separate batch) will add 'project' support per the upstream
-# OpenCode docs' project-local <git-root>/opencode.json convention; until
-# then the only legal --scope value for opencode is 'global'. The CLI
-# parser accepts any string for --scope; per-tool validation here
-# rejects unknown values with a clear "accepts: global" message.
+# opencode_scope_values: D-018 per-tool scope vocabulary. OpenCode
+# supports both global (~/.config/opencode/config.json) and project
+# (<git-root>/opencode.json, falling back to <cwd>/opencode.json if
+# not in a git repo) scopes since Phase 4 B1b.
 opencode_scope_values() {
-  printf 'global'
+  printf 'global project'
+}
+
+_OPENCODE_SCOPE_PATH=""
+_OPENCODE_SCOPE_NAME=""
+
+# opencode_pick_scope: B1b (Phase 4) -- D-017 conflict-detection
+# discipline applied to opencode. opencode has no OAuth-state concern
+# (unlike claudecode's ~/.claude.json) so the per-tool default is
+# global; conflict-detection still runs (A.1 existing-content-collision;
+# B.2 cwd-not-a-project for explicit --scope project).
+#
+# Per the D-017 two-prompt model, this picker may invoke
+# prompt_scope_switch on detected conflict; the subsequent
+# handle_config_file call resolves any per-file content disagreement
+# via the existing [k/b/d/m/a] vocabulary.
+#
+# Project-scope resolution: writes to <git-root>/opencode.json if cwd
+# is inside a git repo; else <cwd>/opencode.json. The git-root anchor
+# matches OpenCode's own upstream config-discovery behavior (walks up
+# to nearest .git for project-local configs).
+opencode_pick_scope() {
+  # Resolve the effective scope source: explicit > auto-default.
+  local _intended_scope=""
+  local _scope_source=""
+  if [ -n "${_SCOPE_OVERRIDE:-}" ]; then
+    _intended_scope="$_SCOPE_OVERRIDE"
+    _scope_source="--scope ${_intended_scope}"
+  elif [ -n "${ARGO_ANYWHERE_SCOPE:-}" ]; then
+    _intended_scope="$ARGO_ANYWHERE_SCOPE"
+    _scope_source="ARGO_ANYWHERE_SCOPE env"
+  fi
+
+  if [ -n "$_intended_scope" ]; then
+    _validate_scope_for_tool opencode "$_intended_scope"
+  else
+    # Per-tool auto-default: global. (No OAuth-state concern.)
+    _intended_scope="global"
+    _scope_source="auto (opencode default; no OAuth-state concern)"
+  fi
+
+  # Resolve the path + label from the intended scope.
+  case "$_intended_scope" in
+    global)
+      _OPENCODE_SCOPE_PATH="$OPENCODE_GLOBAL_CONFIG"
+      _OPENCODE_SCOPE_NAME="global (${OPENCODE_GLOBAL_CONFIG})"
+      ;;
+    project)
+      local _proj_root; _proj_root="$(_git_root_or_cwd)"
+      _OPENCODE_SCOPE_PATH="${_proj_root}/${OPENCODE_PROJECT_CONFIG_BASENAME}"
+      _OPENCODE_SCOPE_NAME="project (${_OPENCODE_SCOPE_PATH})"
+      ;;
+    *)
+      die "opencode_pick_scope: internal error -- intended scope '${_intended_scope}' not in vocabulary (opencode_scope_values returns: $(opencode_scope_values))."
+      ;;
+  esac
+
+  log "OpenCode scope: ${_intended_scope} (${_scope_source})."
+  if [ "$_intended_scope" = "project" ]; then
+    log "  Config will land at ${_OPENCODE_SCOPE_PATH} and apply only when"
+    log "  'opencode' is invoked from within this project tree."
+  else
+    log "  Config will land at ${_OPENCODE_SCOPE_PATH} and apply when"
+    log "  'opencode' is invoked from any directory."
+  fi
+
+  # Conflict detection. opencode has fewer conflict paths than
+  # claudecode (no OAuth state); just A.1 (existing content) for global
+  # and B.2 (cwd-not-a-project) for explicit project.
+  _opencode_check_conflicts "$_intended_scope"
+}
+
+# _opencode_check_conflicts: per-scope conflict detection + scope-switch
+# prompt invocation. Mutates _OPENCODE_SCOPE_PATH / _OPENCODE_SCOPE_NAME
+# if user chooses to switch.
+_opencode_check_conflicts() {
+  local intended="$1"
+  local conflict_desc=""
+  local other_scope=""
+  if [ "$intended" = "global" ]; then
+    other_scope="project"
+    # A.1: existing global file with content. handle_config_file's
+    # [k/b/d/m/a] would normally handle this, but offering the scope
+    # switch here is a more visible signal that there's a choice.
+    if [ -f "$OPENCODE_GLOBAL_CONFIG" ] && [ -s "$OPENCODE_GLOBAL_CONFIG" ]; then
+      conflict_desc="${OPENCODE_GLOBAL_CONFIG} already exists and is non-empty. handle_config_file's [k/b/d/m/a] prompt will offer per-file resolution, but you can also switch to project scope to leave your global file untouched (writes <git-root>/opencode.json or cwd/opencode.json instead)."
+    fi
+  elif [ "$intended" = "project" ]; then
+    other_scope="global"
+    # B.2: cwd-doesn't-look-like-project check.
+    local _is_project=0
+    if command -v git >/dev/null 2>&1 && git rev-parse --show-toplevel >/dev/null 2>&1; then
+      _is_project=1
+    elif [ -f "package.json" ] || [ -f "pyproject.toml" ] || [ -f "Cargo.toml" ] || [ -f "go.mod" ]; then
+      _is_project=1
+    elif [ "$(pwd)" = "$HOME" ]; then
+      _is_project=1
+    fi
+    if [ "$_is_project" = 0 ]; then
+      conflict_desc="--scope project will write $(pwd)/${OPENCODE_PROJECT_CONFIG_BASENAME}, but $(pwd) doesn't look like a project directory (no .git ancestor, no common project manifests). Most users in this situation want --scope global so 'opencode' works from any directory."
+    fi
+  fi
+
+  if [ -n "$conflict_desc" ]; then
+    local _ssc_choice
+    _ssc_choice="$(prompt_scope_switch "$conflict_desc" "$intended" "$other_scope")"
+    case "$_ssc_choice" in
+      keep)
+        log "  Proceeding with ${intended} scope despite the conflict (user's choice)."
+        ;;
+      switch)
+        case "$other_scope" in
+          project)
+            local _proj_root; _proj_root="$(_git_root_or_cwd)"
+            _OPENCODE_SCOPE_PATH="${_proj_root}/${OPENCODE_PROJECT_CONFIG_BASENAME}"
+            _OPENCODE_SCOPE_NAME="project (${_OPENCODE_SCOPE_PATH})"
+            ;;
+          global)
+            _OPENCODE_SCOPE_PATH="$OPENCODE_GLOBAL_CONFIG"
+            _OPENCODE_SCOPE_NAME="global (${OPENCODE_GLOBAL_CONFIG})"
+            ;;
+        esac
+        log "  Switched to ${other_scope} scope; will write ${_OPENCODE_SCOPE_PATH}."
+        ;;
+    esac
+  fi
 }
 
 # setup_opencode_cli_tool: ensure OpenCode is installed and its config is up to
@@ -1885,35 +2044,23 @@ opencode_scope_values() {
 # SKIP_OPENCODE_CONFIG_WRITE flag set by mode_client when the user picked [u]
 # at the port-mismatch prompt.
 #
-# B1a (Phase 4): validates --scope value against opencode_scope_values
-# before doing the install/write. opencode_pick_scope is intentionally
-# absent in B1a (opencode is global-only); B1b will add it alongside
-# project-scope support.
+# B1b (Phase 4) reordering: opencode_pick_scope() runs BEFORE
+# ensure_opencode_installed (same rationale as setup_claudecode_cli_tool's
+# reordering -- scope decision doesn't depend on installed binary; fail
+# fast on scope conflicts before doing the expensive install).
 #
 # This is the "per-client" piece of mode_client, extracted so future per-client
 # setup functions (setup_claudecode_cli_tool, setup_aider_cli_tool, ...) can sit
 # next to it as peers and the orchestrator can call any combination.
 setup_opencode_cli_tool() {
-  # Validate --scope value if user supplied one. opencode is global-only
-  # in B1a; rejection happens here (per-tool vocabulary validation)
-  # rather than in the CLI parser (which is per-tool-agnostic).
-  local _intended_scope=""
-  if [ -n "${_SCOPE_OVERRIDE:-}" ]; then
-    _intended_scope="$_SCOPE_OVERRIDE"
-  elif [ -n "${ARGO_ANYWHERE_SCOPE:-}" ]; then
-    _intended_scope="$ARGO_ANYWHERE_SCOPE"
-  fi
-  if [ -n "$_intended_scope" ]; then
-    _validate_scope_for_tool opencode "$_intended_scope"
-  fi
-
+  opencode_pick_scope
   ensure_opencode_installed
   if [ "${SKIP_OPENCODE_CONFIG_WRITE:-0}" = 1 ]; then
     log "Skipping OpenCode config write (--port override + [u] choice)."
-    log "  config.json baseURL is unchanged at port ${PORT_FROM_CONFIG};"
+    log "  ${_OPENCODE_SCOPE_PATH} baseURL is unchanged at port ${PORT_FROM_CONFIG};"
     log "  this run's tunnel is on port ${PROXY_PORT}."
   else
-    handle_config_file "${OPENCODE_CONFIG}" "OpenCode config" write_opencode_config
+    handle_config_file "${_OPENCODE_SCOPE_PATH}" "OpenCode config (${_OPENCODE_SCOPE_NAME})" write_opencode_config
   fi
 }
 
