@@ -222,8 +222,8 @@ the original v2.2.0-RC at HEAD `9a0834c` deferred validation to
 each tool's `<name>_pick_scope()` function, which only ran under
 `client`/`setup`. A typo'd `--scope projct status` was therefore
 silently accepted (validator never reached), violating D-016
-"fail louder, not silently". Amendment commit `<filled-in-below>`
-adds eager validation in `main()` right after argument parsing,
+"fail louder, not silently". Amendment commit `e221847` adds
+eager validation in `main()` right after argument parsing,
 so any `--cli-tool X --scope Y` combination is validated against
 `X`'s vocabulary BEFORE the subcommand dispatches, regardless of
 mode. Subcommands that don't consume `--scope` (status/stop/
