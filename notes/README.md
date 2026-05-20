@@ -8,7 +8,10 @@ This directory holds working notes for the project:
   repository. The agent appends entries when a skill rule was
   insufficient, a workaround was needed, or a useful pattern was
   discovered. Roll-up procedure (sanitise + file an upstream issue
-  or PR) is in `~/.scicomp-research-skills/CONTRIBUTING.md`.
+  or PR) is in `~/.scicomp-research-skills/CONTRIBUTING.md`. Entries
+  that have been actioned upstream are collapsed to a stub linking
+  to their full text in [`_resolved/`](_resolved/INDEX.md); see the
+  "Archive + resolution log" section below.
 - **`test_plan_phase<N>.md`** — per-phase live-verification test plans
   (Phase 1, Phase 2a, future Phase 2b/2c/3 etc.). Created at the
   start of each phase; archived as historical artifact when phase
@@ -41,6 +44,32 @@ Conventions follow
 
 (None today. Index tables here when impl_*.md or section_*.md notes
 are added.)
+
+## Archive + resolution log
+
+Two parallel sub-directories hold entries / artefacts that have
+moved out of the project's active working set but are preserved
+for traceability:
+
+- **[`_resolved/INDEX.md`](_resolved/INDEX.md)** — agent_feedback
+  entries that have been actioned upstream (codified into a
+  `scicomp-research-skills` skill / reference / template). Each
+  resolved entry's original text is preserved in
+  `_resolved/<date>_<slug>.md`; the entry's date+title stub
+  remains in `agent_feedback.md` pointing here.
+- **[`_archive/INDEX.md`](_archive/INDEX.md)** — superseded /
+  filed-elsewhere artefacts (upstream-proposal drafts that
+  became GitHub issues, working-document versions that were
+  fully replaced, etc.). Currently empty.
+
+The two are kept separate because "resolved upstream" and
+"superseded / filed elsewhere" are different kinds of "done" and
+conflating them loses information.
+
+When adding a new entry to either: append a row to the
+corresponding INDEX.md AND (for `_resolved/`) create the
+date-slugged file with the full original content; update the
+stub in `agent_feedback.md` to point at the new file.
 
 ## Maintenance
 

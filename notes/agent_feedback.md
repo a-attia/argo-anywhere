@@ -194,415 +194,65 @@ workflow's last step happened.
 
 ## 2026-05-14 — bash/PyYAML interop trap: `awk -F'"'` silently degrades on plain scalars
 
-**Project context**: Phase 2b live test #1 of the H5 audit fix. The
-fix used `awk -F'"' '/^[[:space:]]*user:/{print $2; exit}'` to
-extract the `user:` value from `~/.config/argoproxy/config.yaml`.
+**RESOLVED upstream 2026-05-17** in `scicomp-research-skills` commit
+`686b3a1` as rule 12.1 (primary observation) + rule 12.3 (secondary
+observation about recovery hints needing to be tested themselves) in
+`skills/research-software-engineering/references/12-shell-and-cross-language-interop.md`.
 
-**Trigger**: external-failure (the user ran the live test, the new
-H5 branch wrongly fired against a perfectly valid config that the
-script itself had verified one log line earlier; user pasted the
-log and asked).
-
-**Skill(s) involved**: `research-software-engineering` (the rule
-this would belong under is API design / cross-language interop in
-shell projects with Python heredoc helpers).
-
-**Observation**: PyYAML's `safe_dump(default_flow_style=False)` --
-the default for the project's `write_argoproxy_config` writer --
-emits plain ASCII strings UNQUOTED:
-```yaml
-user: aattia
-```
-The `awk -F'"' '{print $2}'` parser splits on `"`, so for the
-unquoted form there's only one field; `$2` is empty. The parser
-silently returns "" for the common case and only works on the
-fallback writer's quoted output (`user: "aattia"`). Same class of
-bug existed at TWO sites in this script (the H5 reuse check, and
-a previously-latent identity-resolver path that silently degraded
-to `id -un`). Both fixed by switching to a `yaml_scalar` helper
-that handles plain / double-quoted / single-quoted scalars +
-comments + leading whitespace; verified via 11-case synthetic
-harness.
-
-**Proposed action**: Add a "Cross-language interop" subsection (or
-a one-rule entry) to `research-software-engineering/references/
-03-api-design-for-researchers.md` (or wherever the skill's bash
-+ Python interop lives) capturing this pattern:
-
-> **Bash parsing of YAML/JSON written by Python**: if your bash
-> script reads a YAML/JSON file that was written by a Python
-> heredoc using PyYAML's `safe_dump` or `json.dump`, do NOT use
-> `awk -F'"'` or `grep '"key":'` style parsers. PyYAML's default
-> output is unquoted for plain ASCII scalars (`key: value`), and
-> JSON's stable form is quoted -- a single parser cannot handle
-> both reliably. Either (a) parse with a YAML-aware tool
-> (`yq`, `python3 -c "import yaml; ..."`), or (b) write a
-> form-tolerant parser that handles all three scalar styles
-> (plain / double-quoted / single-quoted) explicitly.
-
-This is a research-software-engineering rule because it's
-exactly the kind of "the test I have doesn't cover the form
-my writer actually emits" mismatch that production-grade
-scientific scripts trip on routinely.
-
-**Evidence / minimal repro**: live-test transcript pasted by user
-on 2026-05-14; the failure shows `cfg_user` evaluating empty even
-though the config file has a valid `user: aattia` line. Synthetic
-harness with 11 cases (plain / double-quoted / single-quoted /
-comment / whitespace / missing key / missing file / numeric scalar
-/ etc.) demonstrates the new `yaml_scalar` helper handles all
-forms correctly; ran during the fix commit. The fix + harness are
-described in audit doc `docs/AUDIT_2026-05-12.md` H5
-"REGRESSION + AMENDED" block.
-
-**Secondary observation**: the live test ALSO surfaced that
-`screen -S argovproxy -X quit` (the recovery hint baked into all
-three H5 refusal branches) is INSUFFICIENT when argo-proxy
-detached itself from the screen wrapper. The wrapper exits, the
-listener pid keeps holding the port. The recovery hint now
-suggests `kill <pid> && screen -S argovproxy -X quit`. This is a
-"the recovery hint must be tested too" pattern -- error messages
-that can't actually recover from the error are worse than no
-hint, because the user trusts them.
-
-**Status**: open (queued for upstream roll-up; concrete proposal
-above is a 1-paragraph addition to the relevant skill reference).
+Full original entry archived at
+[`_resolved/2026-05-14_yaml-quoting-and-recovery-hints.md`](_resolved/2026-05-14_yaml-quoting-and-recovery-hints.md);
+see [`_resolved/INDEX.md`](_resolved/INDEX.md) for the full
+resolved-entry index.
 
 ## 2026-05-14 — `setdefault` for security-defaulted keys preserves the wrong default on upgraders
 
-**Project context**: Phase 2b live test #1, second finding (after
-the H5 yaml_scalar regression). The P2 fix changed
-`write_argoproxy_config` to default `verbose: false` (privacy-
-relevant; controls whether argo-proxy logs prompts to disk on the
-compute node). The implementation used `data.setdefault('verbose',
-verbose_default)` in the PyYAML merge path so that a user who had
-explicitly chosen `verbose: true` would have their choice preserved.
+**RESOLVED upstream 2026-05-17** in `scicomp-research-skills` commit
+`686b3a1` as rule 12.2 in
+`skills/research-software-engineering/references/12-shell-and-cross-language-interop.md`.
 
-**Trigger**: external-failure (user dumped the config file after a
-successful H5 amendment verification and pasted contents; the file
-showed `verbose: true` despite the script having been re-run
-multiple times since the P2 fix landed).
-
-**Skill(s) involved**: `research-software-engineering` (the rule
-this would belong under is "API design / defaults that change
-meaning between versions").
-
-**Observation**: `setdefault` is the right primitive for keys
-where the file's existing value reflects a real user choice
-(e.g. `argo_base_url`: a user pointing at a dev Argo endpoint
-should not have that overwritten on every config rewrite). It is
-the WRONG primitive for keys where the prior value was set
-automatically by an older version of the same script -- in that
-case, "preserving" the old value silently keeps the upgrader on
-the OLD default, defeating the entire purpose of changing the
-default. From the file alone you cannot tell "user explicitly
-chose X" from "old script defaulted to X". For security-relevant
-defaults this means `setdefault` is unsafe; the explicit-opt-in
-channel must live elsewhere (CLI flag / env var) so the file
-content can be authoritatively overwritten on every write.
-
-**Proposed action**: Add a rule (or extend the existing one) to
-`research-software-engineering` covering "changing security-
-relevant defaults across versions." Concrete shape:
-
-> **Defaults that change meaning between versions**: when a new
-> version of a script flips a security-relevant default (e.g.
-> verbose-logging off, debug mode off, telemetry off), do NOT
-> use `setdefault` / "preserve existing value" merge logic in
-> the config writer for that key. From the file alone you cannot
-> distinguish "user explicitly opted in" from "previous version
-> defaulted in." For security defaults the answer is to:
-> (a) overwrite the key with the script's chosen default on every
->     write,
-> (b) provide an explicit opt-in channel (CLI flag / env var) for
->     users who really want the non-default behavior, and
-> (c) document the upgrade-path implication: pre-existing files
->     will have the new default applied on the first write after
->     upgrade, regardless of their prior contents.
->
-> `setdefault` IS appropriate for keys that genuinely vary by
-> deployment (e.g. alternate API endpoints, custom timeouts) --
-> values the user picked deliberately and that have nothing to
-> do with the script's security posture.
-
-This rule pairs naturally with the bash/PyYAML interop rule above:
-both are "writer's view of the file" disciplines that come up when
-a shell script + Python heredoc cooperate to manage a YAML config.
-
-**Evidence / minimal repro**: Phase 2b live test #1 transcript;
-user pasted `~/.config/argoproxy/config.yaml` contents showing
-`verbose: true` (last line of file) after the P2 fix had been
-shipped + the script re-run multiple times. The config also showed
-`argo_base_url` appended at the bottom in non-alphabetical
-position, evidence that the `setdefault('argo_base_url', ...)` in
-the same merge block had run on a config that already had every
-other key -- the appendix-positioning is PyYAML's `safe_dump
-sort_keys=False` insertion-order signature for a key that was
-absent originally and got added during the merge.
-
-**Status**: open (queued for upstream roll-up).
+Full original entry archived at
+[`_resolved/2026-05-14_setdefault-security-defaults.md`](_resolved/2026-05-14_setdefault-security-defaults.md);
+see [`_resolved/INDEX.md`](_resolved/INDEX.md) for the full
+resolved-entry index.
 
 ## 2026-05-15 — exit-summary "what to do next" hints must be scope-keyed, not action-keyed
 
-**Project context**: Phase 2b live test #1, third finding. The N1
-fix (Ctrl+C exit summary in `cleanup_local`) listed three reuse
-hints: "To use it again", "To fully stop: bash <self> stop", "To
-remove all artifacts: bash <self> clean". The user successfully
-Ctrl+C'd a foregrounded `client` and asked whether Ctrl+C should
-become equivalent to `stop`.
+**RESOLVED upstream 2026-05-17** in `scicomp-research-skills` commit
+`686b3a1` as rule 12.6 in
+`skills/research-software-engineering/references/12-shell-and-cross-language-interop.md`
+(landed under `research-software-engineering` rather than
+`human-facing-doc-authoring` as originally proposed -- the rule's
+audience is shell-script + CLI authors more than narrative-prose
+authors).
 
-**Trigger**: external-failure (more precisely, external-confusion;
-the user wasn't sure what each named action would actually do
-because the action names didn't communicate scope).
-
-**Skill(s) involved**: `human-facing-doc-authoring` (this is an
-error-message authoring discipline, but those messages are
-themselves a form of human-facing doc); secondarily
-`research-software-engineering` (CLI design / shell-tool UX).
-
-**Observation**: the original three hints were action-keyed
-("stop", "clean") and assumed the user knew which action mapped
-to which scope. They didn't. After Ctrl+C, the user's actual
-mental model is "I just stopped this; what other state from this
-session is still around, and what do I do about each piece?" --
-a SCOPE question, not an action question. Worse: the "To fully
-stop: bash <self> stop" hint was misleading on inspection because
-`mode_stop` would print "Nothing to stop locally" (the local
-listener was already gone, killed by `cleanup_local` itself one
-log line above).
-
-The right fix is to invert the mental model: list each
-INDEPENDENTLY-RESIDENT piece of state, then for each piece show
-the exact command (with parameters filled in) that touches it.
-The user makes a scope decision, not an action decision. For
-this script there are three pieces (SSH multiplex master, remote
-argo-proxy, local config/cache) and the new summary lists them
-explicitly with each scope's exact command.
-
-The deepest fix observation: action names like "stop" / "clean"
-already imply specific scopes, but those scopes are NOT
-documented at the scope's point of relevance (the Ctrl+C
-moment). The user has to reverse-engineer the scope mapping from
-the action names. Inverting -- making the scope explicit and
-deriving the action from it -- removes the reverse-engineering
-step.
-
-**Proposed action**: Add a guideline to
-`human-facing-doc-authoring` (probably as a new bullet under
-"Universal conventions" or as a short reference file
-`references/error-message-authoring.md`) covering exit-summary /
-error-message authoring discipline:
-
-> **Scope-keyed, not action-keyed, "what to do next" hints**:
-> when an error message or exit summary lists "what you can do
-> next" actions, list them by SCOPE (what state each touches),
-> not by action name. The user is in a "what do I want to keep
-> alive vs tear down" mental model at that moment, not a "what
-> are this tool's verbs called" mental model. Show the exact
-> command (with all parameters filled in from runtime context)
-> for each scope, NOT the action name + reverse-engineerable
-> scope. Verify the command would actually do something useful
-> at the moment it prints (e.g. don't suggest `stop` after
-> already stopping the local listener -- the user would run it
-> and see "nothing to stop", which corrodes trust in the
-> message).
-
-This composes well with the existing `human-facing-doc-authoring`
-"Tone and prose" guidelines and with the universal conventions
-about cross-references being links rather than action names.
-
-**Evidence / minimal repro**: original Phase 2b N1 summary
-(commit `564cb26`) had three action-keyed hints; user's
-question-after-success on 2026-05-15 explicitly named the
-scope-vs-action confusion ("It is OK if we make Ctrl+C
-equivalent to argon_anywhere.sh stop, but we need to be super
-clear about it"). The user's "we need to be super clear"
-identifies the missing axis. The fix in the next commit
-demonstrates the scope-keyed alternative.
-
-**Status**: open (queued for upstream roll-up).
+Full original entry archived at
+[`_resolved/2026-05-15_exit-summary-scope-keyed.md`](_resolved/2026-05-15_exit-summary-scope-keyed.md);
+see [`_resolved/INDEX.md`](_resolved/INDEX.md) for the full
+resolved-entry index.
 
 ## 2026-05-15 — test-plan stimulus must actually exercise the assertion site
 
-**Project context**: Phase 2c+3 live test #1, post-test
-postmortem. Two of fourteen tests (Test 2b + Test 5b) failed not
-because the underlying code was wrong but because the chosen test
-stimulus didn't exercise the code path the assertion was written
-against. Both defects shared the same root cause.
+**RESOLVED upstream 2026-05-17** in `scicomp-research-skills` commit
+`686b3a1` as rule 12.4 in
+`skills/research-software-engineering/references/12-shell-and-cross-language-interop.md`.
 
-**Trigger**: external-failure (the user ran the tests as
-documented; both produced empty output where output was expected;
-diagnosis revealed the test stimulus didn't traverse the
-assertion's code path).
-
-**Skill(s) involved**: `human-facing-doc-authoring` (test plans
-are human-facing docs); secondarily `research-software-engineering`
-(test design discipline).
-
-**Observation**: I designed both Test 2b and Test 5b with the
-naive "set up state X + run command Y + look for output Z"
-template. The state was a synthetic on-disk SSH-failure lock file.
-The output was the recovery message printed by `ssh_attempt_pre`.
-The chosen command Y was `bash argo_anywhere.sh status`. But
-`status` mode is purely local checks (`lsof :64742`, `curl /health`
-to localhost, `jq` on the OpenCode config) -- it doesn't make any
-SSH calls, so `ssh_attempt_pre` never fires, so the lock file is
-unread, so the recovery message never prints. The test produced
-empty output not because the code was broken but because the
-stimulus didn't traverse the asserted path. (Same defect appeared
-in Test 5b under `--probe-nodes status` -- the flag is parsed but
-unused because `status` doesn't call `pick_node`.)
-
-The deeper observation: when authoring a test that exercises an
-internal code path, **verify the chosen stimulus actually traverses
-that path before declaring the test designed**. I should have
-caught this by tracing through the script: "what subcommands call
-`ssh_attempt_pre`? `status` is not one of them. Pick a different
-stimulus." Instead I assumed the in-memory mental model
-("`--probe-nodes` triggers SSH attempts") was correct and the user
-ran into the empty-output failure before the assumption was caught.
-
-**Proposed action**: Add a discipline to
-`human-facing-doc-authoring` (or to the research-software-engineering
-testing-strategies reference) covering test-plan stimulus
-verification. Concrete shape:
-
-> **Test stimulus must exercise the assertion site**: when
-> authoring a test that exercises an internal code path
-> (an SSH-failure lock recovery message, a config-file merge
-> branch, a fail-loud guard, etc.), verify the chosen STIMULUS
-> command actually traverses the ASSERTION site's code path
-> before declaring the test designed. The naive
-> "set up state X + run command Y + look for output Z" template
-> silently fails when Y doesn't exercise the code reading X.
->
-> Concrete check: trace the call graph from Y to the assertion
-> site, OR add a print statement at the assertion site and
-> confirm Y's invocation prints it, OR write a pure-function
-> unit test that bypasses subcommand selection entirely (sourcing
-> the helper out of the script directly).
->
-> When in doubt, prefer pure-function unit tests + code-review
-> (structural proof) over end-to-end synthetic stimuli. Code
-> review of "every callsite uses pattern X" is a legitimate
-> stand-in when behavior tests can't be cleanly arranged.
-
-This composes with the "scope-keyed messages" discipline (the
-prior agent-feedback entry) -- both are about making the test /
-message itself accurately reflect runtime behavior, not the
-author's mental model of runtime behavior.
-
-**Evidence / minimal repro**: `notes/test_plan_phase2c3.md` Tests
-2b and 5b as originally written; user-pasted output showing empty
-results from the documented commands. Workarounds applied during
-the test session (Test 2 used a pure-function unit test; Test 5
-used code-review verification of the dedup pattern). Both tests
-PASSED via the workarounds; the underlying code was correct all
-along. The test plan got an explicit "Live-test #1 results"
-section documenting the defects + the workarounds; the audit-doc
-STATUS blocks for M2 and L4+L5 stand unchanged.
-
-**Status**: open (queued for upstream roll-up).
+Full original entry archived at
+[`_resolved/2026-05-15_test-stimulus-exercises-assertion.md`](_resolved/2026-05-15_test-stimulus-exercises-assertion.md);
+see [`_resolved/INDEX.md`](_resolved/INDEX.md) for the full
+resolved-entry index.
 
 ## 2026-05-15 — shell-script unit-test mechanics: pipe-eats-exit-code + awk-extract-fragility
 
-**Project context**: Phase 2d live test #1, post-test postmortem.
-Two test-plan defects surfaced (Tests 2b + 4b). Both share the
-same family as the Phase 2c+3 entry above ("test stimulus must
-actually exercise the assertion site"), but at a lower-level
-mechanical layer: the test harness mechanics themselves were
-wrong, not the choice of subcommand.
+**RESOLVED upstream 2026-05-17** in `scicomp-research-skills` commit
+`686b3a1` as rule 12.5 in
+`skills/research-software-engineering/references/12-shell-and-cross-language-interop.md`
+(landed under `research-software-engineering` -- the proposal's
+preferred home).
 
-**Trigger**: external-failure (user ran the tests; one reported
-the wrong exit code because of a pipe artifact; one outright
-failed to source the function-under-test because awk extraction
-captured a partial body).
-
-**Skill(s) involved**: `human-facing-doc-authoring` (test plans
-are human-facing docs); secondarily `research-software-engineering`
-(shell-script testing discipline).
-
-**Observation**: across two consecutive live tests (Phase 2c+3 +
-Phase 2d), four total test-plan defects emerged, all sharing the
-common root cause "the test harness mechanism didn't read /
-extract / route what the assertion expected." The Phase 2c+3
-defects were at the SUBCOMMAND-CHOICE layer (using `status`
-where SSH-attempt activity was expected); the Phase 2d defects
-are at the SHELL-MECHANICS layer (`| tail` eats exit code; awk
-extraction of function bodies with embedded `}` lines breaks).
-Both layers benefit from explicit testing-discipline rules.
-
-**Proposed actions** (two complementary rules):
-
-1. **Exit-code capture through pipes**: when a test pipeline ends
-   in a transformer (`| tail`, `| head`, `| grep`, etc.), `$?`
-   reads the transformer's exit code, NOT the upstream command
-   under test. For tests where the exit code is the assertion,
-   either:
-   - drop the pipe and redirect output to a file or `/dev/null`,
-     then read `$?` directly:
-     ```sh
-     command_under_test arg >/dev/null 2>&1
-     echo "exit code: $?"
-     ```
-   - OR use bash's `${PIPESTATUS[0]}` to capture the leftmost
-     pipe element's exit code:
-     ```sh
-     command_under_test arg 2>&1 | tail -15
-     echo "exit code: ${PIPESTATUS[0]}"
-     ```
-   The latter is bash-only (POSIX sh doesn't have PIPESTATUS);
-   for portable harnesses prefer the former.
-
-2. **awk function-body extraction is fragile when bodies contain
-   heredocs with `}` lines**: the common pattern
-   `awk '/^funcname\(\) \{/,/^}$/'` relies on the closing `}`
-   being unique-on-a-line, but bash functions whose bodies embed
-   JSON / YAML heredocs break that assumption (the heredoc's
-   closing `}` matches first and truncates the extraction).
-   Three alternative approaches:
-   - For one-line guards (asserts, single-statement bodies),
-     exercise the predicate directly inline without extracting
-     the surrounding function body. The L6 test rewrote
-     `[ -n "${PROXY_PORT:-}" ] || die "..."` as a direct
-     `bash -c` invocation with the same predicate.
-   - For multi-line writers with heredocs, use brace-counting
-     extraction (parse the bash body counting `{` / `}` depth
-     and find the matching closing `}` at the function's level).
-     More complex but correct.
-   - For functions designed for testability, factor the assertions
-     out into separate `_check_invariants_<name>` helpers that
-     don't embed heredocs. Best long-term but requires the source
-     to be designed this way.
-
-Both rules belong in either `human-facing-doc-authoring`'s
-test-plan-authoring guidance OR a new shell-script-testing
-reference under `research-software-engineering`. The latter is
-probably the better home: these are shell-mechanics rules, not
-narrative-prose rules.
-
-**Pattern-detection observation**: this is the **second
-postmortem in a row** that surfaced test-design defects of this
-family (Phase 2c+3's two + Phase 2d's two = four total). The
-consistency suggests this is a class of bug, not isolated
-mistakes -- worth a dedicated discipline rule rather than
-case-by-case fixes.
-
-**Evidence / minimal repro**:
-- Test 2b (Phase 2d live test #1): user pasted
-  `[err ] ... Refusing to overwrite a broken Claude Code config.`
-  followed by `exit code: 0`. The exit code 0 was the trailing
-  `| tail -15`'s; the actual `die` exited 2.
-- Test 4b (Phase 2d live test #1): user got
-  `/tmp/_writer.sh: line 53: syntax error: unexpected end of
-  file` + `command not found: write_opencode_config` + `exit
-  code: 127`. The awk extraction captured up to a `}` line
-  inside the function's JSON heredoc, producing an unterminated
-  bash body when sourced.
-
-**Status**: open (queued for upstream roll-up); pairs naturally
-with the "test stimulus must actually exercise the assertion
-site" entry (same family, different layer).
+Full original entry archived at
+[`_resolved/2026-05-15_shell-test-mechanics.md`](_resolved/2026-05-15_shell-test-mechanics.md);
+see [`_resolved/INDEX.md`](_resolved/INDEX.md) for the full
+resolved-entry index.
 
 ---
 

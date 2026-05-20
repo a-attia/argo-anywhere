@@ -1,0 +1,50 @@
+# Archive index
+
+This directory holds artefacts that have been superseded, filed
+elsewhere, or otherwise removed from the project's active working
+set, but are kept for provenance + traceability.
+
+**Convention**: an artefact lives here when it has stopped being
+part of the project's active inputs but the historical record has
+value (e.g. an upstream-proposal draft that became a GitHub issue;
+a working-document version that was superseded by a newer one; a
+test plan that was rolled into a successor plan).
+
+For agent_feedback entries that have been actioned upstream, see
+[`../_resolved/INDEX.md`](../_resolved/INDEX.md) instead. Resolved
+agent_feedback entries are kept separately because they have a
+canonical "resolved-via" semantics that archival doesn't capture.
+
+---
+
+## Entries (newest first)
+
+(none yet)
+
+| Date archived | Title | Original location | Reason archived | Where it lives now | File |
+|:--------------|:------|:------------------|:----------------|:-------------------|:-----|
+
+---
+
+## When to add a new entry here
+
+Append a row to the table + move the file when:
+
+1. An artefact has been formally superseded by a successor (and
+   the successor is in production).
+2. An artefact was filed elsewhere (GitHub issue / external
+   repository / upstream PR) AND maintaining two parallel copies
+   adds confusion.
+3. An artefact represents a "version N" that "version N+1" has
+   fully replaced AND the diff matters less than the trajectory.
+
+Avoid archiving files that are still cited from active artefacts
+(those should be updated, not archived). The archive is for
+provenance, not for hiding still-referenced files.
+
+---
+
+*Created 2026-05-20 by A. Attia during post-Session-A cleanup of the
+argo-anywhere project. The directory + index convention was
+co-designed with the framework's archive+resolved convention being
+back-propagated to `scicomp-research-skills` templates.*
