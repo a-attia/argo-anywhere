@@ -120,6 +120,7 @@ library API. Stable since v2.0:
 | `server` | Run argo-proxy on a compute node (auto-invoked by `client` over SSH; standalone path also documented) | stable |
 | `status` | Probe the tunnel + proxy health; ALL GREEN / DEGRADED / FAIL | stable |
 | `update-models` | Refresh OpenCode's model list from `/v1/models` (OpenCode-specific today) | stable |
+| `list-models` | Tabulate the models the proxy serves on `/v1/models` (read-only sibling of `update-models`); cross-references the OpenCode config when present | stable (added 2026-06-04) |
 | `stop` | Kill the local SSH tunnel (does NOT touch the remote proxy) | stable |
 | `clean` | Remove every artifact this script created (local + remote, with confirmation tiers) | stable |
 | `list-tools` | Print supported `--cli-tool` values | stable |
@@ -141,6 +142,7 @@ Flag surface (all optional):
 | `--scope project\|global` | Per-tool config scope (currently consumed by Claude Code) |
 | `--force-reinstall` | Wipe the server-side venv + rebuild from scratch |
 | `--keep-orphans` / `--drop-orphans` | `update-models` orphan handling |
+| `--output FILE` / `--format text\|tsv\|json` / `--include-embeddings` | `list-models` output destination + format + embedding-filter override |
 | `--dry-run` / `--local-only` / `-y` / `--purge` / `--purge-backups` | `clean` modifiers |
 
 Design principles in use:
@@ -208,8 +210,8 @@ Phase status as of **2026-05-18** (post-v2.2.0 release):
 | **v2.1.0 tag** | Defensive-hardening release | **done** (tagged `v2.1.0` 2026-05-15) |
 | **Phase 4 (v2.2)** | Per-tool scope framework (D-017+D-018+D-019); port-as-state (D-020; closes audit M4); OpenCode project-scope (B1b); cross-client port-coherence (D-021); B0 latent `mode_stop` fix | done (live-test passed 2026-05-18; 3 code amendments + 2 doc-only commits + 2 SHA backfills) |
 | **v2.2.0 tag** | Multi-tool framework + scope generalization release | **done** (tagged `v2.2.0` 2026-05-18 at HEAD `737563d`) |
-| **v2.2.1 (queued)** | SH-04 inline `lsof`+`ps` in port-collision; SCOPE-NOOP suppression for `_<tool>_check_conflicts` A.1 prompts when writer would no-op (Test 12 finding) | queued; no scheduled trigger |
-| **v2.3 (queued)** | SH-01 random `apiKeyHelper` token (eliminates H7 warning); SH-02 `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default; SH-03 `no_proxy` injection + `HTTP_PROXY` detection; B4 cursor out-of-integration docs (needs manually-collected citations); auto-default `env.ANTHROPIC_MODEL=claude-sonnet-4-6` to work around the upstream-stack opus-4-7 limitation surfaced during v2.2.0 release-gate | queued |
+| **v2.2.1 (queued)** | SH-04 inline `lsof`+`ps` in port-collision; SCOPE-NOOP suppression for `_<tool>_check_conflicts` A.1 prompts when writer would no-op (Test 12 finding); **UP-02 + UP-04 + UP-07 + UP-08 + UP-09 + UP-10 from the 2026-06-17 re-walk audit** (version-floor bump to `>=3.1.0`; refresh stale user-preserved-keys comment; warn-and-strip legacy `use_legacy_argo` / `force_conversion`; mark opus-4-7 limitation RESOLVED + add fresh opus-4-8 limitation entry in `docs/LIMITATIONS.md` per UP-10; small SECURITY.md + README doc updates for `log_to_file` + model-list auto-refresh); **UP-03 dropped** (would contradict upstream "omit when default" convention); **UP-01/05/06 superseded** by UP-08/UP-09 | queued; no scheduled trigger |
+| **v2.3 (queued)** | SH-01 random `apiKeyHelper` token (eliminates H7 warning); SH-02 `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default; SH-03 `no_proxy` injection + `HTTP_PROXY` detection; B4 cursor out-of-integration docs (needs manually-collected citations). **Auto-default `env.ANTHROPIC_MODEL` when Anthropic's current flagship Opus is not in the installed llm-rosetta shim's `model_overrides`** — re-scoped 2026-06-17 per UP-10 (Opus 4.8 reissued the opus-4-7 limitation). Detection rule: introspect `${VENV_PATH}/lib/python*/site-packages/llm_rosetta/shims/providers/argo/anthropic/provider.yaml` `model_overrides` at config-write time; if it lacks any of Anthropic's most-recent two Opus releases, pre-populate `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `~/.claude/settings.json`. (Earlier `REMOVED 2026-06-17` note on this line — superseded same day by UP-10.) | queued |
 | **Phase 5 (deferred)** | aider integration as application of established 5-function per-tool API contract | deferred (no scheduled trigger; fires when user requests) |
 | **Phase 6+ (under consideration)** | Generic OpenAI-compatible `--cli-tool` (e.g. `--cli-tool generic --config-path <PATH>`) | under consideration |
 | **Phase C local-shim mode** | Local HTTP shim layer (stream forcing + thinking-block stripping + transparent retry) per 2026-05-18 argo-shim comparative audit | **REJECTED** — would break D-001 single-file UX and address problems already handled upstream by argo-proxy's `anthropic_stream_mode: force` default (v3.x). Documented in `docs/AUDIT_2026-05-18_argo-shim-comparison.md` (Step 4 of v2.2.0 release sequence). |
@@ -1113,6 +1115,346 @@ until a user reports being bitten.
 * No new tests in the smoke-test suite; live-test in
   `notes/test_plan_phase4.md` will cover the prompt path.
 
+### D-022 — `update` subcommand: lossless in-place upgrades of installed components (2026-06-24 [v2.2.1])
+
+**Status**: accepted; landed on `main` 2026-06-24 ahead of the v2.2.1
+tag. Closes the long-standing user-affordance gap surfaced during the
+2026-06-24 "opus 4.8 not appearing in /v1/models" session: there was no
+short, low-blast-radius way to upgrade `argo-proxy` (or any of the
+laptop-side AI CLI tools) other than `--force-reinstall` (full venv
+wipe + rebuild) or hand-rolling an SSH-into-node + `argo-proxy update
+install` recipe documented deep in the script's `help` output.
+
+**Context.** Before D-022 the script had three asymmetric upgrade
+affordances:
+
+1. **`--force-reinstall`** — wipes `$HOME/argovenv` on the node and
+   rebuilds. Heavy-handed; the only "I want a newer argo-proxy"
+   path the script exposed.
+2. **Implicit upgrade in `mode_server`** — `pip install --upgrade
+   argo-proxy` runs ONLY when `argo-proxy --version` or `serve --help`
+   fails. Once a working `serve` exists, the venv's argo-proxy never
+   upgrades again (no version-floor check; audit finding UP-02
+   queued for resolution).
+3. **`update-models`** — refreshes the OpenCode config's model list
+   from `/v1/models`. Does not install or upgrade anything, and
+   does not refresh the proxy's own model registry — so when upstream
+   Argo adds (e.g.) `claudeopus48` to its `/api/v1/models/` endpoint,
+   a stale argo-proxy continues to advertise the old list.
+
+Laptop-side tools (OpenCode, Claude Code) had no upgrade affordance at
+all: `ensure_<name>_installed` early-returned on `command -v <tool>`
+success and never re-invoked the upstream installer.
+
+**Decision.** Add a top-level `update` subcommand whose contract is:
+
+1. **Lossless by default.** In-place upgrades preserve all installed
+   state — venv, config files, OAuth tokens, model registries. Never
+   wipes anything. `--force-reinstall` remains the explicit escape
+   hatch for "venv is broken, start over."
+2. **Per-component registry** (`UPDATE_COMPONENTS_AVAILABLE`) listing
+   the three upgradable components today: `argoproxy`, `opencode`,
+   `claudecode`. Extensible: a future per-tool addition (aider,
+   cursor) registers an `update_<name>_cli_tool` helper and appends
+   itself to the registry.
+3. **Argument shape**: `update [--all | <components...>] [--check]
+   [--yes]`. `--all` updates every registered component. A positional
+   component list (e.g. `update argoproxy opencode`) restricts the
+   run. Bare `update` (no args) prints the registry and exits 0
+   without changing anything — refuses to do destructive work without
+   explicit intent. `--check` is report-only (no installs, no
+   upgrades, no `/refresh` POST). `--yes` auto-confirms install
+   prompts for missing components (otherwise asks
+   `Install it now? [y/N]`).
+4. **Per-component upgrade idiom** chosen for safety + provenance:
+   * **argo-proxy**: prefer `${venv}/bin/pip install --upgrade
+     argo-proxy` (targets the venv whose binary is actually
+     running). Fall back to upstream `argo-proxy update install` only
+     if the venv pip path fails entirely. Discovered during the
+     2026-06-24 live test: upstream `argo-proxy update install`
+     resolves the wrong `pip` on compute nodes (system / conda pip,
+     not the venv pip), so it "succeeds" but the running venv's
+     argo-proxy stays at its old version. Codified in
+     `_update_argoproxy_inproc` + `_update_argoproxy_remote_payload`
+     with a multi-line comment recording the diagnosis.
+   * **OpenCode**: detect brew-managed install (binary under
+     `/opt/homebrew/bin`, `/usr/local/bin`, or `/home/linuxbrew/`)
+     and run `brew upgrade sst/tap/opencode`; else re-run the
+     upstream `curl -fsSL https://opencode.ai/install | bash`
+     (idempotent and the documented upgrade path).
+   * **Claude Code**: re-run upstream
+     `curl -fsSL https://claude.ai/install.sh | bash` (Anthropic
+     ships no brew formula today; the curl installer is idempotent).
+5. **Auto-refresh after argoproxy upgrade.** When `update argoproxy`
+   succeeds AND a local tunnel is reachable on `$PROXY_PORT`, POST
+   to `/refresh` so the running proxy's `ModelRegistry` re-pulls
+   the upstream Argo `/api/v1/models/` list without a restart.
+   Silently skipped (with a log line) when no tunnel is up — the
+   upgrade still succeeds; the user picks up new models on the next
+   `client` / `tunnel` run. The `/refresh` endpoint exists in
+   argo-proxy ≥3.0; older versions surface a 404 which the helper
+   converts to a soft warn.
+6. **Prompt-to-install missing components.** When a component isn't
+   installed yet, `update` asks `Install it now? [y/N]` (defaults
+   N; `--yes` auto-confirms). Skip rather than die: the user may
+   have called `update --all` from a fresh laptop where only one of
+   the three components matters to them.
+
+**Per-tool API contract extension** (extends the contract in
+[`AGENTS.md`](AGENTS.md) §"Multi-CLI-tool architecture"):
+
+* New optional function `update_<name>_cli_tool()` per CLI tool.
+  Signature: takes no args; honors `$UPDATE_CHECK_ONLY` and
+  `$UPDATE_ASSUME_YES` globals; returns 0 on success/up-to-date,
+  1 on user-declined-install or recoverable skip, 2+ on hard failure.
+  When absent, the dispatcher `mode_update()` skips the tool with a
+  warn.
+* New required helper `ensure_argoproxy_installed()`: factored
+  out of inline `mode_server` lines 5113-5180 into a real function
+  (closes the conceptual-vs-real naming gap noted in the audit docs;
+  `ensure_argoproxy_installed` was referenced in
+  `docs/AUDIT_2026-06-04_argo-proxy-upstream.md:316` and AGENTS.md
+  but did not exist as a function until D-022). Behavior is preserved
+  verbatim — `mode_server` continues to invoke it from the same
+  call-site with the same semantics.
+
+**Shared helpers added.**
+
+* `_version_ge <a> <b>` — semver-ish comparison via `sort -V`. Used
+  by `update --check` for argo-proxy (compares installed vs
+  PyPI-latest). Also unblocks the UP-02 soft-floor work (the audit
+  recommended a `_version_ge` primitive but the script had none).
+* `_pypi_latest_version <pkg>` — best-effort `https://pypi.org/pypi/<pkg>/json`
+  GET via curl + jq (or python3 fallback). Empty string on failure;
+  callers degrade to "unknown" rather than die.
+* `_extract_version <text>` — normalizes `--version` output across
+  tools that decorate the version with vendor names or parenthesized
+  labels (`argo-proxy 3.1.2`, `2.1.187 (Claude Code)`, `1.17.9`).
+  Returns the first dotted-numeric token.
+* `_update_prompt_install <label>` — the
+  `Install it now? [y/N]` prompt; honors `$UPDATE_ASSUME_YES`.
+
+**Composition with `--force-reinstall`.** `update` is the lossless
+sibling; `--force-reinstall` remains the destructive escape hatch.
+When in-place upgrade fails, `update_argoproxy_component`'s error
+message points at `--force-reinstall server` as the fallback. The
+two flags do not interact: `update --force-reinstall argoproxy`
+would be a contradiction, so the parser does not advertise it; the
+user picks one or the other.
+
+**Alternatives considered.**
+
+1. **`--update-all` as a top-level flag** (matched user's initial
+   phrasing): rejected. Doesn't compose with the existing subcommand
+   grammar; a bare flag can't carry a positional component list
+   (`--update opencode` is awkward); harder to extend.
+2. **Auto-escalate to `--force-reinstall` on in-place failure**:
+   rejected per D-016 ("fail louder, not silently"). The user
+   may have a reason the in-place upgrade failed (intentionally
+   pinned dependency, partial network failure, etc.); silently
+   destroying their venv is the wrong default. Helper instead
+   prints the explicit recovery command.
+3. **`update` auto-restart of the running proxy**: rejected. Kills
+   in-flight requests from any concurrent user on the same node.
+   `/refresh` is sufficient for the model-registry use case
+   (verified live 2026-06-24: opus 4.8 appeared in `/v1/models`
+   immediately after `update argoproxy` without restart).
+4. **Always use `argo-proxy update install` (upstream's own
+   updater)**: rejected after live test. The upstream updater
+   resolves `pip` from PATH at runtime, which on compute nodes
+   defaults to the system / conda pip, leaving the venv's argo-proxy
+   stale. The venv-pip-first idiom is the only one that
+   reliably upgrades the binary that's actually running. Kept as
+   the fallback path.
+
+**Consequences.**
+
+* `mode_server`'s install block shrinks from ~70 lines of inline
+  logic to a single `ensure_argoproxy_installed || die ...` call.
+  Server-mode behavior is unchanged (same install policy, same
+  recreate-on-broken-venv discipline, same FORCE_REINSTALL semantics).
+* New SECTION 22b in `argo_anywhere.sh` (between SECTION 22
+  update-models/list-models and SECTION 23 clean helpers) houses
+  the registry, the per-component update helpers, and `mode_update`.
+* Help text grows: new subcommand block + new `Flags below apply to
+  'update':` group + revised `Update installed components in place`
+  recipe in `long_help` (replaces the stale `ssh -J ... 'argo-proxy
+  update install'` one-liner with the new subcommand examples;
+  keeps the manual fallback under "Manual fallback if 'update
+  argoproxy' can't reach the node").
+* `--all` and `--check` flags added at the top-level parser; warned-
+  but-ignored when passed to subcommands that don't consume them
+  (matches the existing `--cli-tool` / `--scope` / `--output` /
+  `--format` ignored-warn discipline).
+* The legacy single-`--yes` parse arm now sets BOTH `CLEAN_ASSUME_YES`
+  and `UPDATE_ASSUME_YES` so the same flag controls both subcommands'
+  non-interactive behavior.
+* `clean`'s risk-tier discipline is unaffected — `update` operates
+  strictly on **installed binaries / packages**, never on **config
+  files**; the two subcommands have non-overlapping concerns.
+
+**Live test (2026-06-24, on `compute-01.cels.anl.gov` via mux master).**
+End-to-end: starting from venv argo-proxy `3.0.0` (system pip cached
+at `3.0.1`), `bash argo_anywhere.sh update argoproxy` upgraded the
+venv to `3.1.2`, POSTed `/refresh`, and `claudeopus48` appeared in
+`/v1/models` (previously only `claudeopus47` and older). Total
+elapsed: ~12 seconds. No prompts (SSH mux already warm).
+
+**Follow-on (D-023, same session)**: the registry was extended with
+a fourth component, `argo-anywhere`, that self-updates the script
+itself. See D-023 for the full design.
+
+### D-023 — Self-update + canonical install for `argo_anywhere.sh` itself (2026-06-24 [v2.2.1])
+
+**Status**: accepted; landed on `main` 2026-06-24 immediately after
+D-022. Extends the per-component registry from three components to
+four; adds the first-run bootstrap helper that materializes the
+canonical install at `~/.argo_anywhere/`.
+
+**Context.** D-022 added `update argoproxy / opencode / claudecode`
+for the three downstream components but said nothing about the
+script itself. The user reported (2026-06-24 session) that they had
+a stale copy of `argo_anywhere.sh` at `~/.argo_anywhere/argo_anywhere.sh`
+(set up manually months earlier with a shell-rc PATH line) and asked
+whether `update` could keep that copy fresh too.
+
+Two facts surfaced during the discussion:
+
+1. There IS no in-script self-update path today. The script doesn't
+   even have a version constant; version lives only in git tags.
+2. There ARE three "copies" of the script on disk for a typical
+   user (1) the source-of-truth working copy (git checkout or
+   wherever they `curl`d it); (2) a PATH-discoverable cached copy at
+   `~/.argo_anywhere/argo_anywhere.sh` if they've set one up; (3) a
+   `scp`'d copy at `~/.argo_anywhere.sh` on each compute node, kept
+   in sync automatically by `remote_bootstrap` on every `client` run.
+
+(3) already self-manages. (1) is the user's responsibility (they
+chose where to put it). (2) was the gap.
+
+**Decision.** Promote `~/.argo_anywhere/` to a first-class canonical
+install location (a rustup/cargo-style PATH directory) and manage it
+via two complementary helpers:
+
+1. **Bootstrap helper** (`maybe_bootstrap_canonical_install`): fires
+   ONCE on the user's first `client` / `setup` invocation IFF
+   `~/.argo_anywhere/` does not yet exist. Creates the directory,
+   copies `$0` into it, writes a sourceable `env` PATH-helper, and
+   prints one-shot rc-line instructions. Idempotent: no-op on every
+   subsequent invocation. Honors `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`.
+   Does NOT fire when running on a compute node (the on-node
+   short-circuit doesn't benefit), or when the user is already
+   running from the canonical install path.
+
+2. **Self-update component** (`update_argo_anywhere_component`):
+   the fourth entry in `UPDATE_COMPONENTS_AVAILABLE`. Resolves the
+   latest upstream version (two-step probe: GitHub `/releases/latest`
+   API, falling back to `/tags` matching `v[0-9]+.[0-9]+.[0-9]+`,
+   falling back to `main` branch tip); fetches the raw script;
+   validates it (`bash -n` parses + size > 50 KB + sentinel marker:
+   either `SCRIPT_VERSION=` line or the canonical
+   `# argo_anywhere.sh --` header); backs up the existing target
+   with a `.bak.<timestamp>.<pid>` suffix (matches
+   `handle_config_file`'s backup convention); atomically replaces
+   the canonical install via `mv` within the same filesystem.
+
+**Two-step tag probe rationale.** The project's release process
+(PLAN.md §10) tags via `git tag vX.Y.Z` ONLY — the GitHub Releases
+UI is not used. The `/releases/latest` API endpoint therefore 404s
+for this repo today. Verified live 2026-06-24: `/releases/latest`
+returned 404; `/tags` returned the full tag history with `v2.2.0`
+at the top; self-update fetched the v2.2.0 raw script successfully.
+We still try `/releases/latest` first in case the convention
+changes; the fallback is essentially the production path today.
+
+**Sentinel-marker lenience (`SCRIPT_VERSION=` OR header).** The
+`SCRIPT_VERSION=` constant is new in v2.2.1; v2.2.0 and earlier
+releases don't have it. Validating against the constant alone would
+prevent v2.2.0 users from self-upgrading to v2.2.1 — they'd see
+"file does not contain a SCRIPT_VERSION= line" and have to `curl`
+manually. Accepting EITHER the constant OR the long-stable header
+`# argo_anywhere.sh --` (in place since the v2.0 rename) keeps the
+v2.2.0 → v2.2.1 transition smooth. From v2.2.1 onward both markers
+are present; the header check is dead code we keep around for
+defense-in-depth.
+
+**Atomicity discipline.** Fetch lands in a `mktemp` file in the
+SAME directory as the target so the final `mv` is `rename(2)`
+atomic (POSIX guarantees rename atomicity within a single
+filesystem). Forces `chmod 0755` on the new file (because `mktemp`
+creates with 0600 by default, and the new copy needs to be
+executable + readable for the user's interactive shells).
+
+**Refuse on dirty git tree.** When the resolved target lives inside
+a git working tree with uncommitted changes, `update argo-anywhere`
+aborts with a clear message: this almost always means the user is
+running from a development checkout and would clobber unsaved work.
+The user is told to commit/stash + use `git pull`, or to install
+into the canonical location first.
+
+**Shell-rc management = NO.** The bootstrap helper writes the `env`
+file and PRINTS the rc-line instruction; it never edits the user's
+rc files directly. Matches rustup/cargo convention. Rationale:
+detecting the right rc file is brittle (zsh/bash, login-vs-interactive,
+ZDOTDIR); rewriting user rc files invites clobbering custom edits;
+the user benefits from seeing exactly what's changing. The user's
+existing manual `export PATH=...` line continues to work; they can
+migrate to `. ~/.argo_anywhere/env` at their leisure (the env file
+is idempotent so coexistence is fine).
+
+**Alternatives considered.**
+
+1. **Separate `self-update` subcommand**: rejected. Keeping
+   self-update inside the `update` registry (a) gets it into
+   `update --all` automatically, (b) reuses the same `--check` /
+   `--yes` semantics, (c) gives users one mental model for
+   "upgrading anything I have installed".
+2. **Auto-append rc line on bootstrap**: rejected per the
+   shell-rc-management discussion above.
+3. **Always use `main` branch instead of release tags**: rejected.
+   Pinning to release tags is the right default for "I want a
+   working version, not the latest unreleased changes". Falling
+   back to `main` ONLY when no tag resolves keeps the "works
+   even on day-zero of a new repo" property.
+4. **Strict validation requiring `SCRIPT_VERSION=`**: rejected as
+   it would block the v2.2.0 → v2.2.1 self-upgrade path (the very
+   first one users will exercise).
+
+**Consequences.**
+
+* `argo_anywhere.sh` gains a `SCRIPT_VERSION="2.2.1-dev"` constant
+  near the top of SECTION 2 (bumped to `"2.2.1"` on tag day per the
+  release process).
+* SECTION 5 (PLATFORM HELPERS) gains
+  `maybe_bootstrap_canonical_install` + four small helpers
+  (`canonical_install_present`, `_resolve_self_path`,
+  `_write_argo_env_file`, `_print_path_setup_hint`).
+* `mode_client` calls `maybe_bootstrap_canonical_install` as its
+  very first action (before `_client_common_setup` even fires).
+  `mode_setup` inherits the call automatically (it reuses
+  `mode_client`).
+* SECTION 22b (UPDATE) gains `update_argo_anywhere_component`
+  (the largest of the four `update_*` helpers; the validation +
+  atomic-replace machinery is bespoke per-component).
+* The `UPDATE_COMPONENTS_AVAILABLE` registry grows from 3 to 4
+  entries, with `argo-anywhere` listed first (alphabetical AND
+  most-impactful position).
+* Help text, AGENTS.md, README.md, and docs/UPGRADING.md all gain
+  notes on the new component + the canonical install convention.
+
+**Live test (2026-06-24, on the test laptop).** Starting from a
+pre-existing `~/.argo_anywhere/` populated months earlier with the
+v1.x-era manual setup: `bash argo_anywhere.sh update argo-anywhere`
+resolved upstream tag `v2.2.0`, fetched
+`https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.2.0/argo_anywhere.sh`,
+validated (size 354 KB > 50 KB threshold; bash -n clean; canonical
+header present), backed up the existing copy to
+`argo_anywhere.sh.bak.20260624-111941.60789`, atomically replaced
+the canonical install, refreshed the env helper. Total elapsed: ~3
+seconds. Verified byte-for-byte identity with upstream v2.2.0 tag
+via `diff`. Backup was then manually restored to leave the user's
+pre-test install in place pending the v2.2.1 tag.
+
 ---
 
 ## 8. Code-paper coupling
@@ -1126,23 +1468,25 @@ project's commit/tag pin; the script itself is downstream-of-nobody.
 
 ## 9. Lifecycle stage
 
-- **Now**: v2.1.0 released 2026-05-15 (Phase 2d
-  defensive-hardening landed + live-tested PASS on first try
-  with zero mid-test code amendments). v2.0.0 released earlier
-  the same day. Audit-coverage state: 40 of 43 findings closed
-  (10 CRIT + 11 HIGH + all MED except M4 + all LOW except L8 +
-  all INFO except I2). All five phases (1, 2a, 2b, 2c+3, 2d)
-  live-tested PASS; mid-test amendments where surfaced (P3
-  added in Phase 2a; H5/P2/N1 in Phase 2b; L4+L5 in Phase 2c+3).
-  Phase 2d's clean live-test (zero amendments) suggests the
-  fail-louder-not-silently discipline (D-016) is well-internalized
-  by this point in the project's evolution. Maintenance posture
+- **Now**: v2.2.0 released 2026-05-18 (Phase 4 multi-tool
+  framework landed + live-tested PASS per
+  `notes/test_plan_phase4.md`). v2.2.1 in progress on `main`
+  (2026-06-24): D-022 `update` subcommand + D-023 self-update +
+  canonical install both landed; per-phase test plan at
+  `notes/test_plan_phase_v2_2_1.md` awaits release-gate live
+  verification before tagging. Audit-coverage state: **42 of 43
+  findings closed** (only L8 `curl|bash claude.ai` remains as
+  documented no-fix); v2.2.1 will partially address UP-02
+  (`update argoproxy` exposes a user-facing upgrade path) but the
+  formal `_version_ge` soft-floor inside
+  `ensure_argoproxy_installed` is still queued. Maintenance posture
   active.
-- **Next 6 months**: optional Phase 2e cosmetic (I2 `_LOGGING`
-  env var rename) when convenient. Phase 4 (additional CLI
-  tools — aider, cursor, generic OpenAI-compatible; closes
-  remaining M4) when there's
-  user demand or a personal need.
+- **Next 6 months**: tag v2.2.1 after `notes/test_plan_phase_v2_2_1.md`
+  live verification passes. Pick up the remaining v2.2.x backlog
+  (UP-01/03/04/05/06 + SH-04 + SCOPE-NOOP) as patch releases.
+  Phase 5 (aider integration) deferred (no scheduled trigger;
+  becomes scheduled when a user asks). Phase 4 cursor docs
+  deferred to v2.3.
 - **Long term**: Maintenance posture — single-author project; releases
   follow ANL-AI4Dev or Argo upstream changes that affect the
   protocols this script speaks. Abandonment criteria: when the upstream
@@ -1235,32 +1579,53 @@ Release process:
    (spurious scope-conflict prompt when writer would no-op; surfaced
    during Phase 4 Test 12 live test). v2.3 picks up SH-01 (random
    `apiKeyHelper` token; supersedes H7 privacy warning), SH-02
-   (`CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default), SH-03 (`no_proxy`
-   injection + `HTTP_PROXY` detection), and the opus-4-7
-   auto-default fix (pre-populate
-   `env.ANTHROPIC_MODEL=claude-sonnet-4-6` per the upstream-stack
-   limitation documented in `docs/LIMITATIONS.md`). Phase C
-   local-shim mode is REJECTED with the four-point rationale in
-   the audit Section 4. As each SH-* item closes, a STATUS block
-   appended to the audit Section 7 records the closure commit
-   (mirrors `AUDIT_2026-05-12.md` STATUS convention).
-7. **Upstream-stack opus-4-7 + `thinking.type.enabled`**: surfaced
-   during the v2.2.0 release-gate live test. Anthropic Vertex
-   rejects `thinking.type.enabled` for `claude-opus-4-7` (requires
-   `thinking.type.adaptive`); argo-proxy correctly surfaces as
-   SSE `event: error` with HTTP 200; Claude Code 2.1.x fails to
-   parse the SSE error event and reports "API returned empty or
-   malformed response (HTTP 200)." Documented in
-   `docs/LIMITATIONS.md` "Upstream stack" section with verified
-   workarounds (`claude --model claude-sonnet-4-6` or
-   `env.ANTHROPIC_MODEL=claude-sonnet-4-6`). Auto-default fix
-   queued for v2.3. Not actionable at the argo-anywhere layer
-   beyond the auto-default; the root cause sits at Anthropic
-   Vertex (model-specific `thinking.type` validation) and at
-   Claude Code 2.1.x (SSE `event: error` parsing). Potential
-   `Oaklight/argo-proxy` upstream fix would be a translation-layer
-   workaround (rewrite `thinking.type.enabled` →
-   `thinking.type.adaptive` for opus-4-7 on the fly).
+   (`CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default), and SH-03 (`no_proxy`
+   injection + `HTTP_PROXY` detection). Phase C local-shim mode is
+   REJECTED with the four-point rationale in the audit Section 4.
+   As each SH-* item closes, a STATUS block appended to the audit
+   Section 7 records the closure commit (mirrors `AUDIT_2026-05-12.md`
+   STATUS convention).
+7. **Upstream `argo-proxy` audit roll-up (UP-* items)**: two upstream
+   audits track our consumption of `Oaklight/argo-proxy`:
+   `docs/AUDIT_2026-06-04_argo-proxy-upstream.md` (v3.0.4 baseline;
+   UP-01..UP-06 + 15-row watch-list) and
+   `docs/AUDIT_2026-06-17_argo-proxy-upstream.md` (v3.1.0+v3.1.1
+   re-walk; UP-07+UP-08+UP-09 + watch-list re-disposition).
+   **v2.2.1 picks up UP-02 (version-floor `>=3.1.0`) + UP-04
+   (refresh stale comment) + UP-07 (warn-strip removed
+   `use_legacy_argo` / `force_conversion`) + UP-08 (mark opus-4-7
+   limitation RESOLVED in `docs/LIMITATIONS.md`; merges with UP-01)
+   + UP-09 (small SECURITY/README updates for `log_to_file` +
+   model-auto-refresh; absorbs UP-05/UP-06)**. **UP-03 dropped**
+   (would contradict upstream "omit when default" convention for
+   `anthropic_stream_mode`). The re-walk audit revises the priority
+   ordering in §5 of the v3.0.4 baseline; the v3.0.4 file remains
+   the canonical 15-row watch-list, with each row's v3.1.x status
+   recorded in re-walk §2. Re-run the watch-list after each future
+   `argo-proxy` release; rename successor file to
+   `AUDIT_<date>_argo-proxy-upstream.md` and cross-link.
+8. **Upstream-stack opus-4-X + `thinking.type.enabled`**:
+   **Partially RESOLVED 2026-06-17**. For **opus-4-7**: fixed in
+   upstream `argo-proxy v3.1.0` (via llm-rosetta `argo--anthropic`
+   shim `model_overrides`: per-model `thinking_type: adaptive` for
+   opus-4-7, `enabled` for others). For **opus-4-8** (Anthropic GA
+   2026-06-09): **NOT yet fixed**; the shim's `model_overrides`
+   table only contains `claudeopus47`, and argo-proxy's
+   `_DEFAULT_CHAT_MODELS` + `_NO_TEMPERATURE_MODELS` both stop at
+   `claudeopus47`. UP-10 in
+   `docs/AUDIT_2026-06-17_argo-proxy-upstream.md` §3-bis documents
+   the gap with three specific source-location citations and a
+   three-step live-probe protocol the user can run against ANL.
+   The v2.3 auto-default fix is **re-scoped** (not removed) per
+   UP-10: pre-populate `env.ANTHROPIC_MODEL=claude-sonnet-4-6`
+   when the installed llm-rosetta shim doesn't cover Anthropic's
+   current flagship Opus. v2.2.1 ships the LIMITATIONS doc update
+   pairing opus-4-7 (historical-RESOLVED) + opus-4-8 (current-OPEN);
+   v2.3 ships the dynamic auto-default. Historical diagnosis
+   preserved in `docs/AUDIT_2026-06-17_argo-proxy-upstream.md` §3
+   UP-08 + §3-bis UP-10; `notes/agent_feedback.md` entry 6's
+   Resolution-note is updated to reflect the 4.7-resolved /
+   4.8-reissued split.
 
 ---
 

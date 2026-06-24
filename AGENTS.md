@@ -91,9 +91,31 @@ loading set for normal sessions.
   (suppress `_<tool>_check_conflicts` A.1 prompts when the
   writer would produce a no-op against the existing target;
   surfaced during Test 12 live test where opencode-global prompted
-  even though the existing file was already up to date) queued for
-  v2.2.1; SH-01/02/03 (auth-token rotation; `no_proxy` injection;
-  `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default) queued for v2.3.
+  even though the existing file was already up to date) +
+  **UP-01..UP-06** (six findings from 2026-06-04 upstream
+  `argo-proxy` audit: stale opus-4-7 limitation doc; soft version
+  floor `>=3.0.3` in `ensure_argoproxy_installed`; explicit
+  `anthropic_stream_mode: force` on fresh installs; stale
+  user-preserved-keys comment; opus-4-7 alias mention; verbose
+  privacy reconfirmation) queued for v2.2.1; SH-01/02/03 (auth-token
+  rotation; `no_proxy` injection; `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH`
+  default) queued for v2.3. **2026-06-24 landed on `main` ahead of
+  v2.2.1 tag**: D-022 `update` subcommand (lossless in-place
+  upgrades; per-component registry; auto `/refresh` after argoproxy
+  upgrade) — extracts `ensure_argoproxy_installed` from inline
+  `mode_server`, adds `update_<name>_cli_tool` per-tool helper
+  contract, and partially addresses UP-02 (the script now exposes
+  a user-facing upgrade path that doesn't require `--force-reinstall`;
+  the formal soft version floor still needs a `_version_ge` check
+  added to `ensure_argoproxy_installed`, queued for the v2.2.1 tag).
+  **D-023 self-update + canonical install** (added same session):
+  adds `argo-anywhere` as a fourth registered `update` component;
+  introduces `SCRIPT_VERSION` constant; introduces canonical install
+  at `~/.argo_anywhere/` (rustup/cargo style PATH directory with a
+  sourceable `env` helper); introduces first-run bootstrap fired
+  from `mode_client` that materializes the canonical install on
+  initial use (no-op thereafter; opt-out via
+  `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`).
   Phase 5 aider integration deferred (no scheduled trigger). Phase
   C local-shim mode REJECTED (would break D-001 single-file UX
   and address problems already handled upstream by argo-proxy's
@@ -110,7 +132,7 @@ loading set for normal sessions.
   in `write_claudecode_config`).
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
-  `server`, `status`, `stop`, `update-models`, `clean`, `list-tools`,
+  `server`, `status`, `stop`, `update`, `update-models`, `list-models`, `clean`, `list-tools`,
   `help`) + flags (`--cli-tool`, `--user`, `--node`, `--port`, ...);
   see PLAN.md Section 2 for the table
 - **Primary downstream consumers**: ANL users running AI coding CLI
@@ -134,6 +156,7 @@ Section 6.4):
 | [`docs/TESTING.md`](docs/TESTING.md) | Maintainers + contributors | Live-verification guide (real SSH + Duo + node) |
 | [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | Maintainers | 43-finding fresh-eyes audit + STATUS resolutions (42-of-43 closed at v2.2.0) |
 | [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Maintainers + presenters | Comparative audit `argo-anywhere` ↔ `argo-shim` (5 SH-* findings; Phase C local-shim REJECTED; slide-ready "Executive comparison" section at top) |
+| [`docs/AUDIT_2026-06-04_argo-proxy-upstream.md`](docs/AUDIT_2026-06-04_argo-proxy-upstream.md) | Maintainers | Upstream `argo-proxy` audit through v3.0.4: 6 UP-* findings (1 MEDIUM stale-doc, 1 MEDIUM version-floor, 4 LOW); 15-row watch-list of upstream hot-spots to re-check on every new `argo-proxy` release |
 | [`docs/AUDIT_2026-05_pre-rebuild.md`](docs/AUDIT_2026-05_pre-rebuild.md) | Maintainers | Archived pre-rebuild audit (provenance only) |
 | [`CONTRIBUTORS.md`](CONTRIBUTORS.md) | Contributors | Authorship + AI co-author trailer convention |
 | [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
@@ -239,7 +262,7 @@ for the architecture diagram.
 ### Subcommand reference
 
 `client` (default), `setup`, `tunnel`, `server`, `status`, `stop`,
-`update-models`, `clean`, `list-tools`, `help`.
+`update`, `update-models`, `list-models`, `clean`, `list-tools`, `help`.
 
 - **`client`** — all-in-one workflow: SSH tunnel + chosen-CLI-tool
   install + config write + monitor. `scp`s the file to a chosen
@@ -260,6 +283,36 @@ for the architecture diagram.
   reach"). Resolves identity from env, then
   `~/.config/argoproxy/config.yaml`, then cache; prompts for
   confirmation when no env was supplied (skip with `-y`).
+- **`update`** — lossless in-place upgrade of installed components
+  (per PLAN.md D-022 + D-023; added 2026-06-24 for v2.2.1). Registry
+  today (four components):
+  - `argo-anywhere` (the script itself; D-023): resolves the latest
+    upstream tag via the GitHub API (two-step probe:
+    `/releases/latest` falling back to `/tags`; final fallback to
+    `main`); validates the fetched script (`bash -n` + size >50 KB +
+    sentinel marker: `SCRIPT_VERSION=` line OR canonical
+    `# argo_anywhere.sh --` header); atomically replaces the
+    canonical install at `~/.argo_anywhere/argo_anywhere.sh` with a
+    `.bak.<timestamp>.<pid>` backup. Refuses to clobber a dirty git
+    working tree. Prompts to bootstrap the canonical install if it
+    doesn't exist yet.
+  - `argoproxy` (server-side, via SSH to the compute node +
+    venv-pip; D-022).
+  - `opencode` (laptop, via brew or curl-installer re-run; D-022).
+  - `claudecode` (laptop, via curl-installer re-run; D-022).
+
+  `--all` updates everything; positional component args restrict the
+  run; bare `update` lists the registry and exits without changing
+  anything. `--check` is report-only (installed vs latest tag for
+  argo-anywhere; installed vs PyPI-latest for argoproxy; installed-
+  version for the laptop tools). `--yes` auto-confirms install
+  prompts for missing components. After a successful `update
+  argoproxy`, automatically POSTs `/refresh` to the local tunnel if
+  it's up, so the running proxy's ModelRegistry pulls fresh upstream
+  models without a restart. Sibling of `update-models` (which only
+  refreshes the OpenCode config's model list; never installs
+  anything) and the lossless complement to `--force-reinstall`
+  (which always wipes + rebuilds the venv).
 
 ### MFA-aware by default
 
@@ -471,6 +524,27 @@ Optional but conventional:
   (b) validate against `<name>_scope_values()`, (c) detect conflicts
   (existing files; OAuth state; project-shadow), (d) invoke
   `prompt_scope_switch` on conflict to let the user keep/switch/abort.
+- An **`update_<name>_cli_tool()`** function (per D-022; v2.2.1) that
+  performs an in-place upgrade of the tool's binary without nuking
+  state. Contract: takes no args; honors `$UPDATE_CHECK_ONLY` (report-
+  only mode) and `$UPDATE_ASSUME_YES` (auto-confirm install prompts)
+  globals; returns 0 on success / up-to-date, 1 on user-declined-install
+  or recoverable skip, 2+ on hard failure. When absent, `mode_update`
+  skips the tool with a warn. Per-tool implementation idiom: detect
+  install path (brew prefix vs curl|bash) and run the matching upstream
+  upgrade command; for compiled / venv-based components, prefer the
+  local pip's `--upgrade` path over upstream self-updaters (see D-022
+  for the live-test rationale that `argo-proxy update install` resolves
+  the wrong `pip` on compute nodes).
+
+The server-side `argo-proxy` component has the analogous shape but
+is NOT a CLI tool registered in `CLI_TOOLS_AVAILABLE`; it lives in
+the parallel `UPDATE_COMPONENTS_AVAILABLE` registry and is handled by
+`update_argoproxy_component` (whose remote-execution path is what
+distinguishes it from the laptop-side `update_<name>_cli_tool`
+helpers). `ensure_argoproxy_installed` is the shared install primitive
+(factored out of `mode_server` in D-022 so both `mode_server` and
+`update_argoproxy_component`'s on-node short-circuit can call it).
 
 ### Scope handling: D-017 + D-018 + D-019 (Phase 4 v2.2.0)
 

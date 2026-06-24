@@ -247,8 +247,11 @@ this one" summary.
 - **Vertex HTTP 500 on large non-streaming requests** — already
   mitigated upstream by `argo-proxy` v3.x's
   `anthropic_stream_mode: force` default. Just keep your on-node
-  `argo-proxy` up-to-date (`argo-proxy update install` on the
-  node). No action needed in normal use.
+  `argo-proxy` up-to-date: `bash argo_anywhere.sh update argoproxy`
+  (lossless in-place upgrade since v2.2.1 per PLAN.md D-022; the
+  legacy `ssh -J ... 'argo-proxy update install'` recipe is still
+  documented in `help` as a manual fallback). No action needed in
+  normal use.
 
 Full diagnosis + STATUS tracking in
 [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Upstream stack:
@@ -290,7 +293,9 @@ argo-proxy + AI CLI tools".
 | `tunnel` | Same as `client` but does NOT install or configure any CLI tool; just brings up the tunnel + monitor. Useful for power users managing their own configs or keeping a tunnel alive while configuring multiple tools. |
 | `server` | Auto-invoked on the ANL compute node by `client`. Also a documented standalone workflow ("leave a proxy on this node for any client to reach"). |
 | `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL). Surfaces cross-client port-coherence disagreements (D-021) as warnings without flipping the exit code. |
+| `update` | Lossless in-place upgrade of installed components (`argo-anywhere`, `argoproxy`, `opencode`, `claudecode`). `update argo-anywhere` self-updates the script itself (resolves the latest GitHub release tag and atomically replaces the canonical install at `~/.argo_anywhere/argo_anywhere.sh`); other components hit their respective upstreams in place. `--all` updates everything; a positional component list (`update argoproxy opencode`) restricts the run; bare `update` lists the registry without acting. `--check` is report-only; `--yes` auto-confirms install prompts for missing components. After a successful `update argoproxy` the script auto-POSTs `/refresh` so the running proxy pulls fresh upstream models without a restart. The lossless complement to `--force-reinstall` (which wipes the venv). |
 | `update-models` | Refresh the OpenCode model list from the live `/v1/models` (OpenCode-specific today). |
+| `list-models` | Tabulate the models the proxy serves on `/v1/models` (read-only sibling of `update-models`). Columns: `internal_name`, `id`, `provider`, `modalities`, `configured`. Filters embeddings by default; cross-references the OpenCode config when present (`yes`/`no`/`orphan` per row). Pretty text by default; `--format tsv|json` and `--output FILE` for scripting. |
 | `stop` | Kill the local SSH tunnel. Does NOT touch the remote argo-proxy (see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Single-instance constraint" for why). |
 | `clean` | Remove every artifact this script created (local + remote, with risk-tiered prompts). |
 | `list-tools` | Print the registry of supported `--cli-tool` values. |
@@ -308,6 +313,8 @@ bash argo_anywhere.sh help | less
 
 | Path | Purpose |
 |:---|:---|
+| `~/.argo_anywhere/argo_anywhere.sh` | **Canonical install** of the script itself (PATH-discoverable; created on first `client` / `setup` run; managed by `update argo-anywhere`). New in v2.2.1 per PLAN.md D-023. |
+| `~/.argo_anywhere/env` | Sourceable PATH helper (rustup/cargo style). Add `. "$HOME/.argo_anywhere/env"` to your shell rc to make `argo_anywhere.sh` callable as a bare command. |
 | `~/.config/opencode/config.json` | OpenCode global config (only when running `--cli-tool opencode --scope global`, or the default global scope) |
 | `<git-root>/opencode.json` or `<cwd>/opencode.json` | OpenCode project-scope config (when running `--cli-tool opencode --scope project`) |
 | `~/.claude/settings.json` *or* `./.claude/settings.local.json` | Claude Code config (only when running the Claude Code flow); see [Claude Code config scope](#claude-code-config-scope-project-vs-global) |
@@ -316,6 +323,16 @@ bash argo_anywhere.sh help | less
 | `~/.config/argo_anywhere/port` | Cached proxy port (new in v2.2; transport-layer state per D-020) |
 | `~/.config/argo_anywhere/ssh-fail-lock`, `~/.config/argo_anywhere/ssh-fail-lock-count` | SSH-failure-tracker state files (created only after lock fires); see [SSH failure protection](#ssh-failure-protection-cspo-defense) |
 | `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master socket (Duo prompts only fire once per session) |
+
+> **Note (since v2.2.1)**: the first time you run `client` or
+> `setup`, the script auto-creates `~/.argo_anywhere/` and copies
+> itself there as the canonical install (rustup/cargo style PATH
+> directory). It then prints one-shot instructions for adding the
+> `env` file to your shell rc. After that, `argo_anywhere.sh` is
+> callable as a bare command from any directory, and
+> `update argo-anywhere` keeps it fresh. Opt out with
+> `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`. See PLAN.md D-023 for the
+> design.
 
 **ANL compute node** (after first run):
 
@@ -705,13 +722,27 @@ right model.
 # Check what's happening (includes D-021 cross-client coherence report)
 bash argo_anywhere.sh status
 
-# See the full /v1/models list
+# See the full /v1/models list (raw JSON dump)
 ARGO_ANYWHERE_SHOW_MODELS=1 bash argo_anywhere.sh status
+
+# Tabulate served models (read-only; cross-references the OpenCode config)
+bash argo_anywhere.sh list-models                              # pretty text table
+bash argo_anywhere.sh list-models --include-embeddings         # include embedding rows
+bash argo_anywhere.sh list-models --format tsv > models.tsv    # script-friendly
+bash argo_anywhere.sh list-models --format json | jq '.[] | select(.provider=="claude")'
 
 # Refresh the OpenCode model list from the live proxy
 bash argo_anywhere.sh update-models                  # interactive: prompts per-orphan
 bash argo_anywhere.sh update-models --keep-orphans   # add new; keep all stale entries
 bash argo_anywhere.sh update-models --drop-orphans   # add new; drop all stale entries
+
+# Upgrade installed components in place (lossless; preserves configs + venv)
+bash argo_anywhere.sh update --all                   # update argo-anywhere + argoproxy + opencode + claudecode
+bash argo_anywhere.sh update argo-anywhere           # self-update the script (canonical install at ~/.argo_anywhere/)
+bash argo_anywhere.sh update argoproxy               # just the on-node argo-proxy (+ auto /refresh)
+bash argo_anywhere.sh update opencode claudecode     # explicit list
+bash argo_anywhere.sh update --check --all           # report-only: show installed vs latest
+bash argo_anywhere.sh update                         # no args: list registry without acting
 
 # Tear down only the local tunnel (remote argo-proxy survives)
 bash argo_anywhere.sh stop

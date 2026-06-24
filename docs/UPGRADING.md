@@ -579,12 +579,98 @@ echo 64742 > ~/.config/argo_anywhere/port   # whichever port you want
 This is equivalent to picking Case 2 with the port of your
 choice on first run.
 
+## Behavior changes since v2.2.0 (landed on `main` for v2.2.1)
+
+### New `update` subcommand for lossless in-place upgrades
+
+Before v2.2.1 the only way to upgrade `argo-proxy` on the node was
+either `--force-reinstall server` (full venv wipe + rebuild) or
+hand-running `argo-proxy update install` over SSH yourself. Same
+for the laptop-side CLI tools (OpenCode / Claude Code) and for the
+script itself: there was no scripted upgrade path; you had to
+re-run the upstream installer (or re-`curl` the script) manually.
+
+The new `update` subcommand (PLAN.md D-022 + D-023) closes all
+those gaps:
+
+```sh
+bash argo_anywhere.sh update --all                  # update everything
+bash argo_anywhere.sh update argo-anywhere          # self-update the script
+bash argo_anywhere.sh update argoproxy              # just argo-proxy on the node
+bash argo_anywhere.sh update opencode claudecode    # explicit list
+bash argo_anywhere.sh update --check --all          # report-only
+bash argo_anywhere.sh update --all -y               # non-interactive
+```
+
+Properties:
+
+- **Lossless**: never wipes the venv, configs, or OAuth state.
+  `--force-reinstall` remains the destructive escape hatch.
+- **Prompts before installing** a component that isn't there
+  (`--yes` auto-confirms; matches `clean`'s convention).
+- **After a successful `update argoproxy`**, auto-POSTs `/refresh`
+  to the local tunnel so the running proxy pulls fresh upstream
+  models without restart. Silently skipped if no tunnel is up.
+- **Self-update** (`update argo-anywhere`) resolves the latest
+  upstream tag, validates the fetched script (`bash -n` + size +
+  sentinel marker), backs up the existing canonical install at
+  `~/.argo_anywhere/argo_anywhere.sh`, and atomically replaces
+  it. Refuses to clobber a dirty git working tree. Prompts to
+  bootstrap the canonical install if it doesn't exist yet.
+- **Extensible**: new CLI tools (Phase 5 aider / future cursor)
+  register an `update_<name>_cli_tool` helper and get included
+  automatically.
+
+**Action required**: none. The existing `--force-reinstall` path
+keeps working unchanged. If you've been running
+`--force-reinstall` periodically just to pick up new argo-proxy
+versions, you can switch to `update argoproxy` for a much faster
+and less disruptive upgrade.
+
+The legacy `ssh -J <user>@logins.cels.anl.gov <user>@<node>
+'~/argovenv/bin/argo-proxy update install'` recipe still works
+and is documented in `help` as a manual fallback for the case
+where `update argoproxy` can't reach the node from the laptop.
+
+### Canonical install at `~/.argo_anywhere/`
+
+The first time you run `client` or `setup` in v2.2.1 (or later),
+the script auto-creates `~/.argo_anywhere/` and copies itself
+there as the canonical install (rustup/cargo style PATH
+directory). It then prints one-shot instructions for adding the
+sourceable `env` file to your shell rc:
+
+```sh
+# Add this ONE line to your ~/.zshrc (zsh) or ~/.bashrc (bash):
+. "$HOME/.argo_anywhere/env"
+```
+
+After that, `argo_anywhere.sh` is callable as a bare command from
+any directory. The `update argo-anywhere` subcommand keeps the
+canonical install fresh.
+
+**Action required**: nothing forced. Skip the bootstrap with
+`ARGO_ANYWHERE_SKIP_BOOTSTRAP=1` in the env if you prefer to
+manage the script copy yourself. If you already had a manual
+`~/.argo_anywhere/` setup from a previous version (e.g. with a
+hand-written `env` file or a direct `export PATH=...` rc line),
+the bootstrap is a no-op (it only fires when the directory
+doesn't exist); `update argo-anywhere` will manage that existing
+copy from here on.
+
+**Transitional note for v2.2.0 → v2.2.1**: the very first run of
+`update argo-anywhere` from a v2.2.0 install will fetch the
+latest tag (v2.2.0 itself until v2.2.1 is tagged). After v2.2.1
+ships, the next `update argo-anywhere` picks up the v2.2.1 code
++ the `SCRIPT_VERSION` constant; subsequent upgrades are
+version-aware.
+
 ## Things that did NOT change
 
 - **The CLI surface** for `client` / `setup` / `tunnel` / `server`
   / `status` / `stop` / `update-models` / `clean` / `list-tools`
-  / `help` is the same. Existing scripts that wrap the script keep
-  working.
+  / `help` is the same (the new `update` subcommand is purely
+  additive). Existing scripts that wrap the script keep working.
 - **Single-file distribution** is unchanged. One `argo_anywhere.sh`
   on the laptop; the same file is `scp`'d to the compute node and
   re-exec'd as `server`.
