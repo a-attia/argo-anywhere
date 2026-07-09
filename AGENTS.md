@@ -116,10 +116,29 @@ loading set for normal sessions.
   from `mode_client` that materializes the canonical install on
   initial use (no-op thereafter; opt-out via
   `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`).
-  Phase 5 aider integration deferred (no scheduled trigger). Phase
-  C local-shim mode REJECTED (would break D-001 single-file UX
-  and address problems already handled upstream by argo-proxy's
-  `anthropic_stream_mode: force` default).
+  **Phase 5a aider integration + the lifecycle-command work
+  (D-024 connect/configure/run + D-025 install/uninstall + install
+  manifest) all LIVE-TEST PASSED 2026-07-09** (`notes/test_plan_lifecycle.md`,
+  10 tests). aider: full 5-function contract
+  (`setup_aider_cli_tool`, `ensure_aider_installed`, `write_aider_config`
+  + `_aider_write_config_scratch` fallback, `aider_scope_values`,
+  `aider_pick_scope`, `_aider_check_conflicts`) + registry rows +
+  dispatcher arm + `update_aider_cli_tool`; OpenAI-Chat path
+  (`/v1/chat/completions`); writes `~/.aider.conf.yml` + a sibling
+  `.aider.model.settings.yml` that disables `temperature` for
+  reasoning/opus/gpt-5 models (they return an empty stream otherwise);
+  default model `openai/argo:gpt-4o`. Lifecycle: `connect`/`configure`/`run`
+  verbs (channel-detect via `channel_is_up` + `--ensure`; `configure`
+  reuses an existing channel without a new tunnel); canonical install
+  moved to `~/.argo_anywhere/bin/` with thin `install`/`uninstall`
+  wrappers; tiered `uninstall` restores client configs via the
+  `manifest.json` provenance (delete files we created; restore originals
+  we modified) and never kills a channel it doesn't own; `update-models`
+  is now `--cli-tool`-aware. **Phase 5b codex still gated** on argo-proxy
+  `/v1/responses` maturity + a TOML-writer decision (see
+  `notes/impl_codex_aider.md`). Phase C local-shim mode REJECTED (would
+  break D-001 single-file UX and address problems already handled
+  upstream by argo-proxy's `anthropic_stream_mode: force` default).
 - **Known upstream-stack limitation surfaced during v2.2.0
   release-gate live test**: Claude Code 2.1.x + ANL Argo gateway
   rejects `thinking.type.enabled` on `claude-opus-4-7` (requires
@@ -132,11 +151,18 @@ loading set for normal sessions.
   in `write_claudecode_config`).
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
-  `server`, `status`, `stop`, `update`, `update-models`, `list-models`, `clean`, `list-tools`,
-  `help`) + flags (`--cli-tool`, `--user`, `--node`, `--port`, ...);
-  see PLAN.md Section 2 for the table
+  `connect`, `configure`, `run`, `server`, `status`, `stop`, `update`,
+  `update-models`, `list-models`, `clean`, `install`, `uninstall`,
+  `list-tools`, `help`) + flags (`--cli-tool`, `--user`, `--node`,
+  `--port`, `--ensure`, `--restore-configs`, `--remove-binaries`,
+  `--remote`, ...); see PLAN.md Section 2 for the table. The
+  `connect`/`configure`/`run` verbs (D-024) are the three-level split of
+  `client` (channel / configure-tool / run-tool); `install`/`uninstall`
+  (D-025) are the symmetric lifecycle pair anchored at
+  `~/.argo_anywhere/bin/` with an install manifest
+  (`~/.argo_anywhere/manifest.json`) driving honest config-restore.
 - **Primary downstream consumers**: ANL users running AI coding CLI
-  tools (OpenCode, Claude Code today; aider/cursor/generic planned)
+  tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
 - **Current release**: v2.2.0 (tagged 2026-05-18)
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
@@ -157,10 +183,14 @@ Section 6.4):
 | [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | Maintainers | 43-finding fresh-eyes audit + STATUS resolutions (42-of-43 closed at v2.2.0) |
 | [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Maintainers + presenters | Comparative audit `argo-anywhere` ↔ `argo-shim` (5 SH-* findings; Phase C local-shim REJECTED; slide-ready "Executive comparison" section at top) |
 | [`docs/AUDIT_2026-06-04_argo-proxy-upstream.md`](docs/AUDIT_2026-06-04_argo-proxy-upstream.md) | Maintainers | Upstream `argo-proxy` audit through v3.0.4: 6 UP-* findings (1 MEDIUM stale-doc, 1 MEDIUM version-floor, 4 LOW); 15-row watch-list of upstream hot-spots to re-check on every new `argo-proxy` release |
+| [`docs/AUDIT_2026-06-17_argo-proxy-upstream.md`](docs/AUDIT_2026-06-17_argo-proxy-upstream.md) | Maintainers | Re-walk vs v3.1.0 + v3.1.1: `_legacy` removal (UP-07), opus-4-7 fixed at source (UP-08), opus-4-8 reissues the limitation (UP-10); disposition of UP-01..UP-06 |
+| [`docs/AUDIT_2026-07-08_argo-proxy-upstream.md`](docs/AUDIT_2026-07-08_argo-proxy-upstream.md) | Maintainers | Delta re-walk vs v3.1.2 (+ v3.2.0a0) and `llm-rosetta` v0.6.10-v0.6.12: opus-4-8 fixed at the shim layer (`llm-rosetta >= 0.6.10`), new `socket:` config key, `/v1/responses` live (codex-relevant), floor recommendation -> `>=3.1.2`; adds WATCH-16 (socket) + WATCH-17 (0.7.x pipeline migration) |
 | [`docs/AUDIT_2026-05_pre-rebuild.md`](docs/AUDIT_2026-05_pre-rebuild.md) | Maintainers | Archived pre-rebuild audit (provenance only) |
 | [`CONTRIBUTORS.md`](CONTRIBUTORS.md) | Contributors | Authorship + AI co-author trailer convention |
 | [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
-| [`notes/test_plan_phase*.md`](notes/) | Maintainer | Per-phase live-test plans (historical artifact once phase complete) |
+| [`notes/impl_codex_aider.md`](notes/impl_codex_aider.md) | Maintainer | Design + implementation record for aider (Phase 5a; LIVE-TEST PASSED 2026-07-09) + codex (Phase 5b; gated). Config-format facts, per-tool contract application, live-test findings. |
+| [`notes/impl_lifecycle_commands.md`](notes/impl_lifecycle_commands.md) | Maintainer | Design + implementation record for D-024 (connect/configure/run) + D-025 (install/uninstall + install manifest). Three-level model, locked decisions, live-test amendments. LIVE-TEST PASSED 2026-07-09. |
+| [`notes/test_plan_phase*.md`](notes/), [`notes/test_plan_lifecycle.md`](notes/test_plan_lifecycle.md) | Maintainer | Per-phase live-test plans (historical artifact once phase complete). `test_plan_lifecycle.md` covers aider + the lifecycle commands (PASSED 2026-07-09). |
 
 ## Project-specific overrides
 

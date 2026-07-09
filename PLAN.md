@@ -117,12 +117,17 @@ library API. Stable since v2.0:
 | `client` | Full laptop-side flow: install AI tool + config + tunnel + monitor | stable |
 | `setup` | Like `client` but always shows the picker, even with `--cli-tool` | stable |
 | `tunnel` | Tunnel only (no AI-tool install/config); useful for managing multiple tools manually | stable |
+| `connect` | Level-1 verb (D-024): bring up the shared channel + hold the monitor. Friendlier name for `tunnel`. | new (Lifecycle Phase B; 2026-07-09) |
+| `configure TOOL...` | Level-2 verb (D-024): install + write config for one or more clients against an EXISTING channel; detects it via `/health`, `--ensure` to bring it up. Does not block. | new (Lifecycle Phase B; 2026-07-09) |
+| `run TOOL` | Level-2+3 verb (D-024): configure one client then launch it; brings the channel up if missing (prompt / `--ensure` / `-y`). | new (Lifecycle Phase B; 2026-07-09) |
 | `server` | Run argo-proxy on a compute node (auto-invoked by `client` over SSH; standalone path also documented) | stable |
 | `status` | Probe the tunnel + proxy health; ALL GREEN / DEGRADED / FAIL | stable |
 | `update-models` | Refresh OpenCode's model list from `/v1/models` (OpenCode-specific today) | stable |
 | `list-models` | Tabulate the models the proxy serves on `/v1/models` (read-only sibling of `update-models`); cross-references the OpenCode config when present | stable (added 2026-06-04) |
 | `stop` | Kill the local SSH tunnel (does NOT touch the remote proxy) | stable |
 | `clean` | Remove every artifact this script created (local + remote, with confirmation tiers) | stable |
+| `install` | Materialize the canonical `~/.argo_anywhere/bin/` install (script + install/uninstall wrappers + env helper) + stamp the manifest (D-025). Auto-runs on first `client`; explicit form supports `--dry-run`. | new (Lifecycle Phase C; 2026-07-09) |
+| `uninstall` | Symmetric tiered teardown (D-025): Tier 1 canonical install + state + owned tunnel; Tier 2 `--restore-configs` (manifest-driven); Tier 3 `--remove-binaries` (manifest-gated); Tier 4 `--remote`; `--dry-run`. | new (Lifecycle Phase C; 2026-07-09) |
 | `list-tools` | Print supported `--cli-tool` values | stable |
 | `help` | Long-form guide (paths, troubleshooting, customization) | stable |
 
@@ -130,7 +135,7 @@ Flag surface (all optional):
 
 | Flag | Purpose |
 |:---|:---|
-| `--cli-tool NAME` | Pick the AI CLI tool (required for `client`/`setup` to skip the picker) |
+| `--cli-tool NAME` | Pick the AI CLI tool (required for `client`/`setup` to skip the picker). Known values: `opencode`, `claudecode`, `aider` (Phase 5a; live-test PASSED 2026-07-09); `codex` planned (Phase 5b, gated on argo-proxy `/v1/responses`) |
 | `--user NAME` | ANL username override |
 | `--node HOST` | Compute-node override |
 | `--port N` | Port override (one-shot; offers config migration prompt) |
@@ -139,11 +144,13 @@ Flag surface (all optional):
 | `--probe-nodes` | Probe each ANL_NODE for reachability before showing picker |
 | `--auto-port` | Auto-pick the next free port instead of prompting on collision |
 | `--port-range LO-HI` | Override the auto-port range |
-| `--scope project\|global` | Per-tool config scope (currently consumed by Claude Code) |
+| `--scope project\|global` | Per-tool config scope (consumed by client/setup/configure/run) |
+| `--ensure` | For `configure`/`run`: bring the shared channel up if it isn't already, instead of failing with the "run connect first" hint |
 | `--force-reinstall` | Wipe the server-side venv + rebuild from scratch |
 | `--keep-orphans` / `--drop-orphans` | `update-models` orphan handling |
 | `--output FILE` / `--format text\|tsv\|json` / `--include-embeddings` | `list-models` output destination + format + embedding-filter override |
-| `--dry-run` / `--local-only` / `-y` / `--purge` / `--purge-backups` | `clean` modifiers |
+| `--dry-run` / `--local-only` / `-y` / `--purge` / `--purge-backups` | `clean` modifiers (`--dry-run` + `-y` also used by `install`/`uninstall`) |
+| `--restore-configs` / `--remove-binaries` / `--remote` | `uninstall` tier opt-ins (restore client configs / remove binaries we installed / tear down remote venv) |
 
 Design principles in use:
 
@@ -210,9 +217,14 @@ Phase status as of **2026-05-18** (post-v2.2.0 release):
 | **v2.1.0 tag** | Defensive-hardening release | **done** (tagged `v2.1.0` 2026-05-15) |
 | **Phase 4 (v2.2)** | Per-tool scope framework (D-017+D-018+D-019); port-as-state (D-020; closes audit M4); OpenCode project-scope (B1b); cross-client port-coherence (D-021); B0 latent `mode_stop` fix | done (live-test passed 2026-05-18; 3 code amendments + 2 doc-only commits + 2 SHA backfills) |
 | **v2.2.0 tag** | Multi-tool framework + scope generalization release | **done** (tagged `v2.2.0` 2026-05-18 at HEAD `737563d`) |
-| **v2.2.1 (queued)** | SH-04 inline `lsof`+`ps` in port-collision; SCOPE-NOOP suppression for `_<tool>_check_conflicts` A.1 prompts when writer would no-op (Test 12 finding); **UP-02 + UP-04 + UP-07 + UP-08 + UP-09 + UP-10 from the 2026-06-17 re-walk audit** (version-floor bump to `>=3.1.0`; refresh stale user-preserved-keys comment; warn-and-strip legacy `use_legacy_argo` / `force_conversion`; mark opus-4-7 limitation RESOLVED + add fresh opus-4-8 limitation entry in `docs/LIMITATIONS.md` per UP-10; small SECURITY.md + README doc updates for `log_to_file` + model-list auto-refresh); **UP-03 dropped** (would contradict upstream "omit when default" convention); **UP-01/05/06 superseded** by UP-08/UP-09 | queued; no scheduled trigger |
-| **v2.3 (queued)** | SH-01 random `apiKeyHelper` token (eliminates H7 warning); SH-02 `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default; SH-03 `no_proxy` injection + `HTTP_PROXY` detection; B4 cursor out-of-integration docs (needs manually-collected citations). **Auto-default `env.ANTHROPIC_MODEL` when Anthropic's current flagship Opus is not in the installed llm-rosetta shim's `model_overrides`** — re-scoped 2026-06-17 per UP-10 (Opus 4.8 reissued the opus-4-7 limitation). Detection rule: introspect `${VENV_PATH}/lib/python*/site-packages/llm_rosetta/shims/providers/argo/anthropic/provider.yaml` `model_overrides` at config-write time; if it lacks any of Anthropic's most-recent two Opus releases, pre-populate `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `~/.claude/settings.json`. (Earlier `REMOVED 2026-06-17` note on this line — superseded same day by UP-10.) | queued |
-| **Phase 5 (deferred)** | aider integration as application of established 5-function per-tool API contract | deferred (no scheduled trigger; fires when user requests) |
+| **v2.2.1 (queued)** | SH-04 inline `lsof`+`ps` in port-collision; SCOPE-NOOP suppression for `_<tool>_check_conflicts` A.1 prompts when writer would no-op (Test 12 finding); **UP-02 + UP-04 + UP-07 + UP-08 + UP-09 + UP-10 from the upstream re-walk audits** (version-floor bump to **`>=3.1.2`** per the 2026-07-08 re-walk — supersedes the `>=3.1.0` recommendation; refresh stale user-preserved-keys comment, now also stale for the v3.1.2 `socket:` key; warn-and-strip legacy `use_legacy_argo` / `force_conversion`; mark **BOTH opus-4-7 AND opus-4-8 limitations RESOLVED** in `docs/LIMITATIONS.md` — opus-4-8 fixed via `llm-rosetta >= 0.6.10` shim `model_overrides`, carried in by argo-proxy's `<0.7.0` pin — with residual G1/G3 caveats per the 2026-07-08 re-walk; small SECURITY.md + README doc updates for `log_to_file` + model-list auto-refresh); **UP-03 dropped** (would contradict upstream "omit when default" convention); **UP-01/05/06 superseded** by UP-08/UP-09. See `docs/AUDIT_2026-07-08_argo-proxy-upstream.md` (delta re-walk vs the 2026-06-17 baseline). | queued; no scheduled trigger |
+| **v2.3 (queued)** | SH-01 random `apiKeyHelper` token (eliminates H7 warning); SH-02 `CLAUDE_CODE_SKIP_ANTHROPIC_AUTH` default; SH-03 `no_proxy` injection + `HTTP_PROXY` detection; B4 cursor out-of-integration docs (needs manually-collected citations). **Auto-default `env.ANTHROPIC_MODEL` when Anthropic's current flagship Opus is not in the installed llm-rosetta shim's `model_overrides`** — **MOOT for the opus-4.7/4.8 generation as of the 2026-07-08 re-walk**: `llm-rosetta >= 0.6.10` now covers `claudeopus48` at the shim layer (bisected; carried in by argo-proxy's `<0.7.0` pin), so the common Claude Code path works without our intervention. The dynamic-detection design (introspect `${VENV_PATH}/lib/python*/site-packages/llm_rosetta/shims/providers/argo/anthropic/provider.yaml` `model_overrides`) is **retained only as a template** for a future Opus generation that outpaces the shim, not as scheduled v2.3 work. See `docs/AUDIT_2026-07-08_argo-proxy-upstream.md` UP-08/UP-10 disposition. | queued |
+| **Phase 5a (aider)** | aider integration as application of the established 5-function per-tool API contract; rides the proven OpenAI-Chat-compatible path (`/v1/chat/completions`; close cousin of `write_opencode_config`). Global/project scope (mirrors opencode; no OAuth state); PyYAML key-preserving merge with a refuse-to-merge-on-broken + no-PyYAML backup+scratch fallback; H7 privacy warning; `update_aider_cli_tool` registered. Full scoping in [`notes/impl_codex_aider.md`](notes/impl_codex_aider.md). | **LIVE-TEST PASSED (2026-07-09)**; `notes/test_plan_lifecycle.md` Test 1: aider installs, config + model-settings written, default (gpt-4o) AND opus-4.8 both answer through the tunnel (the temperature/reasoning fix confirmed live). |
+| **Phase 5b (codex)** | codex integration. Requires the OpenAI Responses API (`wire_api = "responses"` is codex's ONLY supported protocol) served at argo-proxy's `/v1/responses` (present since v3.1.2; matured in the v3.2.x line per the v3.2.0a0 codex E2E tests). GATED on (a) a live `/v1/responses` probe against ANL, and (b) a design decision on TOML writing (no stdlib TOML writer; `tomllib` reader needs Python 3.11+ on the laptop). codex provider config is user-scope-only (project configs can't override provider keys). Full scoping in [`notes/impl_codex_aider.md`](notes/impl_codex_aider.md). | deferred (gated; fires when the probe + TOML decision clear) |
+| **Lifecycle Phase A (manifest)** | Install manifest foundation (D-025 D-c): record config provenance at first-touch in the shared config-touch path; no user-visible behavior change. Prerequisite for honest uninstall + the verb split (both share the config-touch path). | **implemented + smoke-tested (2026-07-09)**; `notes/impl_lifecycle_commands.md`. `manifest_record_config` in `handle_config_file`; `manifest_record_binary` in all 3 `ensure_<tool>_installed`; first-touch-wins + compute-node-guarded + writers byte-identical. |
+| **Lifecycle Phase B (verbs)** | connect / configure / run split (D-024): re-map existing internals; add `channel_is_up` detect helper + `--ensure`; multi-tool `configure`. `client`/`setup`/`tunnel` retained as fused fallbacks. | **LIVE-TEST PASSED (2026-07-09)**; `notes/test_plan_lifecycle.md` Tests 2-6. `configure` detects the live channel + configures without opening a tunnel (Issue-2 fix confirmed on port 64742); multi-tool works; no-channel dies with connect hint; `run` configures + execs the client. Amendments: configure/run box suppression, verb-aware connect message, reworded scope-conflict text. Test 4 full `--ensure` channel-down bring-up deferred. |
+| **Lifecycle Phase C (install/uninstall)** | `~/.argo_anywhere/bin/` layout + explicit `install` + tiered `uninstall` (D-025): symmetric, dry-run-able, beautified; manifest-driven config restore; reuses `clean`; D-023 flat-layout migration. | **LIVE-TEST PASSED (2026-07-09)**; `notes/test_plan_lifecycle.md` Tests 7-10. install builds bin/ + wrappers + env + manifest stamp; uninstall tiers verified live (config delete/restore correct; binary removal manifest-gated; self-removal clean); ownership guard confirmed (dead-port uninstall left the real channel untouched); real `~/.argo_anywhere` migrated flat->bin/ with the channel up. Tier-1 listener-kill is ownership-aware (`local_tunnel_status` guard). |
+| **Per-tool `update-models` refresh (follow-up)** | Generalize `update-models` from a hard-coded OpenCode refresh into a per-tool contract: an optional `<name>_update_models` function each tool may implement. `opencode` refreshes its picker list (today's behavior); `aider` would regenerate `.aider.model.settings.yml`'s per-model `use_temperature:false` entries from the LIVE `/v1/models` (replacing the current static 41-entry list, so newly-served models are covered automatically); `claudecode` stays N/A. Tool-awareness scaffolding (the `--cli-tool` gate + not-applicable messaging) already landed 2026-07-09; this is the remaining "make it actually do per-tool work" step. | planned (as of 2026-07-09); filed while making `update-models` tool-aware |
 | **Phase 6+ (under consideration)** | Generic OpenAI-compatible `--cli-tool` (e.g. `--cli-tool generic --config-path <PATH>`) | under consideration |
 | **Phase C local-shim mode** | Local HTTP shim layer (stream forcing + thinking-block stripping + transparent retry) per 2026-05-18 argo-shim comparative audit | **REJECTED** — would break D-001 single-file UX and address problems already handled upstream by argo-proxy's `anthropic_stream_mode: force` default (v3.x). Documented in `docs/AUDIT_2026-05-18_argo-shim-comparison.md` (Step 4 of v2.2.0 release sequence). |
 
@@ -1454,6 +1466,93 @@ the canonical install, refreshed the env helper. Total elapsed: ~3
 seconds. Verified byte-for-byte identity with upstream v2.2.0 tag
 via `diff`. Backup was then manually restored to leave the user's
 pre-test install in place pending the v2.2.1 tag.
+
+---
+
+### D-024 — Lifecycle-command split: connect / configure / run (2026-07-08)
+
+**Status**: accepted; designing. Full plan in
+[`notes/impl_lifecycle_commands.md`](../notes/impl_lifecycle_commands.md).
+
+**Context.** argo-anywhere manages three levels: (1) the shared channel
+(SSH tunnel + remote argo-proxy), (2) install + configure ONE client,
+(3) the user running clients. The current `client` command fuses levels
+1 + 2 and names the fused thing after the level-2 choice (`--cli-tool`).
+Because the channel is a shared, client-agnostic local HTTP endpoint
+that any number of tools can hit simultaneously (level 3), naming a
+shared-channel operation after a single client is confusing: "why do I
+pick one tool when the channel serves all of them?" The exclusivity is
+purely our orchestrator's convention, not a constraint of the transport
+or argo-proxy.
+
+**Decision.** Add explicit verbs mirroring the three levels, keeping the
+fused commands as backward-compatible one-shot fallbacks:
+
+- `connect` (level 1): ensure the channel, then hold the foreground
+  monitor. Effectively the current `tunnel` behavior; `tunnel` is
+  retained as an alias.
+- `configure <tool>...` (level 2): install + write config for the named
+  tool(s) against an EXISTING channel. Multi-tool per call (the channel
+  is shared). Per D-e it DETECTS the channel (port cache + `/health`)
+  and fails loud with a hint if absent; `--ensure` brings it up.
+- `run <tool>` (level 2+3): `configure <tool>` then `exec` the client.
+- `client` / `setup` / `tunnel` retained unchanged (fused fallback).
+
+**Consequences.** Users can hold the channel + monitor in one window and
+freely configure / run clients in other windows. Largely a re-mapping of
+existing internals (`tunnel` = level 1; `do_post_tunnel_for_cli_tool` =
+level 2); the one new piece is a `channel_is_up <port>` helper.
+Backward compat preserved (additive verbs). Per-tool API contract gains
+no new required function (the verbs dispatch through the existing
+`setup_<tool>_cli_tool`).
+
+### D-025 — Install manifest + symmetric install / uninstall (2026-07-08)
+
+**Status**: accepted; designing. Full plan in
+[`notes/impl_lifecycle_commands.md`](../notes/impl_lifecycle_commands.md).
+
+**Context.** D-023 gave the script a canonical install at
+`~/.argo_anywhere/` with a self-update path but NO uninstall, and
+install itself is implicit (bootstrap on first `client`). "Install"
+today spans tool binaries (via `ensure_<tool>_installed`), the remote
+venv, the canonical script install, and configs across several
+locations; there is no symmetric teardown. `clean` removes session
+artifacts (tunnels, state, configs, remote venv) but leaves
+argo-anywhere installed and does not restore client configs to their
+pre-argo-anywhere state.
+
+**Decision.**
+
+1. **`bin/` canonical layout** (D-a): `~/.argo_anywhere/bin/` holds
+   `argo_anywhere.sh` + thin `install` / `uninstall` wrappers (which
+   call the subcommands, preserving D-001 single-file). `env` points at
+   `bin/`. Migrate the D-023 flat layout on next install/bootstrap.
+2. **`install` subcommand** (D-a): explicit form of the bootstrap
+   (`--dry-run`, beautified output in the scicomp-research-skills
+   style). Bootstrap-on-first-`client` retained (calls the same core).
+3. **Install manifest** (D-c): `~/.argo_anywhere/manifest.json` records,
+   at FIRST touch of each config, whether the file pre-existed and where
+   its original backup lives, plus which tool binaries we installed.
+   Written by the shared config-touch path (first-touch-wins); read by
+   uninstall. This makes "restore original config" correct rather than
+   best-effort (delete files we created; restore the true pre-argo
+   backup for files we modified).
+4. **`uninstall` subcommand** — TIERED (D-b): Tier 1 canonical install +
+   state + tunnels (always, on confirm); Tier 2 config restore via
+   manifest (`--restore-configs`); Tier 3 tool binaries, opt-in
+   `--remove-binaries`, gated on `installed_by_us`; Tier 4 remote venv
+   `--remote`. REUSES clean's risky-file logic (D-d) rather than
+   duplicating it. `--dry-run` previewable.
+
+**Consequences.** Install/uninstall become symmetric and honest. New
+machinery: the manifest (written in the config-touch path shared with
+D-024's verbs — hence sequenced first). Self-removal of the canonical
+dir during uninstall needs care (order dir-removal last or re-exec a
+tempfile copy). D-023's flat layout requires a one-shot migration.
+
+**Sequencing** (both decisions share the config-touch path): Phase A
+manifest foundation -> Phase B D-024 verb split -> Phase C D-025 bin/ +
+install/uninstall. Each independently shippable + live-tested.
 
 ---
 

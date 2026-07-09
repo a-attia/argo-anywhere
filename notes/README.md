@@ -39,11 +39,14 @@ Conventions follow
 | Phase 2c+3 | [`test_plan_phase2c3.md`](test_plan_phase2c3.md) | passed (2026-05-15; 1 amendment L4+L5 landed mid-test) | M1-M3, M5, L1-L5, L7, L9, I1, I3 + new docs (UPGRADING/SECURITY/LIMITATIONS) + doc rewrites |
 | Phase 2d | [`test_plan_phase2d.md`](test_plan_phase2d.md) | passed (2026-05-15; 0 amendments + 2 test-plan defects identified) | M6, M7, M8, M9, M10, L6, L10 (defensive-hardening: fail louder, not silently) |
 | Phase 4 | [`test_plan_phase4.md`](test_plan_phase4.md) | **passed (2026-05-18; 3 code amendments + 2 doc-only commits + 2 SHA backfills + 2 test-plan-only edits)** | M4 (port-as-state); design decisions D-017 + D-018 + D-019 + D-020 + D-021; B0 latent `mode_stop` regression fix; B1b OpenCode project-scope. Mid-test amendments: `e221847` (D-016 violation: eager `--scope` validation, Test 5), `1249924` (stale `--scope` help text, Test 6), `acf0722` ([m]igrate confirmation overpromise, Test 8). Test 12 additionally surfaced two follow-up findings deferred to v2.2.1: SCOPE-NOOP (spurious scope-conflict prompt when writer would no-op) + upstream-stack opus-4-7 limitation documented in `docs/LIMITATIONS.md`. |
+| Lifecycle + aider | [`test_plan_lifecycle.md`](test_plan_lifecycle.md) | **PASSED (2026-07-09; 7 mid-test amendments)** | aider Phase 5a + D-024 connect/configure/run + D-025 install/uninstall. 10 tests: aider default+opus-4.8; connect/configure channel reuse; configure-no-channel hint; --ensure; run; opencode/claudecode regression; install (sandboxed); uninstall config-restore (sandboxed); ownership guard; real bin/ migration. Test 4 full `--ensure` channel-down bring-up deferred to a from-scratch run. |
 
 ## Index of impl + section notes
 
-(None today. Index tables here when impl_*.md or section_*.md notes
-are added.)
+| Note | Kind | Status | Summary |
+|:---|:---|:---|:---|
+| [`impl_codex_aider.md`](impl_codex_aider.md) | impl | aider (Phase 5a) LIVE-TEST PASSED 2026-07-09; codex (Phase 5b) designing | Plan for adding OpenAI Codex CLI + aider as `--cli-tool` targets against the 5-function per-tool API contract. aider landed + live-tested — OpenAI-Chat path, global/project scope, key-preserving YAML merge, temperature-off model-settings; codex (Phase 5b) gated on argo-proxy's `/v1/responses` maturity + a TOML-writer decision. |
+| [`impl_lifecycle_commands.md`](impl_lifecycle_commands.md) | impl | designing (decisions locked 2026-07-08) | Plan for the three-level UX reshape: connect/configure/run verb split (D-024) + symmetric install/uninstall anchored at `~/.argo_anywhere/bin/` with an install manifest for honest config-restore (D-025). Phased A (manifest) -> B (verbs) -> C (install/uninstall). |
 
 ## Archive + resolution log
 
