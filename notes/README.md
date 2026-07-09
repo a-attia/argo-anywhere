@@ -18,11 +18,14 @@ This directory holds working notes for the project:
   completes. Migrated from `docs/PHASE*_LIVE_TEST_PLAN.md` on
   2026-05-14 per the framework's `notes/` convention for
   working-document scratch space.
-- **`impl_<component>.md`** (none today) — per-component implementation
-  plans. Not used yet because this project's "components" are sections
-  of one bash script, not standalone modules. If a future Python
-  heredoc grows substantial enough to warrant pre-design (per the
-  language-policy override in AGENTS.md), it gets an `impl_*.md` here.
+- **`impl_<component>.md`** — per-component implementation plans. Used
+  once the project grew standalone-ish components: `impl_codex_aider.md`
+  (aider/codex as `--cli-tool` targets) and `impl_lifecycle_commands.md`
+  (the connect/configure/run + install/uninstall reshape). The
+  Python-package + web-UI exploration is currently tracked out-of-tree
+  under `spike/HANDOFF.md` + `spike/RESULTS.md` on the
+  `feat/python-package-webui` branch (see the index below); a future
+  session may promote it to an `impl_python_webui.md` here.
 - **`section_<topic>.md`** (none today) — working notes for
   cross-cutting concerns. Not used today; reserved for future use.
 
@@ -47,6 +50,7 @@ Conventions follow
 |:---|:---|:---|:---|
 | [`impl_codex_aider.md`](impl_codex_aider.md) | impl | aider (Phase 5a) LIVE-TEST PASSED 2026-07-09; codex (Phase 5b) designing | Plan for adding OpenAI Codex CLI + aider as `--cli-tool` targets against the 5-function per-tool API contract. aider landed + live-tested — OpenAI-Chat path, global/project scope, key-preserving YAML merge, temperature-off model-settings; codex (Phase 5b) gated on argo-proxy's `/v1/responses` maturity + a TOML-writer decision. |
 | [`impl_lifecycle_commands.md`](impl_lifecycle_commands.md) | impl | designing (decisions locked 2026-07-08) | Plan for the three-level UX reshape: connect/configure/run verb split (D-024) + symmetric install/uninstall anchored at `~/.argo_anywhere/bin/` with an install manifest for honest config-restore (D-025). Phased A (manifest) -> B (verbs) -> C (install/uninstall). |
+| [`../spike/HANDOFF.md`](../spike/HANDOFF.md) + [`../spike/RESULTS.md`](../spike/RESULTS.md) | exploration (impl) | P1 gate PASSED 2026-07-09; P0 next (on branch `feat/python-package-webui`, not `main`) | Python-package + web-UI exploration (Model A: package owns runtime, wraps unchanged bash engine, scrollback-style local web UI driving connect/monitor/configure via a PTY↔WebSocket↔xterm.js browser terminal). P1 (Duo/connect in browser terminal) proven against real engine + ANL. Handoff carries the queued cold-Duo observation, the two-lane driver design, the 3 un-pre-answerable prompts, and the Model-A `D-0NN` decisions to record in PLAN.md first. **Lives on the feature branch; artifacts under `spike/` (venv git-ignored).** |
 
 ## Archive + resolution log
 
