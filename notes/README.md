@@ -20,12 +20,11 @@ This directory holds working notes for the project:
   working-document scratch space.
 - **`impl_<component>.md`** — per-component implementation plans. Used
   once the project grew standalone-ish components: `impl_codex_aider.md`
-  (aider/codex as `--cli-tool` targets) and `impl_lifecycle_commands.md`
-  (the connect/configure/run + install/uninstall reshape). The
-  Python-package + web-UI exploration is currently tracked out-of-tree
-  under `spike/HANDOFF.md` + `spike/RESULTS.md` on the
-  `feat/python-package-webui` branch (see the index below); a future
-  session may promote it to an `impl_python_webui.md` here.
+  (aider/codex as `--cli-tool` targets), `impl_lifecycle_commands.md`
+  (the connect/configure/run + install/uninstall reshape), and
+  `impl_python_webui.md` (the Model-A Python-package + web-UI rebuild;
+  promoted 2026-07-10 from the out-of-tree `spike/` exploration docs,
+  now stubs) on the `feat/python-package-webui` branch.
 - **`section_<topic>.md`** (none today) — working notes for
   cross-cutting concerns. Not used today; reserved for future use.
 
@@ -50,7 +49,7 @@ Conventions follow
 |:---|:---|:---|:---|
 | [`impl_codex_aider.md`](impl_codex_aider.md) | impl | aider (Phase 5a) LIVE-TEST PASSED 2026-07-09; codex (Phase 5b) designing | Plan for adding OpenAI Codex CLI + aider as `--cli-tool` targets against the 5-function per-tool API contract. aider landed + live-tested — OpenAI-Chat path, global/project scope, key-preserving YAML merge, temperature-off model-settings; codex (Phase 5b) gated on argo-proxy's `/v1/responses` maturity + a TOML-writer decision. |
 | [`impl_lifecycle_commands.md`](impl_lifecycle_commands.md) | impl | designing (decisions locked 2026-07-08) | Plan for the three-level UX reshape: connect/configure/run verb split (D-024) + symmetric install/uninstall anchored at `~/.argo_anywhere/bin/` with an install manifest for honest config-restore (D-025). Phased A (manifest) -> B (verbs) -> C (install/uninstall). |
-| [`../spike/HANDOFF.md`](../spike/HANDOFF.md) + [`../spike/RESULTS.md`](../spike/RESULTS.md) | exploration (impl) | P1 gate PASSED 2026-07-09; P0 next (on branch `feat/python-package-webui`, not `main`) | Python-package + web-UI exploration (Model A: package owns runtime, wraps unchanged bash engine, scrollback-style local web UI driving connect/monitor/configure via a PTY↔WebSocket↔xterm.js browser terminal). P1 (Duo/connect in browser terminal) proven against real engine + ANL. Handoff carries the queued cold-Duo observation, the two-lane driver design, the 3 un-pre-answerable prompts, and the Model-A `D-0NN` decisions to record in PLAN.md first. **Lives on the feature branch; artifacts under `spike/` (venv git-ignored).** |
+| [`impl_python_webui.md`](impl_python_webui.md) | impl | P1 PASS; **P0 code-complete (2026-07-10)**; P2–P5 pending (branch `feat/python-package-webui`, not `main`) | Model-A Python-package + web-UI rebuild: package owns the runtime, wraps the unchanged bash engine (vendored verbatim), two-lane driver (Lane-1 captured subprocess / Lane-2 PTY→browser terminal), FastAPI web UI. Single source of truth; consolidates the former `spike/HANDOFF.md` + `spike/RESULTS.md` (now stubs). Records decisions D-026..D-029, the cold-Duo PASS, the P0 layout, and the stdlib-PTY parity residual. `spike/` retains the proof-of-concept code the P0 web layer was lifted from. |
 
 ## Archive + resolution log
 

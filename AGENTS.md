@@ -190,6 +190,7 @@ Section 6.4):
 | [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
 | [`notes/impl_codex_aider.md`](notes/impl_codex_aider.md) | Maintainer | Design + implementation record for aider (Phase 5a; LIVE-TEST PASSED 2026-07-09) + codex (Phase 5b; gated). Config-format facts, per-tool contract application, live-test findings. |
 | [`notes/impl_lifecycle_commands.md`](notes/impl_lifecycle_commands.md) | Maintainer | Design + implementation record for D-024 (connect/configure/run) + D-025 (install/uninstall + install manifest). Three-level model, locked decisions, live-test amendments. LIVE-TEST PASSED 2026-07-09. |
+| [`notes/impl_python_webui.md`](notes/impl_python_webui.md) | Maintainer | **Single source of truth** for the Model-A Python-package + web-UI rebuild (branch `feat/python-package-webui`; D-026..D-029). Plan/phasing (P0–P5), P1+cold-Duo PASS, P0 code-complete layout, two-lane driver contract, residuals. Consolidates the former `spike/HANDOFF.md` + `spike/RESULTS.md` (now stubs). Not on `main`. |
 | [`notes/test_plan_phase*.md`](notes/), [`notes/test_plan_lifecycle.md`](notes/test_plan_lifecycle.md) | Maintainer | Per-phase live-test plans (historical artifact once phase complete). `test_plan_lifecycle.md` covers aider + the lifecycle commands (PASSED 2026-07-09). |
 
 ## Project-specific overrides
