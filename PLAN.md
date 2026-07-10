@@ -1643,7 +1643,7 @@ preserves inspect-and-fork.
 (uninstall-old -> install-new). No straddling / dual-home code. The cutover is
 communicated out-of-band to the small user set.
 
-### D-028 — Rename `argo_anywhere.sh` -> `argo-anywhere.sh` (2026-07-10)
+### D-028 — Rename `argo_anywhere` -> `argo-anywhere` everywhere user-facing (2026-07-10)
 
 **Status**: accepted; designing.
 
