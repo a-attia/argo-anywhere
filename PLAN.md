@@ -280,7 +280,10 @@ gets a number + date + status.
 
 ### D-001 — Single-file distribution (curl-and-run UX) (2025 inception)
 
-**Status**: accepted; load-bearing.
+**Status**: accepted; load-bearing — **superseded for the package era by
+[D-026](#d-026--python-package-as-runtime-model-a-supersedes-d-001-2026-07-10)**
+(2026-07-10). The single-file rationale below is preserved for provenance; the
+curl-and-run path survives only as the `--print-script` escape hatch.
 
 **Context.** The AI4Dev manual setup guide is 5 SSH sessions + multiple
 config edits + a hand-managed tunnel. Each step is a place users get
@@ -1553,6 +1556,106 @@ tempfile copy). D-023's flat layout requires a one-shot migration.
 **Sequencing** (both decisions share the config-touch path): Phase A
 manifest foundation -> Phase B D-024 verb split -> Phase C D-025 bin/ +
 install/uninstall. Each independently shippable + live-tested.
+
+### D-026 — Python-package-as-runtime (Model A); supersedes D-001 (2026-07-10)
+
+**Status**: accepted; designing. Supersedes [D-001](#d-001--single-file-distribution-curl-and-run-ux-2025-inception).
+Make-or-break gate (P1 — Duo/connect driven from a browser terminal) PASSED
+(2026-07-09; cold-Duo residual closed 2026-07-10). Exploration record on branch
+`feat/python-package-webui` (`spike/RESULTS.md`, `spike/HANDOFF.md`); to be
+promoted to `notes/impl_python_webui.md`.
+
+**Context.** D-001 chose single-file bash specifically to avoid a Python
+dependency layer on the user's laptop. Two facts have since inverted that
+calculus:
+
+1. The target community (ANL scientific users) universally has Python + pip —
+   the very prerequisite D-001 feared missing is mandatory here, so its stated
+   objection no longer applies.
+2. The new headline capability — a local web UI that can connect (incl. Duo),
+   monitor, configure, and run clients entirely from a browser terminal —
+   requires a persistent Python server process to drive the engine. A pure
+   `.sh` cannot host that server. The P1 spike proved the load-bearing piece:
+   the whole interactive `connect` flow (interactive prompts + a cold Duo
+   challenge) drives cleanly over a PTY <-> WebSocket <-> xterm.js bridge.
+
+**Decision.** Turn argo-anywhere into a `pip`-installable Python package
+(Model A) that OWNS the runtime and wraps the **unchanged** bash engine
+(vendored verbatim as package-data). A two-lane driver splits the engine's
+interactive surface:
+
+- **Lane 1** — managed subprocess for everything pre-answerable via flags/env
+  (`-y`, `--auto-port`, `--user/--node/--port`, `--scope`, `ARGO_ANYWHERE_*`);
+  these verbs return, so they are safe to run and await.
+- **Lane 2** — PTY streamed to the browser terminal for Duo, the long-lived
+  monitor loop, and the 3 prompts with no non-interactive flag (port-migrate,
+  config-conflict, scope-conflict).
+
+The bash engine stays the single source of truth for all orchestration
+(SSH mux, Duo, CSPO defenses, port policy); the package adds only the runtime
++ web layer around it.
+
+**Alternatives considered.**
+1. **Keep pure bash + a separate optional UI script.** Rejected: bash cannot
+   host the persistent server, and a second script home reintroduces the
+   "two-paths problem" (already visible as three competing script copies on a
+   dev machine — repo tree, `~/.argo_anywhere/bin/`, self-update backups).
+2. **Rewrite the engine in Python.** Rejected: discards ~5800 lines of
+   live-verified orchestration for zero user benefit. The engine is vendored
+   verbatim instead; correctness is inherited, not re-litigated.
+
+**Consequences.** D-001's curl-and-run path is retired as the *primary* install
+route (see [D-027]); its inspect-and-fork spirit is preserved via a
+`--print-script` escape hatch that re-emits the raw vendored `.sh`.
+`~/.argo_anywhere/` demotes from a competing script home to **state-only**
+(port cache, sockets, locks). The project's "single-file; no `src/`" override
+(CLAUDE.md) is itself superseded for the package era: code lands under
+`src/argo_anywhere/` with the engine as package-data. Self-invocation still
+works — `remote_bootstrap` scp's the vendored `.sh` to the node and re-execs it
+as `server` (compute nodes keep receiving a plain `.sh`).
+
+### D-027 — Clean-break web-UI major release; no in-place migration (2026-07-10)
+
+**Status**: accepted; designing.
+
+**Context.** The move to a Python package (D-026) plus the script rename (D-028)
+is a hard discontinuity in install shape and entry-point name. The user base is
+small (~dozens) and coordinated, so a permanent back-compat forwarder to
+straddle a one-time cutover would buy little and cost lasting complexity.
+
+**Decision.** Ship the web-UI package as a **clean-break major release**: no
+in-place migration, no back-compat forwarder or alias. Users uninstall the old
+version and install the new one. The old version's mature `uninstall` / `clean`
+(D-025) is the sanctioned off-ramp. A `--print-script` escape hatch (D-026)
+preserves inspect-and-fork.
+
+**Alternatives considered.**
+1. **Forwarder from the old script to the package.** Rejected: permanent
+   complexity for a one-time, coordinated cutover.
+2. **Dual-ship both indefinitely.** Rejected: reinstates the two-paths problem
+   D-026 exists to resolve.
+
+**Consequences.** `docs/UPGRADING.md` gains a hard-cutover section
+(uninstall-old -> install-new). No straddling / dual-home code. The cutover is
+communicated out-of-band to the small user set.
+
+### D-028 — Rename `argo_anywhere.sh` -> `argo-anywhere.sh` (2026-07-10)
+
+**Status**: accepted; designing.
+
+**Context.** The repo and package are hyphenated (`argo-anywhere`); only the
+script file still uses an underscore (`argo_anywhere.sh`), a historical artifact
+of the D-008 rename from `argo_opencode.sh`. The clean-break release (D-027) is
+the natural moment to unify without a compatibility burden.
+
+**Decision.** Rename `argo_anywhere.sh` -> `argo-anywhere.sh` (uniform
+hyphenation matching repo + package name). Rides the D-027 discontinuity; no
+forwarder/alias by design.
+
+**Consequences.** The vendored engine ships as `argo-anywhere.sh`; the
+`$self`-scp to the compute node, the `SCRIPT_VERSION` self-update sentinel, and
+the script header references update accordingly. One-time doc/reference sweep.
+No user-facing alias (consistent with D-027).
 
 ---
 
