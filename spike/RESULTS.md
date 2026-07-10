@@ -49,10 +49,32 @@ the browser terminal:
   correctly in xterm.js — hardest rendering case, flawless ✓
 - clean exit status 0 ✓
 
-### Residual to exercise once before promotion (not gating)
-- A truly **cold** `connect` (after `stop` + closing the mux master) to see the
-  live Duo prompt render + accept input in the browser. De-risked by the
-  `read -s` proof, but worth one real observation.
+### Residual to exercise once before promotion — DONE (PASS, 2026-07-10)
+The truly **cold** `connect` was exercised at the keyboard: after `stop` tore
+down the listener *and* the mux master (socket gone, no lingering ssh procs,
+fail-lock clean), a fresh `connect` was driven entirely from the browser
+terminal. The **live cold Duo prompt fired and rendered legibly** (transcript
+redacted — username/host/device masked):
+
+```
+(<user>@<jump-host>) Duo two-factor login for <user>
+Enter a passcode or select one of the following options:
+1. Duo Push to XXX-XXX-XXXX
+Passcode or option (1-1): 1
+```
+
+- Duo option `1` (Push) typed **in-browser**; accepted; master came ready ✓
+- No native terminal needed at any point ✓
+- Bootstrap ran; reached **ALL GREEN** (44 models); box-drawing summary drew
+  correctly ✓
+- No misdraw / input lag / lost keystrokes reported ✓
+- **Fail-lock stayed absent** before and after (clean single attempt; CSPO
+  one-attempt discipline held — no retries) ✓
+
+Scope note: the SSH **master** was cold (this is what the observation targeted —
+a *fresh* Duo challenge), but the node's argo-proxy **server** process was
+reused (existing pid, identity-verified). That is expected and orthogonal; the
+cold-*master* Duo path is what P1b's reuse-run had left unobserved.
 
 ## Verdict
 

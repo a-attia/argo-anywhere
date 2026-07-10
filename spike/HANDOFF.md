@@ -50,7 +50,18 @@ FastAPI /ws  ──►  ptyprocess PTY  ──►  bash argo_anywhere.sh connect
 
 ---
 
-## QUEUED TASK 1 (do this first next session): cold-Duo observation in the browser
+## QUEUED TASK 1 — cold-Duo observation in the browser — ✅ DONE (PASS, 2026-07-10)
+
+**Closed.** Exercised at the keyboard on 2026-07-10: after a clean `stop` +
+cold master (socket gone, no lingering ssh procs, fail-lock clean), a fresh
+`connect` was driven entirely from the browser terminal. The **live cold Duo
+prompt fired, rendered legibly, and was completed in-browser** (Duo Push
+option `1`); reached ALL GREEN; fail-lock stayed absent throughout (single
+attempt, no retries — CSPO discipline held). Full record in `spike/RESULTS.md`
+("Residual to exercise once before promotion — DONE"). The next session can
+proceed straight to the Model-A PLAN.md decisions + P0.
+
+<details><summary>Original task text (for provenance)</summary>
 
 P1b **reused an existing healthy SSH mux master**, so no *fresh* Duo prompt
 fired. The cold-master Duo path is byte-for-byte the same PTY route already
@@ -76,7 +87,7 @@ failures and can lead to an IP block).
    ```sh
    cd /Users/attia/AHMED_HOME/Research/Projects/Software/argo-anywhere
    bash argo_anywhere.sh stop
-   ssh -O exit -S ~/.ssh/sockets/argo-anywhere-aattia-compute-01.cels.anl.gov-22 placeholder 2>/dev/null || true
+   ssh -O exit -S ~/.ssh/sockets/argo-anywhere-<user>-<node>-22 placeholder 2>/dev/null || true
    ```
    Confirm the listener on :64742 is gone and the socket file is gone:
    ```sh
@@ -102,6 +113,8 @@ failures and can lead to an IP block).
 
 6. Record the result in `spike/RESULTS.md` (there's a "Residual to exercise"
    note to update) and mark this task done.
+
+</details>
 
 ---
 
