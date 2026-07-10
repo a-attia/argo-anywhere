@@ -31,12 +31,19 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+# The PTY is driven by the stdlib (argo_anywhere.driver.PtySession), so the web
+# extra needs no ptyprocess -- just the HTTP/WS server.
 web = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
-    "ptyprocess>=0.7",
 ]
 all = ["argo-anywhere[web]"]
+# Dev/test: pytest + httpx (FastAPI's TestClient needs httpx).
+test = [
+    "argo-anywhere[web]",
+    "pytest>=8",
+    "httpx>=0.27",
+]
 
 [project.urls]
 Homepage = "https://github.com/a-attia/argo-anywhere"
