@@ -64,6 +64,15 @@ def test_healthz(client: TestClient) -> None:
     assert r.json() == {"status": "ok"}
 
 
+def test_api_status(client: TestClient) -> None:
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "package" in body and "listeners" in body
+    assert body["package"]["package_version"].startswith("3.0.0")
+    assert isinstance(body["listeners"], list)
+
+
 def test_static_assets_served(client: TestClient) -> None:
     assert client.get("/static/xterm.css").status_code == 200
     assert client.get("/static/xterm.js").status_code == 200

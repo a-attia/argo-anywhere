@@ -91,6 +91,21 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    @app.get("/api/status")
+    async def api_status() -> JSONResponse:
+        # Local-only: versions + loopback listeners. Does NOT poll channel
+        # /health (that would traverse an ANL tunnel); the dashboard requests
+        # health explicitly on user action.
+        from ..status import cached_state, local_listeners, package_info
+
+        state = cached_state()
+        ports = sorted({p for p in (state["port"], 8799) if p})
+        return JSONResponse({
+            "package": package_info(),
+            "cached": state,
+            "listeners": [ln.as_dict() for ln in local_listeners(ports)],
+        })
+
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
     @app.websocket("/ws")

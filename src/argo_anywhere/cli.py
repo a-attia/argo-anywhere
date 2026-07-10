@@ -34,6 +34,8 @@ argo-anywhere (Python package) additions beyond the engine's help:
   argo-anywhere web [--host H] [--port N] [--engine "VERB ARGS"]
                                  Launch the local web-terminal UI (needs the
                                  [web] extra: pip install 'argo-anywhere[web]').
+  argo-anywhere info [--json]    Local status: package + engine versions and
+                                 loopback listeners (no ANL contact).
   argo-anywhere --print-script   Emit the raw bash engine to stdout
                                  (e.g. > {ENGINE_FILENAME}); inspect-and-fork.
   argo-anywhere --version        Print the package version.
@@ -45,6 +47,53 @@ def _run_engine_passthrough(args: Sequence[str]) -> int:
     with engine_path() as script:
         proc = subprocess.run(["bash", str(script), *args])
     return proc.returncode
+
+
+def _cmd_info(args: Sequence[str]) -> int:
+    """Print local status: package + engine versions and loopback listeners.
+
+    Purely local -- no ANL contact (does NOT poll channel /health, which would
+    traverse an established tunnel). `--json` emits machine-readable output.
+    """
+    import json
+
+    from .status import cached_state, local_listeners, package_info
+
+    info = package_info()
+    state = cached_state()
+    # Scope the listener view to argo-anywhere's own footprint: the cached
+    # tunnel port + the default web-UI port. (local_listeners() with no filter
+    # would dump every loopback listener on the machine.)
+    ports = sorted({p for p in (state["port"], 8799) if p})
+    listeners = [ln.as_dict() for ln in local_listeners(ports)]
+
+    if "--json" in args:
+        print(json.dumps(
+            {"package": info, "cached": state, "listeners": listeners}, indent=2
+        ))
+        return 0
+
+    print(
+        f"argo-anywhere {info['package_version']}  "
+        f"(engine {info['engine_version']}, sha {info['engine_sha256_short']})"
+    )
+    print(f"python {info['python_version']} on {info['platform']}")
+    print(
+        "cached channel: "
+        f"user={state['user'] or '-'} node={state['node'] or '-'} "
+        f"port={state['port'] or '-'}"
+    )
+    by_port = {ln["port"]: ln for ln in listeners}
+    if state["port"]:
+        ln = by_port.get(state["port"])
+        print(
+            f"  tunnel :{state['port']}  "
+            + (f"UP (pid {ln['pid']}, {ln['command']})" if ln else "down (no local listener)")
+        )
+    web = by_port.get(8799)
+    if web:
+        print(f"  web UI :8799  UP (pid {web['pid']}, {web['command']})")
+    return 0
 
 
 def _cmd_web(args: Sequence[str]) -> int:
@@ -94,6 +143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "web":
         return _cmd_web(argv[1:])
+    if argv and argv[0] == "info":
+        return _cmd_info(argv[1:])
 
     # help/-h: show the engine's help, then the package addendum.
     if argv and argv[0] in ("help", "-h", "--help"):

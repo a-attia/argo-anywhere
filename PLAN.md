@@ -1913,11 +1913,15 @@ gates.
    (settled 2026-07-10 — broad scientific baseline; the P1 spike used 3.13 and
    the ANL compute node ran system Python 3.12, both comfortably above). Set
    `requires-python = ">=3.10"` in `pyproject.toml`.
-10. **Two version numbers (gates the release + `update` UX)**. Package version
-    vs the vendored engine's `SCRIPT_VERSION`. D-029 makes the package version
-    authoritative and the engine version an internal component tag. Confirm
-    they may diverge (engine patched without a package bump, and vice versa)
-    and how `argo-anywhere --version` / `status` surface both.
+10. **Two version numbers (gates the release + `update` UX)** — **surfacing
+    RESOLVED 2026-07-10**. Package version vs the vendored engine's
+    `SCRIPT_VERSION`. D-029 makes the package version authoritative and the
+    engine version an internal component tag; they may diverge (engine patched
+    without a package bump, and vice versa). Both are now surfaced:
+    `argo-anywhere --version` prints the package version, and `argo-anywhere
+    info` (+ `GET /api/status`) prints package + engine version + engine sha.
+    Remaining sub-question: whether `update`'s UX needs to show the engine
+    component version too.
 11. **Web-server security posture (gates `web/app.py`; needs a `SECURITY.md`
     row)**. The spike server is **unauthenticated** — loopback-only bind +
     host-header (DNS-rebinding) guard — and can spawn PTYs running arbitrary
