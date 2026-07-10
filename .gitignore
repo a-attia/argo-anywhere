@@ -19,6 +19,15 @@ __pycache__/
 # P1 spike virtualenv (never commit the venv; deps are declared, not vendored)
 spike/.venv/
 
+# Python package build artifacts + dev virtualenv (Model A; D-026)
+.venv/
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+
 # State / local config that should never be committed
 .argo_opencode.server.log
 .argo_opencode.sh
