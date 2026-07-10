@@ -1607,8 +1607,12 @@ The bash engine stays the single source of truth for all orchestration
 **Consequences.** D-001's curl-and-run path is retired as the *primary* install
 route (see [D-027]); its inspect-and-fork spirit is preserved via a
 `--print-script` escape hatch that re-emits the raw vendored `.sh`.
-`~/.argo_anywhere/` demotes from a competing script home to **state-only**
-(port cache, sockets, locks). The project's "single-file; no `src/`" override
+The pip package supplants the **install role** of `~/.argo_anywhere/` (the
+D-025 `bin/` wrappers, `env`, and self-update backups become redundant). The
+**state** dir (`~/.config/argo_anywhere/`: port/node/user cache + ssh-fail-lock)
+and the **SSH sockets** (`~/.ssh/sockets/`) are unchanged. Where `manifest.json`
+(config provenance for honest uninstall, D-025) lives once the install dir is
+gone is an open question — see §11. The project's "single-file; no `src/`" override
 (CLAUDE.md) is itself superseded for the package era: code lands under
 `src/argo_anywhere/` with the engine as package-data. Self-invocation still
 works — `remote_bootstrap` scp's the vendored `.sh` to the node and re-execs it
@@ -1648,14 +1652,80 @@ script file still uses an underscore (`argo_anywhere.sh`), a historical artifact
 of the D-008 rename from `argo_opencode.sh`. The clean-break release (D-027) is
 the natural moment to unify without a compatibility burden.
 
-**Decision.** Rename `argo_anywhere.sh` -> `argo-anywhere.sh` (uniform
-hyphenation matching repo + package name). Rides the D-027 discontinuity; no
-forwarder/alias by design.
+**Decision.** Rename `argo_anywhere` -> `argo-anywhere` **everywhere it is
+user-facing** (uniform hyphenation matching repo + package name). Rides the
+D-027 discontinuity; no forwarder/alias by design. "Everywhere" is scoped, not
+literal — two hard carve-outs stay underscored because the platform forbids the
+hyphen:
 
-**Consequences.** The vendored engine ships as `argo-anywhere.sh`; the
-`$self`-scp to the compute node, the `SCRIPT_VERSION` self-update sentinel, and
-the script header references update accordingly. One-time doc/reference sweep.
-No user-facing alias (consistent with D-027).
+**Hyphenate (`argo-anywhere`)** — user-facing surface:
+- the script filename `argo_anywhere.sh` -> `argo-anywhere.sh`;
+- the node-side copy `REMOTE_SELF` `.argo_anywhere.sh` -> `.argo-anywhere.sh`
+  (add the underscore name to `clean`'s legacy-enumeration so old nodes are
+  swept — cf. `LEGACY_REMOTE_SELF`);
+- package / console-script / PyPI name `argo-anywhere` (D-029);
+- the log/display prefix `[argo_anywhere]` -> `[argo-anywhere]`;
+- the script header, `SCRIPT_VERSION` self-update sentinel string
+  (`# argo_anywhere.sh --` -> `# argo-anywhere.sh --`, argo_anywhere.sh:8305),
+  and all live-doc references (README, AGENTS.md, UPGRADING, TESTING, SECURITY,
+  LIMITATIONS, examples/) — **not** the dated `docs/AUDIT_*` or
+  `notes/test_plan_*` provenance files;
+- the config/state/install directories `~/.config/argo_anywhere` ->
+  `~/.config/argo-anywhere` and `~/.argo_anywhere` -> gone-or-hyphenated (its
+  install role is retired by D-026), handled as a **first-run state migration**
+  under the D-027 clean break (mirror the existing `LEGACY_STATE_DIR` migration
+  idiom).
+
+**Stay underscored (hard platform constraint — do NOT sed these):**
+- **Shell env-var names** (`ARGO_ANYWHERE_*`, 17 of them, + `ARGO_BOX_STYLE`,
+  legacy `ARGO_OPENCODE_*`): POSIX env-var identifiers are
+  `[A-Za-z_][A-Za-z0-9_]*` — hyphens are illegal.
+- **Internal bash identifiers**: function names, globals (`STATE_DIR`,
+  `REMOTE_SELF`, `SCRIPT_VERSION`, `ARGO_INSTALL_DIR`, ...).
+
+**Consequences.** A naive global `s/argo_anywhere/argo-anywhere/` would break
+every env var and every bash identifier — the rename MUST honor the carve-outs
+above. One-time doc/reference sweep (live docs only). No user-facing alias
+(consistent with D-027).
+
+### D-029 — PyPI as the single source of truth for install + upgrade (2026-07-10)
+
+**Status**: accepted; designing. Depends on [D-026], [D-027]. Retires the
+`argo-anywhere` self-update path from [D-022]/[D-023] for the package era (the
+other `update`-registry components are unaffected — see below).
+
+**Context.** D-026 makes the package own the runtime with the engine vendored
+as package-data. D-022/D-023 had previously given the *standalone script* an
+in-place self-update (`update argo-anywhere` rewriting
+`~/.argo_anywhere/argo_anywhere.sh`) plus a canonical install. Under Model A
+the engine lives inside the installed package (site-packages / a `pipx` venv);
+self-updating that copy in place is dead-or-harmful because the package manager
+owns it. The name is confirmed free: **`argo-anywhere` is AVAILABLE on PyPI**
+(checked 2026-07-10 — JSON API and the authoritative `/simple/` index both
+return 404, incl. the `argo_anywhere` / `argoanywhere` normalized variants).
+
+**Decision.**
+
+1. **PyPI is the single source of truth** for the packaged tool. Install =
+   `pipx install argo-anywhere` (or `pip install`); upgrade = `pipx upgrade` /
+   `pip install -U`. The **package version** carries release identity; the
+   vendored engine's `SCRIPT_VERSION` becomes an internal *component* version,
+   not a user-facing upgrade channel.
+2. **The engine self-update retires for the package era.** Running as
+   package-data, `argo-anywhere update argo-anywhere` becomes a no-op that
+   points the user at `pipx`/`pip`. The other `update`-registry rows —
+   `argoproxy` (server-side venv-pip), `opencode`, `claudecode` (laptop tools)
+   — are **UNAFFECTED**: they remain independently-installed binaries the tool
+   upgrades in place.
+3. **Not yet hosted.** PyPI publication happens once a working Python version
+   exists (the first `v3.0.0` candidate; see §11). Until then, install is
+   from-git on the `feat/python-package-webui` branch.
+
+**Consequences.** Removes the two-homes upgrade ambiguity D-026 flags.
+`docs/UPGRADING.md`'s hard-cutover section (D-027) documents the `pipx`
+install/upgrade flow. `--print-script` (D-026) still re-emits the raw engine
+for inspect/fork but is explicitly **not** an install/upgrade channel. The
+still-queued CITATION.cff / Zenodo DOI aligns to the PyPI release + git tag.
 
 ---
 
@@ -1828,6 +1898,41 @@ Release process:
    UP-08 + §3-bis UP-10; `notes/agent_feedback.md` entry 6's
    Resolution-note is updated to reflect the 4.7-resolved /
    4.8-reissued split.
+
+### Model-A (Python package + web UI) open questions
+
+Raised 2026-07-10 during the pre-P0 multipass review of D-026..D-029.
+Tracked here so they don't block; each must resolve before the P0 file it
+gates.
+
+9. **Package identity + Python floor (gates `pyproject.toml`)**. Name is
+   settled: **`argo-anywhere`** (confirmed available on PyPI, D-029); console
+   script `argo-anywhere`; target release **v3.0.0** (matches the existing
+   "whenever v3.0.0 ships" removal targets). **Still open**: the minimum
+   Python version. The P1 spike used 3.13; the ANL compute node ran system
+   Python 3.12. Laptop floor proposal: **3.10+** (match a broad scientific
+   baseline) — needs confirmation.
+10. **Two version numbers (gates the release + `update` UX)**. Package version
+    vs the vendored engine's `SCRIPT_VERSION`. D-029 makes the package version
+    authoritative and the engine version an internal component tag. Confirm
+    they may diverge (engine patched without a package bump, and vice versa)
+    and how `argo-anywhere --version` / `status` surface both.
+11. **Web-server security posture (gates `web/app.py`; needs a `SECURITY.md`
+    row)**. The spike server is **unauthenticated** — loopback-only bind +
+    host-header (DNS-rebinding) guard — and can spawn PTYs running arbitrary
+    engine flows (incl. SSH). Proposed posture to ratify: acceptable because
+    it shares the user's shell trust boundary (a local attacker who can reach
+    `127.0.0.1:<port>` already has the user's shell). Decide whether a
+    loopback token / same-origin check is warranted, and add the threat-model
+    row to `docs/SECURITY.md`.
+12. **Lane-2 PTY concurrency model (gates `driver.py`)**. Lane 2 streams a PTY
+    to "the browser terminal", but a `configure`/`run` action can hit a
+    Lane-2 prompt (config-conflict / scope-conflict, D-026) while `connect`'s
+    monitor PTY is already streaming in another tab. Decide the arbitration:
+    one PTY per browser session, a single shared session, or a queued
+    prompt-broker. Related: **manifest.json's home** once `~/.argo_anywhere/`
+    loses its install role (D-026 F1 note) — likely `~/.config/argo_anywhere/`
+    with the rest of the state.
 
 ---
 
