@@ -50,11 +50,31 @@ def test_print_script_round_trips(capsysbinary: pytest.CaptureFixture[bytes]) ->
     assert out == _engine.engine_bytes()
 
 
-def test_unwired_invocation_is_honest(capsysbinary: pytest.CaptureFixture[bytes]) -> None:
-    rc = cli.main(["status"])
-    assert rc == 2  # not-yet-wired, non-zero so scripts don't mistake it for success
-    err = capsysbinary.readouterr().err.decode()
-    assert "not wired yet" in err
+def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = cli.main(["--version"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "argo-anywhere" in out
+    assert argo_anywhere.__version__ in out
+
+
+def test_help_passes_through_and_appends_addendum(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # `help` runs the engine (subprocess -> fd-level output, hence capfd) then
+    # appends the package addendum to stderr.
+    rc = cli.main(["help"])
+    assert rc == 0
+    captured = capfd.readouterr()
+    assert "connect" in captured.out          # engine help
+    assert "argo-anywhere web" in captured.err  # package addendum
+
+
+def test_web_subcommand_parses_help() -> None:
+    # `web --help` exits 0 via argparse without launching the server.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["web", "--help"])
+    assert exc.value.code == 0
 
 
 @pytest.mark.skipif(
