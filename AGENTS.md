@@ -197,7 +197,20 @@ Section 6.4):
 (Anything that differs from the universal conventions in
 `~/.scicomp-research-skills/AGENTS.md` Section 6.)
 
-### Override: single-file architecture; no `src/`/`tests/`/`experiments/` (decided 2025 inception; reaffirmed 2026-05-14)
+### Override: single-file architecture; no `src/`/`tests/`/`experiments/` (decided 2025 inception; reaffirmed 2026-05-14) — SUPERSEDED on `feat/python-package-webui`
+
+> **Status (branch `feat/python-package-webui`, 2026-07-10): SUPERSEDED by
+> D-026..D-029 (Model A — Python package + web UI).** On this branch the
+> project IS a Python package. New code lands under `src/argo_anywhere/`, and a
+> real `tests/` tree is expected for the Python layer (driver / cli / web).
+> **The bash engine stays a single file** — vendored VERBATIM as package-data
+> at `src/argo_anywhere/engine/argo-anywhere.sh` (D-028 rename) — so "one `.sh`
+> file" remains true for the *engine* even though the *project* is no longer
+> single-file. The `curl one .sh && bash it` install path is retired as the
+> primary route (D-027 clean break); `--print-script` re-emits the raw engine
+> for inspect/fork (D-026); install + upgrade go through PyPI/`pipx` (D-029).
+> The original rule below is preserved for provenance and still governs the
+> engine file itself (keep it self-contained; do not split the `.sh`).
 
 **Framework rule** (`~/.scicomp-research-skills/templates/software-skeleton/`
 expected layout): software projects ship with `src/<library_name>/`,
@@ -216,7 +229,16 @@ breaks both flows. Documented as design decision D-001 in PLAN.md.
 `tests/`. The "tests" are smoke checks documented inline in this
 AGENTS.md and a live-verification guide in `docs/TESTING.md`.
 
-### Override: no automated test suite; no CI (decided 2025 inception)
+### Override: no automated test suite; no CI (decided 2025 inception) — REVISED on `feat/python-package-webui`
+
+> **Status (branch `feat/python-package-webui`, 2026-07-10): REVISED by
+> D-026.** The Python layer (driver / cli / web / PTY bridge) is unit-testable
+> WITHOUT real ANL infra and SHOULD have a `tests/` suite (pytest); CI for that
+> layer is in scope (P4 packaging polish). The **bash engine keeps its
+> live-only verification** (`docs/TESTING.md`: real SSH + Duo + argo-proxy) —
+> mocking that stack tests the mocks, not the engine. Net rule on this branch:
+> automated unit tests for the package code; manual live tests for the engine.
+> Original rule below preserved for provenance.
 
 **Framework rule** (research-software-engineering skill): substantial
 projects have CI + automated tests covering numerical claims +
@@ -233,7 +255,15 @@ mocked CI would test the mocks, not the script.
 
 **Scope**: project-wide.
 
-### Override: bash + inline Python heredoc language policy (decided 2025 inception)
+### Override: bash + inline Python heredoc language policy (decided 2025 inception) — REVISED on `feat/python-package-webui`
+
+> **Status (branch `feat/python-package-webui`, 2026-07-10): REVISED by
+> D-026.** Two-language project now. The vendored **bash engine** keeps the
+> bash-3.2+ policy below (it is carried VERBATIM, unchanged). A **Python 3.10+**
+> package layer wraps it (driver / cli / web); new non-engine code is Python and
+> follows Python conventions (type hints, `ruff`/`black`, pytest). The
+> engine's inline Python-heredoc escape hatch is unchanged. Original rule below
+> preserved for provenance.
 
 **Framework rule** (research-software-engineering skill, MULTI-LANGUAGE.md):
 software projects pick ONE primary language (Python / Julia / C++ /

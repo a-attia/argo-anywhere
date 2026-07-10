@@ -1908,10 +1908,10 @@ gates.
 9. **Package identity + Python floor (gates `pyproject.toml`)**. Name is
    settled: **`argo-anywhere`** (confirmed available on PyPI, D-029); console
    script `argo-anywhere`; target release **v3.0.0** (matches the existing
-   "whenever v3.0.0 ships" removal targets). **Still open**: the minimum
-   Python version. The P1 spike used 3.13; the ANL compute node ran system
-   Python 3.12. Laptop floor proposal: **3.10+** (match a broad scientific
-   baseline) — needs confirmation.
+   "whenever v3.0.0 ships" removal targets). **Minimum Python: 3.10+**
+   (settled 2026-07-10 — broad scientific baseline; the P1 spike used 3.13 and
+   the ANL compute node ran system Python 3.12, both comfortably above). Set
+   `requires-python = ">=3.10"` in `pyproject.toml`.
 10. **Two version numbers (gates the release + `update` UX)**. Package version
     vs the vendored engine's `SCRIPT_VERSION`. D-029 makes the package version
     authoritative and the engine version an internal component tag. Confirm
