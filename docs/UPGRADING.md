@@ -1,3 +1,50 @@
+# Start here: install and migrate
+
+Pick the **one** row that matches you. Each path is 2–3 steps; everything after
+this section is reference detail you only need if something surprises you.
+
+> **Pre-release note.** v3 isn't on PyPI yet, so `pipx install argo-anywhere` will
+> work once v3.0.0 ships. **Until then**, wherever a step below says
+> `pipx install argo-anywhere`, use the branch command:
+> `pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'`
+
+### New to argo-anywhere
+
+1. **Install:** `pipx install argo-anywhere`
+2. **Connect** (one Duo prompt): `argo-anywhere connect`
+3. In another terminal, **run a tool** against that channel:
+   `argo-anywhere run aider` (or `opencode` / `claudecode`). Prefer no terminal?
+   `argo-anywhere install-launcher` gives you a double-click app.
+
+### Coming from v2.x (you ran `bash argo-anywhere.sh …` or `curl … .sh`)
+
+1. **Install the package:** `pipx install argo-anywhere`. It bundles the engine
+   and owns everything now — you can delete your old `argo-anywhere.sh` file.
+2. **Nothing to migrate by hand.** Your cached username / node / port and the
+   install manifest move themselves on the first run.
+3. **Tidy the old version's leftovers** — superseded copies on your laptop *and*
+   on the compute node — without reconnecting: after `connect`, run
+   `argo-anywhere prune`. *(prune lands right after v3 merges; until then,
+   `argo-anywhere clean` after `connect` does the node cleanup with no extra Duo.)*
+
+> If you added `. ~/.argo_anywhere/env` to your `~/.zshrc` / `~/.bashrc` for the
+> old version, remove that line — the package doesn't use it.
+
+### Coming from v1.x (you ran `argo_opencode.sh`)
+
+1. **Install the package:** `pipx install argo-anywhere`.
+2. The **first run refuses to start** while v1.x state is present and prints the
+   exact 2–3 cleanup commands — run them, then re-run.
+3. Continue as **New to argo-anywhere** above.
+
+---
+
+No hidden state: everything argo-anywhere puts on your machine is visible with
+`argo-anywhere info` and removable with `argo-anywhere uninstall` (which also
+restores your AI-tool configs to their pre-argo state).
+
+---
+
 # Upgrading from v1.x to v2.x
 
 This document is for users who already have a working `argo_opencode.sh`

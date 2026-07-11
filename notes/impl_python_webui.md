@@ -302,6 +302,39 @@ New tests: `tests/test_packaged_marker.py` (5), `tests/test_footprint.py` (7),
 `tests/test_uninstall_verb.py` (6). Suite: **123 pass**, no ANL/SSH/network;
 engine copies byte-identical.
 
+### Planned next: `prune` (design locked 2026-07-11; build AFTER the Part-B live test + merge)
+
+A dedicated **`prune`** engine verb (distinct from `clean`'s teardown and
+`uninstall`'s package removal) that removes only **dead / superseded** cruft
+left by version upgrades, on **both sides**, and is **structurally incapable of
+triggering Duo** because it requires an already-up channel.
+
+- **Channel-required, no-Duo by construction.** Precondition: `channel_is_up`
+  (a `/health` probe over the tunnel — no SSH) **and** `ssh -O check` on the mux
+  master; channel down → die with a `connect`-first hint (like
+  `configure`/`run`). The node sweep runs over the **existing master**
+  (`ControlMaster=no`, `ControlPath=<socket>`, **`BatchMode=yes`** belt-and-
+  suspenders so a TOCTOU race fails fast instead of prompting). Reusing the
+  master = zero new auth.
+- **Scope = superseded/legacy only** (never the current working set, configs, or
+  `.bak` backups the restore path needs):
+  - **Laptop**: v1.x mux sockets `argo-opencode-*`; v1.x state dir
+    `~/.config/argo_opencode`; **and `~/.argo_anywhere` — but ONLY in package
+    mode (`ARGO_ANYWHERE_PACKAGED=1`)**, where the package owns the runtime so
+    the old engine-mode canonical install is genuinely orphaned. In engine mode
+    that dir is the LIVE install and MUST be kept. (User call, 2026-07-11.)
+  - **Node**: v2.x `~/.argo_anywhere.sh` + `.server.log`; v1.x
+    `~/.argo_opencode.*`; legacy venv `~/agovenv`; legacy session `agovproxy`.
+    Keeps the current `~/.argo-anywhere.sh`, `~/argovenv`, `argovproxy`, config.
+- **Flags**: `--dry-run` (preview; recommend as the default first run),
+  `--local-only`, `-y`. Low-risk (dead data only) → dry-run + single confirm.
+- **Implementation**: reuses `clean`'s legacy-enumeration remote script (already
+  lists both legacy generations after D-028) filtered to legacy-only, plus the
+  `configure` channel-detect helper. Mostly wiring; also reminds the user to
+  drop any `. ~/.argo_anywhere/env` line from their shell rc when it removes the
+  engine install. Surfaced in the migration guide (`docs/UPGRADING.md` "Start
+  here"): the v2.x-upgrader tidy step.
+
 The original design write-up follows (kept as the record of what was decided and
 why).
 

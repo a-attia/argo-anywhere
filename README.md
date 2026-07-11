@@ -11,10 +11,10 @@ coding CLI tools — [OpenCode](https://opencode.ai/),
 node, **from any laptop on any network**, with **one Duo prompt per
 session**.
 
-> Upgrading from `argo_opencode.sh` (pre-v2.0) or an earlier v2.x?
-> See [`docs/UPGRADING.md`](docs/UPGRADING.md) for the v1.x → v2.0 +
-> v2.0 → v2.1 + v2.1 → v2.2 deltas. The script also auto-detects
-> v1.x state on first run and prints exact cleanup commands.
+> **New here, or upgrading from a previous version?** Start with the
+> **[install & migrate guide](docs/UPGRADING.md#start-here-install-and-migrate)** —
+> one short path each for new users, v2.x upgraders, and v1.x upgraders.
+> (Full per-version deltas follow in the same doc.)
 
 ## Contents
 
