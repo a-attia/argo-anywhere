@@ -8998,7 +8998,7 @@ mode_uninstall() {
   # ---- Plan box ----------------------------------------------------------
   print_summary_box "argo-anywhere  --  uninstall plan" "$C_YLW" \
     "Mode              : $( [ "$dry" = 1 ] && echo 'DRY RUN (no changes)' || echo 'LIVE' )" \
-    "Tier 1 (always)   : $( [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ] && echo 'state dir, tunnels/sockets  (canonical install: n/a in package mode)' || echo "canonical install (${ARGO_INSTALL_DIR}), state dir, tunnels/sockets" )" \
+    "Tier 1 (always)   : canonical install ${ARGO_INSTALL_DIR} (if present), state dir, tunnels/sockets" \
     "Tier 2 configs    : $( [ "$do_restore" = 1 ] && echo 'RESTORE to pre-argo state (--restore-configs)' || echo 'left as-is (pass --restore-configs)' )" \
     "Tier 3 binaries   : $( [ "$do_binaries" = 1 ] && echo 'REMOVE ones we installed (--remove-binaries)' || echo 'left installed (pass --remove-binaries)' )" \
     "Tier 4 remote     : $( [ "$do_remote" = 1 ] && echo 'tear down compute-node venv (--remote)' || echo 'skipped (pass --remote)' )" \
@@ -9124,15 +9124,21 @@ EOF
     _uninstall_rm "$STATE_DIR"
   fi
 
-  # Canonical install LAST (self-removal). D-030a: under the Python package
-  # there is NO canonical install -- the bootstrap stays dormant and pipx/pip
-  # owns the runtime -- so skip it here. In engine mode we may be running from
-  # inside the dir; rm -rf on the dir holding the running script is safe on
-  # POSIX (the inode persists until the process exits), and we order it last
-  # so earlier tiers could still read the (pre-D-030) manifest.
-  if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
-    log "  Canonical install: skipped (package mode -- the runtime is owned by pipx/pip)."
-  else
+  # Canonical install LAST (self-removal). Removed in BOTH modes: a fresh
+  # package install never created it (so this is a no-op), but an UPGRADER from
+  # v2.x engine mode carries a leftover ~/.argo_anywhere that the footprint
+  # (D-030b) lists and promises to remove -- so uninstall must actually remove
+  # it. Only the engine's own install/bootstrap ever creates this dir, and the
+  # bootstrap is dormant under the package (D-030a), so removal is always safe
+  # and won't be undone. [D-030a-amend, 2026-07-11: the earlier package-mode
+  # SKIP was wrong for upgraders and disagreed with the footprint.] In engine
+  # mode we may be running from inside the dir; rm -rf on the dir holding the
+  # running script is safe on POSIX (the inode persists until the process
+  # exits), and we order it last so earlier tiers could still read the manifest.
+  # Guarded on existence (like STATE_DIR above) so a fresh package install --
+  # which never created it -- stays silent instead of reporting a phantom
+  # removal.
+  if [ -d "$ARGO_INSTALL_DIR" ]; then
     _uninstall_rm "$ARGO_INSTALL_DIR"
   fi
 

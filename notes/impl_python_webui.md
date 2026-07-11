@@ -276,9 +276,18 @@ entry (§7) with the Q12 manifest-home resolution (§11).
   `ARGO_ANYWHERE_PACKAGED=1` on all three package→engine spawn sites (CLI
   passthrough + driver Lane 1 `run_engine` + Lane 2 `PtySession`). Engine honors
   it: bootstrap dormant, `install` → pipx hint, `update argo-anywhere` → pipx
-  hint, `update --check` self-row → "managed by pipx" (no GitHub probe),
-  `uninstall` Tier-1 canonical-dir removal skipped. Engine-mode (`--print-script`
-  fork) untouched. Sandbox-verified for all five behaviors + a marker unit test.
+  hint, `update --check` self-row → "managed by pipx" (no GitHub probe).
+  Engine-mode (`--print-script` fork) untouched. Sandbox-verified for all four
+  behaviors + a marker unit test.
+  - **Amendment (2026-07-11 live pre-flight, "Finding 1"):** the initial cut
+    ALSO skipped `uninstall`'s Tier-1 canonical-dir removal in package mode,
+    on the assumption that package mode ⟹ no `~/.argo_anywhere`. That is false
+    for **upgraders** from v2.x engine mode, who carry a leftover one that the
+    footprint (D-030b) lists and promises to remove. Fixed: uninstall now
+    always removes `~/.argo_anywhere` (existence-guarded, so a fresh install
+    stays silent; the dormant bootstrap won't recreate it), so uninstall
+    matches the footprint. Only this uninstall behavior changed; the other
+    D-030a behaviors stand.
 - **D-030b footprint** (`footprint.py`): `footprint(home=…)` ledger
   (disposable/artifact tiers; canonical dir, state dir, SSH sockets, config
   backups; never lists live agent data), extends `argo-anywhere info` (text +
@@ -370,11 +379,13 @@ pre-argo original. That machinery has no scrollback analogue and stays.
   - `update --check`'s `argo-anywhere` row reports **"managed by pipx"** instead
     of installed-vs-GitHub-tag (the tag comparison is meaningless when pipx owns
     the version);
-  - the engine's own `argo_anywhere.sh uninstall` still runs (reachable via
-    passthrough and delegated to by D-030c), but its **Tier-1 canonical-dir/`env`
-    removal becomes a no-op** (there is no canonical dir under the package); the
-    tunnel/socket teardown, config-restore (Tier 2), binary (Tier 3) and remote
-    (Tier 4) tiers are unaffected.
+  - the engine's own `argo-anywhere.sh uninstall` still runs (reachable via
+    passthrough and delegated to by D-030c) and removes `~/.argo_anywhere` in
+    BOTH modes (existence-guarded — a no-op on a fresh package install that
+    never created it, a real removal for an **upgrader** carrying a leftover
+    engine-mode install, which the footprint lists and promises to remove).
+    [Corrected 2026-07-11; the initial cut skipped it in package mode and
+    disagreed with the footprint — see the D-030a amendment above.]
   - **Bonus UX win**: suppressing the bootstrap also stops PATH gaining a
     *second, differently-named* command — the package installs `argo-anywhere`
     (hyphen) while the engine bootstrap would drop `argo_anywhere.sh`

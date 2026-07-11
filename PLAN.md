@@ -1743,9 +1743,11 @@ still-queued CITATION.cff / Zenodo DOI aligns to the PyPI release + git tag.
 ### D-030 — Unified lifecycle under the package; engine self-install dormant in package mode (2026-07-11)
 
 **Status**: accepted; **CODE COMPLETE on `feat/python-package-webui`
-(2026-07-11)** — unit-tested (13 tests) + sandbox-verified; live-test gate
-pending (with the D-028 rename). Depends on [D-026], [D-029]; qualifies
-[D-023], [D-025] in package mode. Full design + phasing in
+(2026-07-11)** — unit-tested + sandbox-verified; Part-A live pre-flight passed
+with one amendment ("Finding 1": uninstall now removes a leftover
+`~/.argo_anywhere` in package mode too, so it matches the footprint — see the
+notes); Part-B (`connect`) live gate pending (with the D-028 rename). Depends on
+[D-026], [D-029]; qualifies [D-023], [D-025] in package mode. Full design + phasing in
 [`notes/impl_python_webui.md` → Lifecycle unification](notes/impl_python_webui.md#lifecycle-unification-d-030-proposed).
 Modeled on the sibling `scrollback` project's lifecycle design.
 
