@@ -161,7 +161,7 @@
       <div class="brand"><span class="mark"></span> argo-anywhere <span class="tag">web</span></div>
       <div class="meta" id="meta">…</div>
       <span class="spacer"></span>
-      <button id="openLaunch" class="btn btn-primary">+ Launch tool</button>
+      <button id="openLaunch" class="btn btn-primary">Actions</button>
       <button id="toggleTerm" class="btn btn-ghost" aria-pressed="false">
         <span class="tdot" id="termDot"></span> Terminal
       </button>
@@ -227,18 +227,18 @@
 
   <div class="backdrop" id="launchBackdrop" hidden>
     <div class="popover" role="dialog" aria-modal="true" aria-label="Launch">
-      <h2>Launch</h2>
-      <div class="lede">Run an argo-anywhere command. CLI tools default to a new native window; connect runs in the embedded terminal.</div>
+      <h2>Actions</h2>
+      <div class="lede">Pick what to do. Coding tools open in a new native window by default; connecting runs in the embedded terminal.</div>
       <div class="two">
         <div class="field">
           <label for="lVerb">command</label>
           <select id="lVerb">
-            <option value="run">run (launch tool)</option>
-            <option value="client">client (all-in-one)</option>
-            <option value="configure">configure (write config)</option>
-            <option value="setup">setup (pick tool)</option>
-            <option value="connect">connect (channel only)</option>
-            <option value="tunnel">tunnel (forward only)</option>
+            <option value="run">Launch a coding tool · run</option>
+            <option value="client">Connect + launch a tool · client</option>
+            <option value="configure">Configure a tool · configure</option>
+            <option value="setup">Set up a tool (choose which) · setup</option>
+            <option value="connect">Connect to Argo — channel only · connect</option>
+            <option value="tunnel">Forward the port only · tunnel</option>
           </select>
         </div>
         <div class="field">
