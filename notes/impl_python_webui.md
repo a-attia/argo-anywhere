@@ -49,7 +49,7 @@ the single-file rule (D-001) are recorded as
 | **P0** | Package skeleton + verbatim engine + two-lane driver + web layer + CLI dispatch | **CODE COMPLETE** — 42 tests pass (see `tests/`) |
 | **P2** | Dashboard + monitor: process registry, `/health` polling, a "show all tunnels" view (new capability; D-006 has none today) | **CODE COMPLETE (2026-07-10)** — status/health core (`status.py`, `argo-anywhere info`, `GET /api/status`) + session registry (`web/registry.py`) + dashboard endpoints (`/api/sessions`, on-demand `/api/health`, guarded `POST /api/sessions/{id}/stop`) + the dashboard UI (channel signal-path + sessions + listeners). 65 tests pass. Residual: one at-the-keyboard `/api/health` observation against a live tunnel (never auto-polled; user-action only) |
 | **P3** | Configure/run in the UI: conflict-escalation to the PTY lane; run-client-in-terminal; info views (list-models/list-tools/status) | **CODE COMPLETE (2026-07-10, single-terminal model)** — info views (`POST /api/run/{verb}`), parameterized embedded launcher (`/ws?verb=…&cli_tool=…&scope=…`) with channel-owner replace-guard, **plus native new-window launch** (`external_terminal.py` + `/api/launch-external` + `/api/terminals`; user-picked terminal, OS default). Conflict-escalation is inherent: `configure`/`run` are Lane-2 so their prompts run in the PTY. Concurrent multi-session now served by new native windows; in-UI PtySession concurrency remains Q12. 103 tests pass |
-| **P4** | Packaging polish: `pywebview` native window, `docs/UPGRADING.md` hard-cutover section, the D-028 clean-break content rename, PyPI publish | **in progress (2026-07-11)** — `argo-anywhere app` native window (`[app]` extra; pywebview, browser fallback) + `docs/UPGRADING.md` v2→v3 hard-cutover section + build/install verified (`python -m build` -> wheel bundles engine + static; fresh-venv console-script smoke) + `--print-script` BrokenPipe fix. **Still pending**: D-028 content rename (engine user-facing surfaces) + actual PyPI publish (needs a token; the user's action). 105 tests pass |
+| **P4** | Packaging polish: `pywebview` native window, `docs/UPGRADING.md` hard-cutover section, the D-028 clean-break content rename, PyPI publish | **in progress (2026-07-11)** — `argo-anywhere app` native window (`[app]` extra; pywebview, browser fallback) + `docs/UPGRADING.md` v2→v3 hard-cutover section + build/install verified (`python -m build` -> wheel bundles engine + static; fresh-venv console-script smoke) + `--print-script` BrokenPipe fix. **D-030 lifecycle unification (code-complete 2026-07-11) + D-028 content rename (done 2026-07-11)** both landed. **Still pending**: actual PyPI publish (needs a token; the user's action) + the joint D-030/D-028 live-test gate. 123 tests pass |
 | **P5** | Optional/upstream-able: add engine flags for the 3 un-pre-answerable prompts so they run headless in Lane 1 | pending |
 
 Commit trail for P0 lives on the branch (`git log --oneline`); the key SHAs as
@@ -495,10 +495,20 @@ immediate next step is **P4 (packaging polish)** —
 D-028 clean-break content rename, and PyPI publish. P5 (headless engine flags
 for the three prompts) is optional/upstream-able.
 
-Before P4's clean-break content rename, note the D-028 scope carve-outs recorded
-in PLAN.md: hyphenate user-facing surfaces (filename, `REMOTE_SELF`, log prefix,
-self-update sentinel, live docs, dirs-via-migration) but **not** the 17
-`ARGO_ANYWHERE_*` env vars or internal bash identifiers (POSIX forbids hyphens).
+**D-028 content rename — DONE (2026-07-11).** Hyphenated the user-facing
+surfaces: the engine filename (`git mv argo_anywhere.sh argo-anywhere.sh`; the
+vendored copy was already hyphenated, so both are now `argo-anywhere.sh` and
+`test_vendored_engine_is_verbatim` still passes), `REMOTE_SELF`/`REMOTE_LOG`
+node-side files (+ v2.x `.argo_anywhere.*` legacy sweep in `clean`), the log
+prefix `[argo-anywhere]`, the self-update header sentinel (accepts both the new
+and the legacy header for robustness), the summary-box titles, help/error text,
+and the user-facing docs (README/AGENTS/UPGRADING/TESTING/SECURITY/LIMITATIONS/
+examples). **Kept underscored** (platform + deliberate carve-outs): the 17
+`ARGO_ANYWHERE_*` env vars + internal bash identifiers (POSIX), and — per the
+2026-07-11 scope call — the on-disk **directory** names
+(`~/.config/argo_anywhere`, `~/.argo_anywhere`), deferred so as not to stack a
+migration on D-030's manifest move. `notes/` + PLAN.md keep their historical
+`argo_anywhere.sh` design references by design.
 
 ## Residuals and open questions
 

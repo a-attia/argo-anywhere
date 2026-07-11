@@ -1,6 +1,6 @@
 # Known limitations
 
-This document enumerates the known limitations of `argo_anywhere.sh`
+This document enumerates the known limitations of `argo-anywhere.sh`
 that prospective users + contributors should understand before
 adopting it. Each limitation includes the rationale (why it's that
 way), the workaround (if any), and whether lifting it is on the
@@ -15,7 +15,7 @@ roadmap.
 - **bash 3.2+ target.** No bash-4 features. macOS default is bash
   3.2; we don't require users to install a newer one.
 - **Single-file architecture.** No `src/`/`tests/`/`experiments/`.
-  The single self-contained `argo_anywhere.sh` is load-bearing UX.
+  The single self-contained `argo-anywhere.sh` is load-bearing UX.
 - **Linux-only `on_anl_compute_node` suffix match.** If CELS ever
   moves nodes to a different domain, the function silently returns
   "no" until updated.
@@ -30,8 +30,8 @@ The list below expands each limitation with rationale + workaround.
 
 ### Single-file distribution is load-bearing
 
-The script lives as **one** `argo_anywhere.sh` at the repo root.
-Users `curl one .sh -o argo_anywhere.sh && bash it`. The same file
+The script lives as **one** `argo-anywhere.sh` at the repo root.
+Users `curl one .sh -o argo-anywhere.sh && bash it`. The same file
 is `scp`'d to the compute node and re-exec'd as `server`. Splitting
 into modules / a Python package would break both flows.
 

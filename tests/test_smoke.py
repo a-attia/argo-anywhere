@@ -17,7 +17,7 @@ from argo_anywhere import _engine, cli
 
 # Repo-root source of the engine (present in a dev checkout; absent in a wheel).
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_SOURCE_ENGINE = _REPO_ROOT / "argo_anywhere.sh"
+_SOURCE_ENGINE = _REPO_ROOT / "argo-anywhere.sh"
 
 
 def test_package_imports_and_has_version() -> None:

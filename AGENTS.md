@@ -217,12 +217,12 @@ Section 6.4):
 expected layout): software projects ship with `src/<library_name>/`,
 `tests/`, `experiments/<run-id>/`, `figures/<topic>/`.
 
-**Project rule**: single self-contained bash script `argo_anywhere.sh`
+**Project rule**: single self-contained bash script `argo-anywhere.sh`
 at the repo root. No package layout, no test suite directory, no
 experiments directory.
 
 **Rationale**: single-file distribution is a load-bearing UX property.
-Users `curl one .sh -o argo_anywhere.sh && bash it`. The same file is
+Users `curl one .sh -o argo-anywhere.sh && bash it`. The same file is
 `scp`'d to the compute node and re-exec'd as `server`. Splitting
 breaks both flows. Documented as design decision D-001 in PLAN.md.
 
@@ -352,8 +352,8 @@ for the architecture diagram.
     `/releases/latest` falling back to `/tags`; final fallback to
     `main`); validates the fetched script (`bash -n` + size >50 KB +
     sentinel marker: `SCRIPT_VERSION=` line OR canonical
-    `# argo_anywhere.sh --` header); atomically replaces the
-    canonical install at `~/.argo_anywhere/argo_anywhere.sh` with a
+    `# argo-anywhere.sh --` header); atomically replaces the
+    canonical install at `~/.argo_anywhere/argo-anywhere.sh` with a
     `.bak.<timestamp>.<pid>` backup. Refuses to clobber a dirty git
     working tree. Prompts to bootstrap the canonical install if it
     doesn't exist yet.
@@ -679,11 +679,11 @@ Three risk tiers:
 After non-trivial edits:
 
 ```sh
-bash -n argo_anywhere.sh                              # syntax
-bash argo_anywhere.sh -h                              # short usage
-bash argo_anywhere.sh help | head -50                 # long help renders
-bash argo_anywhere.sh status                          # exit 1 if no tunnel
-bash argo_anywhere.sh clean --dry-run -y --local-only # safe enumeration
+bash -n argo-anywhere.sh                              # syntax
+bash argo-anywhere.sh -h                              # short usage
+bash argo-anywhere.sh help | head -50                 # long help renders
+bash argo-anywhere.sh status                          # exit 1 if no tunnel
+bash argo-anywhere.sh clean --dry-run -y --local-only # safe enumeration
 ```
 
 The `status` summary's "ALL GREEN" branch only fires when the

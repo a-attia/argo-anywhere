@@ -1,7 +1,7 @@
 # Upgrading from v1.x to v2.x
 
 This document is for users who already have a working `argo_opencode.sh`
-v1.x install and are upgrading to `argo_anywhere.sh` v2.x (v2.0.0,
+v1.x install and are upgrading to `argo-anywhere.sh` v2.x (v2.0.0,
 v2.1.0, or v2.2.0). It describes what changes you will see, what the
 script does automatically on first v2.x run, and what you may need to
 do manually. New users (no prior install) should follow
@@ -75,9 +75,9 @@ The most important changes:
 Either re-curl from the renamed repo:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh \
-  -o argo_anywhere.sh
-chmod +x argo_anywhere.sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo-anywhere.sh \
+  -o argo-anywhere.sh
+chmod +x argo-anywhere.sh
 ```
 
 Or, if you cloned the repo:
@@ -104,9 +104,9 @@ update them. Recommended pattern:
 
 ```sh
 # in ~/.bashrc / ~/.zshrc:
-alias argo='bash /path/to/argo_anywhere.sh'
-alias argo-opencode='bash /path/to/argo_anywhere.sh --cli-tool opencode'
-alias argo-claudecode='bash /path/to/argo_anywhere.sh --cli-tool claudecode'
+alias argo='bash /path/to/argo-anywhere.sh'
+alias argo-opencode='bash /path/to/argo-anywhere.sh --cli-tool opencode'
+alias argo-claudecode='bash /path/to/argo-anywhere.sh --cli-tool claudecode'
 ```
 
 Old aliases pointing at `argo_opencode.sh` keep working until you
@@ -143,7 +143,7 @@ warnings: `ANL_USERNAME` → `ARGO_ANYWHERE_USER`, `PROXY_PORT` →
 ### 4. Run `client` once; everything else happens automatically
 
 ```sh
-bash argo_anywhere.sh --cli-tool opencode client
+bash argo-anywhere.sh --cli-tool opencode client
 ```
 
 On first v2.0 run from the laptop, the script:
@@ -167,7 +167,7 @@ defaults (`verbose: false`) to take effect immediately, restart it:
 
 ```sh
 ssh <user>@<node> 'screen -S argovproxy -X quit; pkill -f argo-proxy'
-bash argo_anywhere.sh --cli-tool opencode client   # spawns fresh argo-proxy
+bash argo-anywhere.sh --cli-tool opencode client   # spawns fresh argo-proxy
 ```
 
 Otherwise the next natural restart of argo-proxy (e.g. node reboot,
@@ -176,7 +176,7 @@ manual stop, etc.) will pick up the new config.
 ### 5. Verify
 
 ```sh
-bash argo_anywhere.sh status
+bash argo-anywhere.sh status
 ```
 
 Expected: `ALL GREEN` summary box with `Cached username`,
@@ -195,8 +195,8 @@ on the most recent run (the local-tunnel-reuse short-circuit
 sometimes prevents `mode_server` from running). Force a re-run:
 
 ```sh
-bash argo_anywhere.sh stop
-bash argo_anywhere.sh --cli-tool opencode client
+bash argo-anywhere.sh stop
+bash argo-anywhere.sh --cli-tool opencode client
 ```
 
 ### 6. Optionally: clean up the old install
@@ -525,7 +525,7 @@ v2.2 adds two layers of detection (per D-021):
   [warn]   Resolved port (cache / CLI / env / default): 64742
   [warn]   Disagreeing client config(s):
   [warn]     claudecode global 64750 /Users/.../claude/settings.json
-  [warn]   Run 'argo_anywhere.sh client' to canonicalize via the [m/u/k/a] prompt.
+  [warn]   Run 'argo-anywhere.sh client' to canonicalize via the [m/u/k/a] prompt.
   ```
 
   status's exit code is unchanged (disagreement is informational;
@@ -600,12 +600,12 @@ The new `update` subcommand (PLAN.md D-022 + D-023) closes all
 those gaps:
 
 ```sh
-bash argo_anywhere.sh update --all                  # update everything
-bash argo_anywhere.sh update argo-anywhere          # self-update the script
-bash argo_anywhere.sh update argoproxy              # just argo-proxy on the node
-bash argo_anywhere.sh update opencode claudecode    # explicit list
-bash argo_anywhere.sh update --check --all          # report-only
-bash argo_anywhere.sh update --all -y               # non-interactive
+bash argo-anywhere.sh update --all                  # update everything
+bash argo-anywhere.sh update argo-anywhere          # self-update the script
+bash argo-anywhere.sh update argoproxy              # just argo-proxy on the node
+bash argo-anywhere.sh update opencode claudecode    # explicit list
+bash argo-anywhere.sh update --check --all          # report-only
+bash argo-anywhere.sh update --all -y               # non-interactive
 ```
 
 Properties:
@@ -620,7 +620,7 @@ Properties:
 - **Self-update** (`update argo-anywhere`) resolves the latest
   upstream tag, validates the fetched script (`bash -n` + size +
   sentinel marker), backs up the existing canonical install at
-  `~/.argo_anywhere/argo_anywhere.sh`, and atomically replaces
+  `~/.argo_anywhere/argo-anywhere.sh`, and atomically replaces
   it. Refuses to clobber a dirty git working tree. Prompts to
   bootstrap the canonical install if it doesn't exist yet.
 - **Extensible**: new CLI tools (Phase 5 aider / future cursor)
@@ -651,7 +651,7 @@ sourceable `env` file to your shell rc:
 . "$HOME/.argo_anywhere/env"
 ```
 
-After that, `argo_anywhere.sh` is callable as a bare command from
+After that, `argo-anywhere.sh` is callable as a bare command from
 any directory. The `update argo-anywhere` subcommand keeps the
 canonical install fresh.
 
@@ -709,8 +709,8 @@ simultaneously).
 
 ### `install` / `uninstall` subcommands + `bin/` layout
 
-- The canonical install moved from `~/.argo_anywhere/argo_anywhere.sh`
-  (a flat file) to `~/.argo_anywhere/bin/argo_anywhere.sh`, alongside
+- The canonical install moved from `~/.argo_anywhere/argo-anywhere.sh`
+  (a flat file) to `~/.argo_anywhere/bin/argo-anywhere.sh`, alongside
   thin `bin/install` and `bin/uninstall` wrappers. **This migration is
   automatic** on the next `install` / `client` / bootstrap run; your
   existing flat-layout script is moved into `bin/` and the `env` helper
@@ -739,7 +739,7 @@ simultaneously).
   `list-tools` / `help` is unchanged; the new `update`, `connect`,
   `configure`, `run`, `install`, and `uninstall` subcommands are purely
   additive. Existing scripts that wrap the script keep working.
-- **Single-file distribution** is unchanged. One `argo_anywhere.sh`
+- **Single-file distribution** is unchanged. One `argo-anywhere.sh`
   on the laptop; the same file is `scp`'d to the compute node and
   re-exec'd as `server`.
 - **bash 3.2+ target** (macOS default) is unchanged. No bash-4
@@ -777,9 +777,9 @@ subcommand you already use behaves identically.
 
 |              | v2.x                              | v3.0.0                                            |
 |:-------------|:----------------------------------|:--------------------------------------------------|
-| Install      | `curl … argo_anywhere.sh -o …`    | `pipx install argo-anywhere`                      |
+| Install      | `curl … argo-anywhere.sh -o …`    | `pipx install argo-anywhere`                      |
 | Upgrade      | re-`curl` / `git pull` / `update` | `pipx upgrade argo-anywhere`                      |
-| Run          | `bash argo_anywhere.sh <cmd>`     | `argo-anywhere <cmd>`                             |
+| Run          | `bash argo-anywhere.sh <cmd>`     | `argo-anywhere <cmd>`                             |
 | The engine   | the file you curled               | vendored verbatim; `argo-anywhere --print-script` re-emits it |
 | New          | —                                 | `argo-anywhere web` (browser UI), `argo-anywhere app` (native window) |
 
@@ -809,7 +809,7 @@ pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@
 ### What you do
 
 1. Install via `pipx` (above).
-2. Use `argo-anywhere <command>` wherever you ran `bash argo_anywhere.sh
+2. Use `argo-anywhere <command>` wherever you ran `bash argo-anywhere.sh
    <command>`. Every engine subcommand — `client`, `connect`, `configure`,
    `run`, `status`, `update`, `clean`, … — is passed straight through to the
    vendored engine on your real terminal, so Duo, the monitor, and every prompt
@@ -817,7 +817,7 @@ pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@
 3. *(Optional)* delete the old curled script. You can always recover the exact
    engine for inspection or forking:
    ```bash
-   argo-anywhere --print-script > argo_anywhere.sh
+   argo-anywhere --print-script > argo-anywhere.sh
    ```
 
 ### New: web UI and native app

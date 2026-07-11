@@ -1,7 +1,7 @@
 """Locate + read the vendored bash engine.
 
 The engine is shipped as package-data (``engine/argo-anywhere.sh``) and vendored
-VERBATIM from the repo-root ``argo_anywhere.sh`` (PLAN.md D-026). Two access
+VERBATIM from the repo-root ``argo-anywhere.sh`` (PLAN.md D-026). Two access
 shapes are provided:
 
 - :func:`engine_bytes` -- raw bytes, for ``--print-script`` (D-026 escape hatch).
@@ -19,8 +19,8 @@ from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Iterator, Mapping
 
-# The vendored filename is hyphenated (D-028); the repo-root source is still the
-# underscore name until the clean-break cutover.
+# Filename is hyphenated everywhere as of the D-028 clean-break cutover (repo
+# root + vendored copy both ``argo-anywhere.sh``).
 ENGINE_FILENAME = "argo-anywhere.sh"
 _ENGINE_RESOURCE = f"engine/{ENGINE_FILENAME}"
 

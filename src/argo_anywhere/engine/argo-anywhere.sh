@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# argo_anywhere.sh -- the canonical (and only) orchestrator file.
+# argo-anywhere.sh -- the canonical (and only) orchestrator file.
 #
 # Self-contained orchestrator that lets Argonne users run AI coding CLI
 # tools (OpenCode, Claude Code, ...) against argo-proxy from anywhere
@@ -11,29 +11,29 @@
 # broke under git core.symlinks=false and on filesystems that don't
 # preserve symlinks). See docs/AUDIT_2026-05-12.md for the rationale.
 #
-# Subcommands (run `argo_anywhere.sh help` for the full guide):
-#   argo_anywhere.sh client --cli-tool NAME  # install + tunnel + monitor
-#   argo_anywhere.sh setup                   # picker + install + tunnel
-#   argo_anywhere.sh tunnel                  # tunnel only (no install)
-#   argo_anywhere.sh server                  # runs on the ANL compute node
-#   argo_anywhere.sh status                  # check tunnel + proxy health
-#   argo_anywhere.sh stop                    # tear down the local tunnel
-#   argo_anywhere.sh update-models           # refresh OpenCode model list
-#   argo_anywhere.sh list-models             # tabulate models served by /v1/models
-#   argo_anywhere.sh clean                   # remove every artifact created
-#   argo_anywhere.sh list-tools              # print supported --cli-tool values
-#   argo_anywhere.sh help                    # long-form guide
-#   argo_anywhere.sh -h | --help             # short usage
+# Subcommands (run `argo-anywhere.sh help` for the full guide):
+#   argo-anywhere.sh client --cli-tool NAME  # install + tunnel + monitor
+#   argo-anywhere.sh setup                   # picker + install + tunnel
+#   argo-anywhere.sh tunnel                  # tunnel only (no install)
+#   argo-anywhere.sh server                  # runs on the ANL compute node
+#   argo-anywhere.sh status                  # check tunnel + proxy health
+#   argo-anywhere.sh stop                    # tear down the local tunnel
+#   argo-anywhere.sh update-models           # refresh OpenCode model list
+#   argo-anywhere.sh list-models             # tabulate models served by /v1/models
+#   argo-anywhere.sh clean                   # remove every artifact created
+#   argo-anywhere.sh list-tools              # print supported --cli-tool values
+#   argo-anywhere.sh help                    # long-form guide
+#   argo-anywhere.sh -h | --help             # short usage
 #
 # Distribution: https://github.com/a-attia/argo-anywhere
 # (Pre-v2.0 repo name was a-attia/argo-opencode; GitHub auto-redirects
 # old curl/clone URLs forever, so legacy users keep working unchanged.)
 # Users (latest):
-#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh -o argo_anywhere.sh
-#   bash argo_anywhere.sh
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo-anywhere.sh -o argo-anywhere.sh
+#   bash argo-anywhere.sh
 # Users (pinned to a release tag, recommended for stability):
-#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.0.0/argo_anywhere.sh -o argo_anywhere.sh
-#   bash argo_anywhere.sh
+#   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.0.0/argo-anywhere.sh -o argo-anywhere.sh
+#   bash argo-anywhere.sh
 #
 # Author: Ahmed Attia (attia@anl.gov)
 # License: same as the surrounding repo.
@@ -54,7 +54,7 @@
 #      under a clean, non-POSIX `bash`.
 #
 # Bug history: without the POSIXLY_CORRECT branch above (the "macOS-sh-is-
-# bash-in-POSIX-mode" bug), `sh argo_anywhere.sh` on macOS ran as far as
+# bash-in-POSIX-mode" bug), `sh argo-anywhere.sh` on macOS ran as far as
 # opening the tunnel before bombing on `<(...)` in gather_summary. The
 # re-exec now happens before any non-POSIX construct can be parsed.
 if [ -z "${BASH_VERSION:-}" ] || [ -n "${POSIXLY_CORRECT:-}" ]; then
@@ -81,7 +81,7 @@ set -euo pipefail
 # What we check:
 #   * `$0` resolves to a real file (skip checks for `bash -c`, stdin
 #     pipes, etc. -- those can't have the corruption mode).
-#   * That file is at least 10KB. The real argo_anywhere.sh is >100KB;
+#   * That file is at least 10KB. The real argo-anywhere.sh is >100KB;
 #     anything under 10KB is broken (truncated download, materialised
 #     symlink-as-text, etc.).
 #
@@ -89,9 +89,9 @@ set -euo pipefail
 #   * Pre-v2.0 the repo shipped argo_opencode.sh as a git mode-120000
 #     symlink. Cloning with core.symlinks=false (Windows default; some
 #     hardened Linux configs) materialised the symlink as a 16-byte
-#     text file containing the literal string "argo_anywhere.sh".
+#     text file containing the literal string "argo-anywhere.sh".
 #     Running `bash argo_opencode.sh` then tried to execute
-#     "argo_anywhere.sh" as a command on line 1 -- the cryptic
+#     "argo-anywhere.sh" as a command on line 1 -- the cryptic
 #     "command not found" was the root cause of "Bug 1" on compute-386-01.
 #   * v2.0 removed all symlinks, so this specific failure mode can't
 #     reproduce from a fresh clone of main. But a user who clones an
@@ -113,10 +113,10 @@ case "${0:-}" in
       if [ "$_ARGO_SELF_SIZE" -lt 10240 ]; then
         cat >&2 <<EOF
 
-[err ] argo_anywhere.sh: file is suspiciously small (${_ARGO_SELF_SIZE} bytes).
+[err ] argo-anywhere.sh: file is suspiciously small (${_ARGO_SELF_SIZE} bytes).
 [err ]
 [err ] The file at "${0}" is only ${_ARGO_SELF_SIZE} bytes; the real
-[err ] argo_anywhere.sh is >100KB. Likely causes:
+[err ] argo-anywhere.sh is >100KB. Likely causes:
 [err ]
 [err ]   1. You cloned an old commit (pre-v2.0) where this name was a
 [err ]      git symlink, on a system that materialises symlinks as text
@@ -127,7 +127,7 @@ case "${0:-}" in
 [err ]
 [err ]   2. Your curl was interrupted mid-download, leaving a partial
 [err ]      file. Fix: re-download:
-[err ]           curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh -o argo_anywhere.sh
+[err ]           curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo-anywhere.sh -o argo-anywhere.sh
 [err ]
 [err ]   3. You scp'd a symlink instead of the real file (legacy tools
 [err ]      without -L don't dereference). Fix: re-fetch via curl as
@@ -258,12 +258,12 @@ SCRIPT_VERSION="2.2.1-dev"
 # Canonical install root for the script itself (managed by the
 # bootstrap helper triggered on first 'client' / 'setup' run, and by
 # the 'update argo-anywhere' subcommand). Contains:
-#   * argo_anywhere.sh   -- the script itself (PATH-discoverable)
+#   * argo-anywhere.sh   -- the script itself (PATH-discoverable)
 #   * env                -- sourceable PATH-setup helper (rustup style)
 # The user adds `. ~/.argo_anywhere/env` (or equivalent) to their shell
 # rc; the script never edits the rc directly. Per D-023 (PLAN.md):
 # canonical install lives at $HOME/.argo_anywhere (a directory; do NOT
-# confuse with the legacy $HOME/.argo_anywhere.sh single-file path used
+# confuse with the legacy $HOME/.argo-anywhere.sh single-file path used
 # on the REMOTE compute node for the scp'd self-copy; that path is the
 # REMOTE_SELF constant below).
 ARGO_INSTALL_DIR="${HOME}/.argo_anywhere"
@@ -273,8 +273,8 @@ ARGO_INSTALL_DIR="${HOME}/.argo_anywhere"
 # ARGO_INSTALL_SCRIPT_FLAT is the pre-Phase-C (D-023) flat location kept
 # only for one-shot migration detection.
 ARGO_INSTALL_BIN_DIR="${ARGO_INSTALL_DIR}/bin"
-ARGO_INSTALL_SCRIPT="${ARGO_INSTALL_BIN_DIR}/argo_anywhere.sh"
-ARGO_INSTALL_SCRIPT_FLAT="${ARGO_INSTALL_DIR}/argo_anywhere.sh"
+ARGO_INSTALL_SCRIPT="${ARGO_INSTALL_BIN_DIR}/argo-anywhere.sh"
+ARGO_INSTALL_SCRIPT_FLAT="${ARGO_INSTALL_DIR}/argo-anywhere.sh"
 ARGO_INSTALL_WRAP_INSTALL="${ARGO_INSTALL_BIN_DIR}/install"
 ARGO_INSTALL_WRAP_UNINSTALL="${ARGO_INSTALL_BIN_DIR}/uninstall"
 ARGO_INSTALL_ENV="${ARGO_INSTALL_DIR}/env"
@@ -421,13 +421,17 @@ CLAUDECODE_PROJECT_CONFIG="./.claude/settings.local.json"
 AIDER_GLOBAL_CONFIG="${HOME}/.aider.conf.yml"
 AIDER_PROJECT_CONFIG_BASENAME=".aider.conf.yml"
 
-# Remote paths (compute node side). Canonical name as of v2.0 is
-# argo_anywhere; legacy .argo_opencode.* files are removed by `clean`
-# (which enumerates BOTH old and new names).
-REMOTE_SELF=".argo_anywhere.sh"
-REMOTE_LOG=".argo_anywhere.server.log"
+# Remote paths (compute node side). Canonical name is hyphenated
+# (argo-anywhere) as of v3.0.0 (D-028). `clean` sweeps BOTH legacy
+# generations so upgraders leave nothing orphaned on a node:
+#   * v1.x underscore-opencode: .argo_opencode.*      (LEGACY_REMOTE_*)
+#   * v2.x underscore-anywhere: .argo_anywhere.*       (LEGACY_REMOTE_*_V2)
+REMOTE_SELF=".argo-anywhere.sh"
+REMOTE_LOG=".argo-anywhere.server.log"
 LEGACY_REMOTE_SELF=".argo_opencode.sh"
 LEGACY_REMOTE_LOG=".argo_opencode.server.log"
+LEGACY_REMOTE_SELF_V2=".argo_anywhere.sh"
+LEGACY_REMOTE_LOG_V2=".argo_anywhere.server.log"
 
 # ============================================================================
 # SECTION: 3. PRETTY PRINTING (colors + log/ok/warn/err/die/ask)
@@ -439,7 +443,7 @@ else
   C_RED=""; C_GRN=""; C_YLW=""; C_BLU=""; C_DIM=""; C_OFF=""
 fi
 
-log()  { printf '%s[argo_anywhere]%s %s\n' "$C_BLU" "$C_OFF" "$*" >&2; }
+log()  { printf '%s[argo-anywhere]%s %s\n' "$C_BLU" "$C_OFF" "$*" >&2; }
 ok()   { printf '%s[ ok ]%s %s\n' "$C_GRN" "$C_OFF" "$*" >&2; }
 warn() { printf '%s[warn]%s %s\n' "$C_YLW" "$C_OFF" "$*" >&2; }
 err()  { printf '%s[err ]%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; }
@@ -974,7 +978,7 @@ ${C_YLW}========================================================================
 ${C_YLW}LEGACY v1.x STATE DETECTED ON THIS MACHINE${C_OFF}
 ${C_YLW}========================================================================${C_OFF}
 
-This script is v2.0+ (argo_anywhere). It detected leftover state from a
+This script is v2.0+ (argo-anywhere). It detected leftover state from a
 previous v1.x install (argo_opencode):
 
 EOF
@@ -1013,10 +1017,10 @@ EOF
 # The script ships as a single file the user `curl`s into any directory.
 # That works fine for one-off invocations, but power users want a stable,
 # PATH-discoverable install at $ARGO_INSTALL_DIR (=~/.argo_anywhere/) so
-# `argo_anywhere.sh ...` works from any shell.
+# `argo-anywhere.sh ...` works from any shell.
 #
 # Convention (rustup / cargo style):
-#   $ARGO_INSTALL_DIR/argo_anywhere.sh   the script (chmod +x)
+#   $ARGO_INSTALL_DIR/argo-anywhere.sh   the script (chmod +x)
 #   $ARGO_INSTALL_DIR/env                sourceable PATH-setup helper
 #
 # The user adds one line to their shell rc (`. ~/.argo_anywhere/env`); the
@@ -1029,7 +1033,7 @@ EOF
 #   * we're already running from the canonical install (`$0` -> $ARGO_INSTALL_SCRIPT)
 #   * we're running on a compute node (the on-node short-circuit doesn't
 #     benefit from a laptop-side canonical install; the remote bootstrap
-#     uses REMOTE_SELF = ~/.argo_anywhere.sh which is a different path)
+#     uses REMOTE_SELF = ~/.argo-anywhere.sh which is a different path)
 #   * $ARGO_INSTALL_DIR already exists (don't second-guess the user; that's
 #     `update argo-anywhere`'s job)
 #
@@ -1073,12 +1077,12 @@ _write_argo_env_file() {
   cat > "$out" <<'ARGO_ENV_EOF'
 #!/bin/sh
 # argo-anywhere PATH helper. Source this from your shell rc to make
-# `argo_anywhere.sh` (and the `install` / `uninstall` wrappers)
+# `argo-anywhere.sh` (and the `install` / `uninstall` wrappers)
 # discoverable as bare commands:
 #
 #   . "$HOME/.argo_anywhere/env"
 #
-# Managed by argo_anywhere.sh's install/bootstrap + `update argo-anywhere`
+# Managed by argo-anywhere.sh's install/bootstrap + `update argo-anywhere`
 # helpers. Safe to re-source (idempotent PATH prepend with a presence
 # guard so the entry doesn't accumulate on repeated sourcings).
 #
@@ -1096,20 +1100,20 @@ ARGO_ENV_EOF
 }
 
 # _write_install_wrappers: write the thin bin/install + bin/uninstall
-# wrappers that call `argo_anywhere.sh install` / `uninstall`. Keeps the
+# wrappers that call `argo-anywhere.sh install` / `uninstall`. Keeps the
 # single-file distribution (D-001) -- these are 3-line discoverability
 # shims, not real logic. Idempotent (script-owned; overwritten each time).
 _write_install_wrappers() {
   cat > "$ARGO_INSTALL_WRAP_INSTALL" <<'ARGO_WRAP_EOF'
 #!/bin/sh
-# Thin wrapper -> argo_anywhere.sh install (real logic lives in the
+# Thin wrapper -> argo-anywhere.sh install (real logic lives in the
 # single-file script; this exists only for `install` discoverability).
-exec "$(dirname "$0")/argo_anywhere.sh" install "$@"
+exec "$(dirname "$0")/argo-anywhere.sh" install "$@"
 ARGO_WRAP_EOF
   cat > "$ARGO_INSTALL_WRAP_UNINSTALL" <<'ARGO_WRAP_EOF'
 #!/bin/sh
-# Thin wrapper -> argo_anywhere.sh uninstall.
-exec "$(dirname "$0")/argo_anywhere.sh" uninstall "$@"
+# Thin wrapper -> argo-anywhere.sh uninstall.
+exec "$(dirname "$0")/argo-anywhere.sh" uninstall "$@"
 ARGO_WRAP_EOF
   chmod +x "$ARGO_INSTALL_WRAP_INSTALL" "$ARGO_INSTALL_WRAP_UNINSTALL" 2>/dev/null || true
 }
@@ -1196,7 +1200,7 @@ _print_path_setup_hint() {
   esac
   cat >&2 <<EOF
 
-  ${C_GRN}To make 'argo_anywhere.sh' discoverable as a bare command in new shells,${C_OFF}
+  ${C_GRN}To make 'argo-anywhere.sh' discoverable as a bare command in new shells,${C_OFF}
   ${C_GRN}add this ONE line to ${rc_file}:${C_OFF}
 
       . "\$HOME/.argo_anywhere/env"
@@ -1258,13 +1262,13 @@ maybe_bootstrap_canonical_install() {
     return 0
   fi
 
-  log "First-run setup: installing argo_anywhere.sh into ${ARGO_INSTALL_BIN_DIR}..."
+  log "First-run setup: installing argo-anywhere.sh into ${ARGO_INSTALL_BIN_DIR}..."
   if ! _install_core "$self_abs"; then
     warn "Bootstrap: canonical install incomplete (run from ${self_abs} still works)."
     return 0
   fi
 
-  ok "Installed argo_anywhere.sh v${SCRIPT_VERSION} at ${ARGO_INSTALL_SCRIPT}"
+  ok "Installed argo-anywhere.sh v${SCRIPT_VERSION} at ${ARGO_INSTALL_SCRIPT}"
   ok "  Wrappers: ${ARGO_INSTALL_WRAP_INSTALL}, ${ARGO_INSTALL_WRAP_UNINSTALL}"
   ok "  PATH helper written to ${ARGO_INSTALL_ENV}"
   _print_path_setup_hint
@@ -4094,7 +4098,7 @@ remote_bootstrap() {
   # P2 fix: also forward ARGO_ANYWHERE_VERBOSE_SERVER (set by --verbose-server)
   # so the server-side write_argoproxy_config knows whether to emit
   # `verbose: true` (debug; explicit opt-in) or `verbose: false` (default
-  # since v2.0; prevents prompts being logged to ~/.argo_anywhere.server.log
+  # since v2.0; prevents prompts being logged to ~/.argo-anywhere.server.log
   # in plaintext on a shared compute node).
   local force_kv=""
   if [ -n "${FORCE_REINSTALL:-}" ]; then
@@ -4154,7 +4158,7 @@ cleanup_local() {
   # like 'status' / 'help' that never started a monitor.
   #
   # N1 amendment (2026-05-15, post-live-test #1): the original summary
-  # said "To fully stop: bash argo_anywhere.sh stop" which was
+  # said "To fully stop: bash argo-anywhere.sh stop" which was
   # misleading -- the local tunnel is ALREADY gone by the time the
   # summary prints, so 'stop' would be a no-op. The user's actual
   # decision after Ctrl+C is "what other state from this session do I
@@ -5235,7 +5239,7 @@ ensure_or_reuse_tunnel() {
 #
 # The script supports several AI clients (OpenCode + Claude Code today;
 # aider, Cursor, generic OpenAI-compatible to be added). As of v2.0
-# the script ships as a SINGLE file (argo_anywhere.sh) -- the symlink-
+# the script ships as a SINGLE file (argo-anywhere.sh) -- the symlink-
 # per-client distribution from v1.x was removed because cloning the
 # repo with core.symlinks=false (Windows default; some CI configs)
 # materialised the symlinks as text files, breaking on-node bootstrap
@@ -5290,7 +5294,7 @@ cli_tool_known_names() {
 #
 # NOTE: as of v2.0 the script's invocation-name-based default was removed
 # (D1 + D2 in the v2.0 plan). The single canonical filename is
-# argo_anywhere.sh; per-tool selection is via --cli-tool or the picker.
+# argo-anywhere.sh; per-tool selection is via --cli-tool or the picker.
 interactive_cli_tool_picker() {
   cat >&2 <<EOF
 
@@ -5446,7 +5450,7 @@ do_post_tunnel_for_cli_tool() {
 # mode_client: tunnel + per-client setup. The "client" is determined by
 # the script's invocation name (default_client_for_invocation), with
 # the interactive picker as the fallback when invoked as
-# argo_anywhere.sh. The actual setup is delegated to
+# argo-anywhere.sh. The actual setup is delegated to
 # do_post_tunnel_for_cli_tool which dispatches to setup_<name>_cli_tool.
 #
 # These two modes share most of their setup. To avoid drift, they share
@@ -5526,7 +5530,7 @@ _client_common_setup() {
   # generalize PORT_FROM_CONFIG to "port from any known client config"
   # and reword the prompt.
   # B0 fix (Phase 4 pre-work): port-mismatch prompt factored to
-  # prompt_port_choice (shared helper); see argo_anywhere.sh Section 7
+  # prompt_port_choice (shared helper); see argo-anywhere.sh Section 7
   # for the helper definition. Previously this site had its own inline
   # prompt that drifted from the auto-port-collision site's version.
   if [ "$with_opencode_setup" = 1 ] \
@@ -5749,7 +5753,7 @@ mode_client() {
   #
   # The pre-v2.0 invocation-name-based default (argo_opencode.sh ->
   # opencode, etc.) was removed when symlinks were dropped. There is now
-  # ONE canonical filename (argo_anywhere.sh); per-tool selection is
+  # ONE canonical filename (argo-anywhere.sh); per-tool selection is
   # always explicit via flag or picker. See docs/AUDIT_2026-05-12.md.
   local chosen_client=""
   if [ "${FORCE_PICKER:-0}" = 1 ]; then
@@ -6052,7 +6056,7 @@ write_argoproxy_config() {
   # (which sets ARGO_ANYWHERE_VERBOSE_SERVER=1, forwarded by
   # remote_bootstrap). Pre-fix default was verbose=true, which made
   # argo-proxy log every request body (prompts) and response body to
-  # its stdout, captured in ~/.argo_anywhere.server.log on the compute
+  # its stdout, captured in ~/.argo-anywhere.server.log on the compute
   # node. The Argo gateway itself doesn't retain prompts, but the
   # local verbose log on the user's compute node is created by
   # argo-proxy on their account; the gateway's privacy guarantee
@@ -6337,7 +6341,7 @@ mode_server() {
   local already_logged="${_ARGO_ANYWHERE_REEXEC:+1}"
 
   # Canonical names; fall back to legacy aliases for one cycle so direct
-  # 'bash argo_anywhere.sh server' invocations don't break for anyone who
+  # 'bash argo-anywhere.sh server' invocations don't break for anyone who
   # was setting ANL_USERNAME/PROXY_PORT manually (or pre-v2 code that set
   # ARGO_OPENCODE_*, which is also honoured via the legacy promotion in
   # section 6).
@@ -6422,7 +6426,7 @@ mode_server() {
   # on the same handle_config_file step, and confuses the log.
   #
   # Fix: drop `exec`, run the pipeline, then either exit (when mode_server
-  # is the script's main mode -- i.e. invoked as `bash argo_anywhere.sh
+  # is the script's main mode -- i.e. invoked as `bash argo-anywhere.sh
   # server` over SSH from the laptop) or return (when called in-process
   # from _client_common_setup's on-node short-circuit, where the caller
   # has more work to do after the bootstrap finishes). The signal is
@@ -7138,7 +7142,7 @@ render_summary() {
   fi
 
   echo >&2
-  print_summary_box "argo_anywhere  --  status summary" "$vcolor" "$verdict" "${lines[@]}"
+  print_summary_box "argo-anywhere  --  status summary" "$vcolor" "$verdict" "${lines[@]}"
 }
 
 # ============================================================================
@@ -7189,7 +7193,7 @@ mode_status() {
     printf '%s\n' "$_disagree_lines" | while IFS= read -r _l; do
       warn "    $_l"
     done
-    warn "  Run 'argo_anywhere.sh client' to canonicalize via the [m/u/k/a] prompt."
+    warn "  Run 'argo-anywhere.sh client' to canonicalize via the [m/u/k/a] prompt."
   fi
 
   # Exit code reflects health for use in && chains. D-021 disagreement
@@ -7861,7 +7865,7 @@ mode_list_models() {
 # not a per-tool CLI dispatcher.
 
 UPDATE_COMPONENTS_AVAILABLE=(
-  "argo-anywhere|argo_anywhere.sh itself (the script; canonical install at ~/.argo_anywhere/)"
+  "argo-anywhere|argo-anywhere.sh itself (the script; canonical install at ~/.argo_anywhere/)"
   "argoproxy|argo-proxy (server-side; on the ANL compute node)"
   "opencode|OpenCode CLI (laptop-side)"
   "claudecode|Claude Code CLI (laptop-side)"
@@ -8192,11 +8196,11 @@ _update_argoproxy_post_refresh() {
 }
 
 # ----------------------------------------------------------------------------
-# update_argo_anywhere_component: in-place upgrade of argo_anywhere.sh
+# update_argo_anywhere_component: in-place upgrade of argo-anywhere.sh
 # itself (the script the user is running).
 #
 # Target path resolution (per PLAN.md D-023):
-#   * default: $ARGO_INSTALL_SCRIPT (~/.argo_anywhere/bin/argo_anywhere.sh).
+#   * default: $ARGO_INSTALL_SCRIPT (~/.argo_anywhere/bin/argo-anywhere.sh).
 #   * if the canonical install is missing, prompt the user to install
 #     it first (one-shot bootstrap; same machinery as
 #     maybe_bootstrap_canonical_install). --yes auto-confirms.
@@ -8242,7 +8246,7 @@ update_argo_anywhere_component() {
     return 0
   fi
 
-  log "Current script: argo_anywhere.sh v${SCRIPT_VERSION}"
+  log "Current script: argo-anywhere.sh v${SCRIPT_VERSION}"
 
   # Resolve upstream latest tag. Two-step probe:
   #   1. /releases/latest  -- the documented API endpoint. This project
@@ -8281,9 +8285,9 @@ update_argo_anywhere_component() {
   if [ "$check_only" = 1 ]; then
     if [ -n "$latest_ver" ]; then
       if _version_ge "$SCRIPT_VERSION" "$latest_ver"; then
-        ok "argo_anywhere.sh is up-to-date (${SCRIPT_VERSION} >= ${latest_ver})."
+        ok "argo-anywhere.sh is up-to-date (${SCRIPT_VERSION} >= ${latest_ver})."
       else
-        warn "argo_anywhere.sh ${SCRIPT_VERSION} < ${latest_ver}; run 'update argo-anywhere' to upgrade."
+        warn "argo-anywhere.sh ${SCRIPT_VERSION} < ${latest_ver}; run 'update argo-anywhere' to upgrade."
       fi
     else
       log "Cannot compare versions (upstream unreachable); run 'update argo-anywhere' to attempt anyway."
@@ -8303,7 +8307,7 @@ update_argo_anywhere_component() {
 
   # If canonical install is missing, offer to bootstrap.
   if ! canonical_install_present; then
-    if _update_prompt_install "argo_anywhere.sh canonical install (${ARGO_INSTALL_DIR})"; then
+    if _update_prompt_install "argo-anywhere.sh canonical install (${ARGO_INSTALL_DIR})"; then
       # Reuse the bootstrap helper, temporarily clearing the on-node
       # short-circuit so it always runs (the user explicitly asked).
       ARGO_ANYWHERE_SKIP_BOOTSTRAP=0 maybe_bootstrap_canonical_install
@@ -8337,7 +8341,7 @@ update_argo_anywhere_component() {
   fi
 
   # Build the fetch URL.
-  local fetch_url="${PROJECT_RAW_URL_PREFIX}/${latest_ref}/argo_anywhere.sh"
+  local fetch_url="${PROJECT_RAW_URL_PREFIX}/${latest_ref}/argo-anywhere.sh"
   if [ "$latest_ref" = "$PROJECT_DEFAULT_BRANCH" ]; then
     warn "Falling back to branch '${PROJECT_DEFAULT_BRANCH}' (no release tag resolved)."
     warn "  Fetched code may include unreleased development changes."
@@ -8347,7 +8351,7 @@ update_argo_anywhere_component() {
   # Fetch to a temp file in the SAME directory as the target so the
   # final mv is rename(2) atomic on the same filesystem.
   local target_dir; target_dir="$(dirname "$target")"
-  local tmp; tmp="$(mktemp "${target_dir}/argo_anywhere.sh.new.XXXXXX")" \
+  local tmp; tmp="$(mktemp "${target_dir}/argo-anywhere.sh.new.XXXXXX")" \
     || { err "Could not create temp file in ${target_dir}."; return 1; }
 
   # Make sure the tmp file gets removed on any error path (validation
@@ -8378,17 +8382,17 @@ update_argo_anywhere_component() {
     err "  Aborting to avoid replacing a working script with a broken one."
     return 1
   fi
-  # Two acceptable sentinels (any one suffices):
-  #   * a `SCRIPT_VERSION=` line       (v2.2.1+ convention)
-  #   * the canonical header comment   (v2.2.0 and earlier;
-  #                                     keeps self-update working across the
-  #                                     v2.2.0 -> v2.2.1 boundary)
-  # Both have been stable in this project since the v2.0 rename.
+  # Acceptable sentinels (any one suffices):
+  #   * a `SCRIPT_VERSION=` line          (v2.2.1+ convention)
+  #   * the canonical header comment      (v2.2.0 and earlier). Both the
+  #     hyphenated (v3.0.0+, D-028) and the legacy underscore header are
+  #     accepted so a fetch of an OLD tag still validates.
   if ! grep -q '^SCRIPT_VERSION=' "$tmp" \
+     && ! grep -q '^# argo-anywhere.sh --' "$tmp" \
      && ! grep -q '^# argo_anywhere.sh --' "$tmp"; then
     _cleanup_tmp
-    err "Fetched file does not look like argo_anywhere.sh (no SCRIPT_VERSION="
-    err "  line and no '# argo_anywhere.sh --' header). Aborting."
+    err "Fetched file does not look like argo-anywhere.sh (no SCRIPT_VERSION="
+    err "  line and no '# argo-anywhere.sh --' header). Aborting."
     return 1
   fi
 
@@ -8401,7 +8405,7 @@ update_argo_anywhere_component() {
   if [ -z "$fetched_ver" ] && [ -n "${latest_ver:-}" ]; then
     fetched_ver="$latest_ver"
   fi
-  log "Fetched argo_anywhere.sh version: ${fetched_ver:-unknown}"
+  log "Fetched argo-anywhere.sh version: ${fetched_ver:-unknown}"
 
   # No-op if we already have this version installed at the target.
   if [ -n "$fetched_ver" ]; then
@@ -8443,7 +8447,7 @@ update_argo_anywhere_component() {
     chmod +x "$ARGO_INSTALL_ENV" 2>/dev/null || true
   fi
 
-  ok "argo_anywhere.sh upgraded to v${fetched_ver:-unknown} at ${target}"
+  ok "argo-anywhere.sh upgraded to v${fetched_ver:-unknown} at ${target}"
 
   # Self-replacement caveat: if the running script ($0) IS the target
   # we just replaced, the running process is still executing the OLD
@@ -8892,7 +8896,7 @@ mode_install() {
     die "install: could not resolve the running script's path ($0)."
   fi
 
-  print_summary_box "argo_anywhere  --  install plan" "$C_GRN" \
+  print_summary_box "argo-anywhere  --  install plan" "$C_GRN" \
     "Canonical install dir : ${ARGO_INSTALL_DIR}" \
     "Script                : ${ARGO_INSTALL_SCRIPT}" \
     "Wrappers              : bin/install, bin/uninstall" \
@@ -8913,7 +8917,7 @@ mode_install() {
     log "Running from the canonical install already; refreshing wrappers + env."
   fi
   if _install_core "$self_abs"; then
-    ok "Installed argo_anywhere.sh v${SCRIPT_VERSION} at ${ARGO_INSTALL_SCRIPT}"
+    ok "Installed argo-anywhere.sh v${SCRIPT_VERSION} at ${ARGO_INSTALL_SCRIPT}"
     ok "  Wrappers: ${ARGO_INSTALL_WRAP_INSTALL}, ${ARGO_INSTALL_WRAP_UNINSTALL}"
     ok "  PATH helper: ${ARGO_INSTALL_ENV}"
     _print_path_setup_hint
@@ -8992,7 +8996,7 @@ mode_uninstall() {
   local do_remote="${CLEAN_REMOTE:-0}"
 
   # ---- Plan box ----------------------------------------------------------
-  print_summary_box "argo_anywhere  --  uninstall plan" "$C_YLW" \
+  print_summary_box "argo-anywhere  --  uninstall plan" "$C_YLW" \
     "Mode              : $( [ "$dry" = 1 ] && echo 'DRY RUN (no changes)' || echo 'LIVE' )" \
     "Tier 1 (always)   : $( [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ] && echo 'state dir, tunnels/sockets  (canonical install: n/a in package mode)' || echo "canonical install (${ARGO_INSTALL_DIR}), state dir, tunnels/sockets" )" \
     "Tier 2 configs    : $( [ "$do_restore" = 1 ] && echo 'RESTORE to pre-argo state (--restore-configs)' || echo 'left as-is (pass --restore-configs)' )" \
@@ -9192,7 +9196,7 @@ mode_clean() {
   else                                            risky_policy="prompt per file"
   fi
 
-  print_summary_box "argo_anywhere  --  clean plan" "$C_YLW" \
+  print_summary_box "argo-anywhere  --  clean plan" "$C_YLW" \
     "Will remove items below; risky items handled per policy." \
     "Mode: $( [ "${CLEAN_DRY_RUN:-0}" = 1 ] && echo 'DRY RUN (no changes)' || echo 'LIVE' )" \
     "Local-only: $( [ "${CLEAN_LOCAL_ONLY:-0}" = 1 ] && echo yes || echo no )" \
@@ -9382,6 +9386,7 @@ set -u
 : "${SCREEN_SESSION:?}" "${LEGACY_SCREEN_SESSION:?}" \
   "${REMOTE_SELF:?}" "${REMOTE_LOG:?}" \
   "${LEGACY_REMOTE_SELF:?}" "${LEGACY_REMOTE_LOG:?}" \
+  "${LEGACY_REMOTE_SELF_V2:?}" "${LEGACY_REMOTE_LOG_V2:?}" \
   "${RC:?}" "${DRY:?}"
 
 _say() { printf '%s\n' "$*" >&2; }
@@ -9411,11 +9416,15 @@ _kill_screen() {
 _kill_screen "$SCREEN_SESSION" ""
 _kill_screen "$LEGACY_SCREEN_SESSION" "(legacy v1.x) "
 
-# Safe files (current names + pre-rename names; both enumerated for v1.x users).
-[ -f "$HOME/$REMOTE_SELF"        ] && _rm "$HOME/$REMOTE_SELF"
-[ -f "$HOME/$REMOTE_LOG"         ] && _rm "$HOME/$REMOTE_LOG"
-[ -f "$HOME/$LEGACY_REMOTE_SELF" ] && _rm "$HOME/$LEGACY_REMOTE_SELF"
-[ -f "$HOME/$LEGACY_REMOTE_LOG"  ] && _rm "$HOME/$LEGACY_REMOTE_LOG"
+# Safe files (current hyphenated names + BOTH legacy generations:
+# v1.x .argo_opencode.* and v2.x .argo_anywhere.*; each _rm is a no-op
+# when the file is absent, so current-only users see no extra output).
+[ -f "$HOME/$REMOTE_SELF"           ] && _rm "$HOME/$REMOTE_SELF"
+[ -f "$HOME/$REMOTE_LOG"            ] && _rm "$HOME/$REMOTE_LOG"
+[ -f "$HOME/$LEGACY_REMOTE_SELF"    ] && _rm "$HOME/$LEGACY_REMOTE_SELF"
+[ -f "$HOME/$LEGACY_REMOTE_LOG"     ] && _rm "$HOME/$LEGACY_REMOTE_LOG"
+[ -f "$HOME/$LEGACY_REMOTE_SELF_V2" ] && _rm "$HOME/$LEGACY_REMOTE_SELF_V2"
+[ -f "$HOME/$LEGACY_REMOTE_LOG_V2"  ] && _rm "$HOME/$LEGACY_REMOTE_LOG_V2"
 [ -f "$HOME/argoproxy.out" ] && _rm "$HOME/argoproxy.out"
 [ -d "$HOME/argovenv"      ] && _rm "$HOME/argovenv"
 [ -d "$HOME/agovenv"       ] && _rm "$HOME/agovenv"   # legacy v1.x venv
@@ -9439,14 +9448,15 @@ case "$RC" in
 esac
 EOS
 
-    # Forward the values we need via env on the ssh command line.
-    # LEGACY_SCREEN_SESSION + LEGACY_REMOTE_SELF + LEGACY_REMOTE_LOG let
-    # the remote cleanup script handle pre-rename v1.x state too (it's a
-    # no-op when the legacy items aren't present).
+    # Forward the values we need via env on the ssh command line. The
+    # LEGACY_* (v1.x .argo_opencode.*) and LEGACY_*_V2 (v2.x .argo_anywhere.*)
+    # names let the remote cleanup handle both pre-rename generations (each is
+    # a no-op when the legacy item isn't present).
     local remote_env
     remote_env="SCREEN_SESSION='${SCREEN_SESSION}' LEGACY_SCREEN_SESSION='${LEGACY_SCREEN_SESSION}' \
 REMOTE_SELF='${REMOTE_SELF}' LEGACY_REMOTE_SELF='${LEGACY_REMOTE_SELF}' \
 REMOTE_LOG='${REMOTE_LOG}' LEGACY_REMOTE_LOG='${LEGACY_REMOTE_LOG}' \
+LEGACY_REMOTE_SELF_V2='${LEGACY_REMOTE_SELF_V2}' LEGACY_REMOTE_LOG_V2='${LEGACY_REMOTE_LOG_V2}' \
 RC='${rc_choice}' DRY='${CLEAN_DRY_RUN:-0}'"
     # On-node short-circuit: if cached_node refers to this host, the
     # "remote" cleanup is actually local. Run the script directly with
@@ -9573,7 +9583,7 @@ Subcommands:
                     * 'update argo-anywhere' self-updates the script:
                       resolves the latest GitHub release tag, validates
                       the fetched script, and atomically replaces the
-                      canonical install at ~/.argo_anywhere/bin/argo_anywhere.sh.
+                      canonical install at ~/.argo_anywhere/bin/argo-anywhere.sh.
                     * 'update argoproxy' upgrades argo-proxy on the
                       compute node and automatically POSTs /refresh so
                       the running proxy picks up new upstream models
@@ -9711,7 +9721,7 @@ Options:
                        node. By default (since v2.0) the script writes
                        \`verbose: false\` in the argo-proxy config to
                        prevent prompt+response bodies from being logged
-                       to ~/.argo_anywhere.server.log on the compute
+                       to ~/.argo-anywhere.server.log on the compute
                        node (where they'd be readable by anyone with
                        SSH access to your account, plus root). Use
                        this flag ONLY when actively debugging argo-proxy
@@ -9928,17 +9938,17 @@ If you only want argo-proxy running on a node (no client setup, no
 tunnel), 'server' is the right subcommand:
 
   ssh <user>@compute-XX.cels.anl.gov
-  bash argo_anywhere.sh server   # starts argo-proxy under screen, returns
+  bash argo-anywhere.sh server   # starts argo-proxy under screen, returns
 
 This is the 'I want to leave a proxy on this node for any of my
 machines/clients to reach' workflow. Other clients (your laptop, a
 cluster login node) can then point at the proxy via their own SSH -L
-forward, or via 'argo_anywhere.sh client --cli-tool NAME --node compute-XX'
+forward, or via 'argo-anywhere.sh client --cli-tool NAME --node compute-XX'
 from those machines.
 
 TUNNEL-ONLY MODE
 ----------------
-'argo_anywhere.sh tunnel' is the same as 'client' minus the AI CLI tool
+'argo-anywhere.sh tunnel' is the same as 'client' minus the AI CLI tool
 install + config. It just brings up the tunnel (or local proxy on a
 compute node) and blocks. Useful when you:
 
@@ -10083,7 +10093,7 @@ Update installed components in place (lossless; preserves configs + venv):
   # 'update argo-anywhere' resolves the latest GitHub release tag, validates
   # the fetched script (bash -n + size check + SCRIPT_VERSION sentinel),
   # backs up the existing copy, and atomically replaces ~/.argo_anywhere/
-  # argo_anywhere.sh (the canonical install). If no install exists yet,
+  # argo-anywhere.sh (the canonical install). If no install exists yet,
   # it prompts to bootstrap one first. Refuses to clobber a dirty git tree.
 
 Manual fallback if 'update argoproxy' can't reach the node (use directly):
@@ -10180,7 +10190,7 @@ main() {
         # selection; warned-but-ignored for subcommands that don't
         # consume per-tool identity (status/stop/clean/etc.). The
         # warn-but-ignore behavior is per the user's directive: avoid
-        # erroring on `alias argo='bash argo_anywhere.sh --cli-tool X'`
+        # erroring on `alias argo='bash argo-anywhere.sh --cli-tool X'`
         # patterns where the flag is set globally but only some
         # subcommands need it.
         [ -n "${2:-}" ] || die "--cli-tool expects a value (one of: $(cli_tool_known_names))."
@@ -10210,7 +10220,7 @@ main() {
       --verbose-server)
         # P2 fix: explicit opt-in for argo-proxy's verbose mode on the
         # compute node. Default since v2.0 is verbose=false (the
-        # server-side log file ~/.argo_anywhere.server.log otherwise
+        # server-side log file ~/.argo-anywhere.server.log otherwise
         # captures every prompt+response in plaintext on a shared
         # compute node). Set this when actively debugging argo-proxy
         # behavior; remember to remove for routine use.

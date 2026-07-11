@@ -1,6 +1,6 @@
 # Security model
 
-This document describes `argo_anywhere.sh`'s threat model, what the
+This document describes `argo-anywhere.sh`'s threat model, what the
 script does to defend its users, what it does NOT defend against, and
 the privacy posture of the data flowing through it. It is for
 security-conscious users + ANL admins who want to understand the

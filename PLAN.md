@@ -1646,7 +1646,18 @@ communicated out-of-band to the small user set.
 
 ### D-028 — Rename `argo_anywhere` -> `argo-anywhere` everywhere user-facing (2026-07-10)
 
-**Status**: accepted; designing.
+**Status**: **IMPLEMENTED on `feat/python-package-webui` (2026-07-11)** — the
+user-facing surfaces are hyphenated (filename `argo-anywhere.sh` incl. the
+`git mv`, `REMOTE_SELF`/`REMOTE_LOG` node files + v2.x legacy sweep, log prefix
+`[argo-anywhere]`, self-integrity + self-update sentinels, summary-box titles,
+help/error text, README/AGENTS/UPGRADING/TESTING/SECURITY/LIMITATIONS/examples).
+**Two carve-outs beyond the platform ones**, both consciously deferred: the
+on-disk **directory** names (`~/.config/argo_anywhere`, `~/.argo_anywhere`) stay
+underscored for now (deferred to avoid stacking a migration on D-030's fresh
+manifest move; canonical install is therefore `~/.argo_anywhere/bin/argo-anywhere.sh`
+— dir underscore, file hyphen), and **PLAN.md + `notes/`** keep their historical
+`argo_anywhere.sh` design references (not swept; they document the past by
+design). Live-test gate pending (with D-030).
 
 **Context.** The repo and package are hyphenated (`argo-anywhere`); only the
 script file still uses an underscore (`argo_anywhere.sh`), a historical artifact
