@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..driver import PtySession
 from .pty_bridge import run_pty_bridge
+from .registry import SessionRegistry
 
 #: Host header values (hostname part, port stripped) accepted by the guard.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -58,6 +59,10 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
     """
     engine_argv = tuple(engine_argv)
 
+    # One registry per app: tracks the live PtySessions spawned by /ws so the
+    # dashboard can list them and guard against killing a channel-owning one.
+    registry = SessionRegistry()
+
     # Resolve the vendored static dir to a real path and keep it valid for the
     # app's lifetime (a no-op for a normal filesystem install; matters only for
     # a zip-imported package).
@@ -72,6 +77,9 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             _stack.close()
 
     app = FastAPI(title="argo-anywhere", lifespan=lifespan)
+    # Exposed for introspection/tests; the /ws handler and endpoints close over
+    # the same instance.
+    app.state.registry = registry
 
     @app.middleware("http")
     async def _host_guard(request, call_next):
@@ -91,11 +99,14 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    # NOTE: /api/status and /api/health run blocking work (lsof, a loopback HTTP
+    # GET). They are defined as plain `def` so FastAPI runs them in a threadpool
+    # rather than blocking the event loop; the WS bridge stays on the loop.
     @app.get("/api/status")
-    async def api_status() -> JSONResponse:
-        # Local-only: versions + loopback listeners. Does NOT poll channel
-        # /health (that would traverse an ANL tunnel); the dashboard requests
-        # health explicitly on user action.
+    def api_status() -> JSONResponse:
+        # Local-only: versions + loopback listeners + live managed sessions.
+        # Does NOT poll channel /health (that would traverse an ANL tunnel); the
+        # dashboard requests health explicitly on user action via /api/health.
         from ..status import cached_state, local_listeners, package_info
 
         state = cached_state()
@@ -104,7 +115,57 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             "package": package_info(),
             "cached": state,
             "listeners": [ln.as_dict() for ln in local_listeners(ports)],
+            "sessions": registry.snapshots(),
         })
+
+    @app.get("/api/sessions")
+    async def api_sessions() -> JSONResponse:
+        # Live managed PTY sessions. Purely local (waitpid liveness; no network).
+        return JSONResponse({"sessions": registry.snapshots()})
+
+    @app.get("/api/health")
+    def api_health(port: int) -> JSONResponse:
+        # On-demand channel health. This GET traverses the SSH tunnel to reach
+        # argo-proxy on the compute node when a tunnel is up, so it is triggered
+        # only by an explicit user action in the dashboard (never auto-polled).
+        # Against a down port it is a local connection-refused -> up=False.
+        from ..status import channel_health
+
+        if not 1 <= port <= 65535:
+            return JSONResponse({"error": "port out of range (1-65535)"}, status_code=400)
+        return JSONResponse(channel_health(port).as_dict())
+
+    @app.post("/api/sessions/{sid}/stop")
+    def api_stop_session(sid: str, force: bool = False) -> JSONResponse:
+        # Kill-guard: stopping a session that owns a LIVE SSH channel tears the
+        # tunnel down (notes/impl_python_webui.md "Operational lessons"). When
+        # that is the case and the caller did not pass force=true, refuse with a
+        # 409 + explanation so the UI can confirm intent before proceeding.
+        from ..status import cached_state, local_listeners
+
+        managed = registry.get(sid)
+        if managed is None:
+            return JSONResponse({"error": f"no such session: {sid}"}, status_code=404)
+
+        if managed.owns_channel and managed.session.isalive() and not force:
+            port = cached_state().get("port")
+            channel_live = bool(port and local_listeners([port]))
+            if channel_live:
+                return JSONResponse(
+                    {
+                        "warning": "owns_live_channel",
+                        "port": port,
+                        "detail": (
+                            f"Session {sid} ({managed.verb}) is holding the SSH "
+                            f"channel on :{port}. Stopping it tears down the "
+                            "tunnel. Re-send with force=true to proceed."
+                        ),
+                    },
+                    status_code=409,
+                )
+
+        managed.session.close()
+        return JSONResponse({"stopped": sid})
 
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
@@ -116,9 +177,11 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             return
         await ws.accept()
         session = PtySession(list(engine_argv), dimensions=(24, 80))
+        managed = registry.register(session)
         try:
             await run_pty_bridge(ws, session)
         finally:
+            registry.unregister(managed.id)
             session.close()
 
     return app

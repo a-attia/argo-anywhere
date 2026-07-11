@@ -63,6 +63,28 @@ SUBPROCESS_VERBS: frozenset[str] = frozenset({
     "update", "clean", "install", "uninstall", "help",
 })
 
+#: Verbs whose managed process *owns* the SSH channel: it created the mux master
+#: (or hosts the foreground monitor that did) and holds the tunnel alive, so
+#: killing that process tears the whole channel down. Observed live 2026-07-10:
+#: stopping a web/spike server that hosted a ``connect`` brought the channel
+#: down with it (notes/impl_python_webui.md "Operational lessons"). D-003's
+#: "the master outlives the foreground ``ssh -N -L``" does NOT extend to killing
+#: the monitor process itself. The dashboard's kill-guard uses this set to warn
+#: before stopping a session that owns a live tunnel.
+#:
+#: ``configure``/``run`` reuse an existing channel without opening one (D-024)
+#: and ``server`` runs on the compute node, so none of those own the laptop-side
+#: master; they are deliberately excluded.
+CHANNEL_VERBS: frozenset[str] = frozenset({
+    "connect", "tunnel", "client", "setup",
+})
+
+
+def owns_channel(argv: Sequence[str]) -> bool:
+    """True if this engine invocation holds the SSH channel open (see
+    :data:`CHANNEL_VERBS`)."""
+    return verb_of(argv) in CHANNEL_VERBS
+
 
 class Lane(enum.Enum):
     """Which lane an engine invocation runs in."""

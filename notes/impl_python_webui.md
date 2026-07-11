@@ -1,7 +1,7 @@
 # Implementation plan — Python package + web UI (Model A)
 
-**Status**: building — P1 gate PASSED; **P0 code complete** (2026-07-10);
-P2–P5 pending. **Owner**: Ahmed Attia. **Last updated**: 2026-07-10.
+**Status**: building — P1 gate PASSED; **P0 + P2 code complete** (2026-07-10);
+P3–P5 pending. **Owner**: Ahmed Attia. **Last updated**: 2026-07-10.
 **Branch**: `feat/python-package-webui` (forked from `main` at the D-024 verb
 split; not yet merged). **Linked PLAN.md**: design decisions
 [D-026..D-029](../PLAN.md#7-design-decisions-log); open questions
@@ -20,7 +20,8 @@ and built since.
 - [What is proven](#what-is-proven)
 - [What is built (P0)](#what-is-built-p0)
 - [The two-lane driver contract](#the-two-lane-driver-contract)
-- [Remaining work (P2–P5)](#remaining-work-p2p5)
+- [What is built (P2)](#what-is-built-p2)
+- [Remaining work (P3–P5)](#remaining-work-p3p5)
 - [Residuals and open questions](#residuals-and-open-questions)
 - [Operational lessons](#operational-lessons)
 - [Develop and run](#develop-and-run)
@@ -43,7 +44,7 @@ the single-file rule (D-001) are recorded as
 |:--|:--|:--|
 | **P1** | Gate: can the whole `connect` flow (incl. Duo) be driven from a browser terminal over a WebSocket-bridged PTY? | **PASS** — incl. a live cold-Duo observation |
 | **P0** | Package skeleton + verbatim engine + two-lane driver + web layer + CLI dispatch | **CODE COMPLETE** — 42 tests pass (see `tests/`) |
-| **P2** | Dashboard + monitor: process registry, `/health` polling, a "show all tunnels" view (new capability; D-006 has none today) | **started (2026-07-10)** — local status/health core landed (`status.py`, `argo-anywhere info`, `GET /api/status`); dashboard UI + process registry + live `/health` polling still pending |
+| **P2** | Dashboard + monitor: process registry, `/health` polling, a "show all tunnels" view (new capability; D-006 has none today) | **CODE COMPLETE (2026-07-10)** — status/health core (`status.py`, `argo-anywhere info`, `GET /api/status`) + session registry (`web/registry.py`) + dashboard endpoints (`/api/sessions`, on-demand `/api/health`, guarded `POST /api/sessions/{id}/stop`) + the dashboard UI (channel signal-path + sessions + listeners). 65 tests pass. Residual: one at-the-keyboard `/api/health` observation against a live tunnel (never auto-polled; user-action only) |
 | **P3** | Configure/run in the UI: conflict-escalation to the PTY lane; run-client-in-terminal; info views (list-models/list-tools/status) | pending |
 | **P4** | Packaging polish: `pywebview` native window, `docs/UPGRADING.md` hard-cutover section, the D-028 clean-break content rename, PyPI publish | pending |
 | **P5** | Optional/upstream-able: add engine flags for the 3 un-pre-answerable prompts so they run headless in Lane 1 | pending |
@@ -156,12 +157,39 @@ D-003) and `mode_run` (ends with `exec "$bin"`). Self-invocation still works:
 `remote_bootstrap` scp's the engine to the node and re-execs it as `server`;
 under packaging the node still receives a plain `.sh`.
 
-## Remaining work (P2–P5)
+## What is built (P2)
 
-P2–P5 are conventional engineering on top of a proven base; see the phase table
-above for scope. The immediate next step after P0 is **P2 (dashboard + monitor)**
-— the first genuinely new capability, since D-006's single-instance model has no
-"show all tunnels" view today.
+P2 landed on 2026-07-10 (the genuinely new capability D-006's single-instance
+model lacks):
+
+- **Session registry** (`web/registry.py`): a thread-safe `SessionRegistry` of
+  the live `PtySession`s the web server spawns (one per `/ws`). Each
+  `ManagedSession` records id / argv / verb / pid / start-time and a static
+  `owns_channel` flag from the new `driver.CHANNEL_VERBS`
+  (`connect`/`tunnel`/`client`/`setup` — the verbs whose process hosts the SSH
+  master; see [Operational lessons](#operational-lessons)).
+- **Dashboard endpoints** (`web/app.py`): `GET /api/sessions`, `GET /api/status`
+  now also carries `sessions`, on-demand `GET /api/health?port=N` (the only
+  ANL-reaching call — a loopback GET that traverses the tunnel, so it is
+  **user-action only, never auto-polled**), and `POST /api/sessions/{id}/stop`
+  with a **kill-guard**: stopping a channel-owning session while a loopback
+  listener is live on the cached port returns `409` + a warning; the UI confirms
+  and retries with `force=true`.
+- **Dashboard UI** (`web/static/index.html`): a channel *signal-path*
+  (`this laptop ──:port──▶ node ──▶ argo-proxy`) with per-hop live status, a
+  managed-sessions list, and loopback listeners. Local status auto-refreshes
+  every 5 s (paused when the tab is hidden); channel health is a button. The
+  terminal + WebSocket bridge is unchanged from P0.
+- **Tests**: `tests/test_registry.py` (registry lifecycle, kill-guard,
+  endpoints, `/api/health` against a localhost stub — never ANL). Suite: 65
+  pass, no ANL/SSH/network.
+
+## Remaining work (P3–P5)
+
+P3–P5 are conventional engineering on top of a proven base; see the phase table
+above for scope. The immediate next step is **P3 (configure/run in the UI)** —
+conflict-escalation to the PTY lane, run-client-in-terminal, and the
+info views.
 
 Before P4's clean-break content rename, note the D-028 scope carve-outs recorded
 in PLAN.md: hyphenate user-facing surfaces (filename, `REMOTE_SELF`, log prefix,
