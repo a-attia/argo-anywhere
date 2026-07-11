@@ -486,6 +486,25 @@ re-test. Sequence:
 Each step is independently testable without ANL infra, except the final live
 re-test of the engine edit.
 
+## Web-app launcher (install-launcher)
+
+Added 2026-07-11, mirroring the sibling `scrollback` project's
+`install-launcher`. `argo-anywhere install-launcher` drops a **persistent,
+double-clickable launcher** so a non-terminal user can start the web UI:
+macOS `~/Desktop/argo-anywhere.command` + a real `~/Applications/argo-anywhere.app`
+bundle (Info.plist, optional icon); Linux a `.desktop` menu entry +
+`~/Desktop/argo-anywhere.sh`. Each **bakes the absolute interpreter path** (GUI
+launches run with a minimal PATH) and runs `python -m argo_anywhere app` (the
+pywebview window, browser fallback). `--desktop` / `--app-bundle` select a
+subset; `--dest` overrides the location. New module `launcher.py`; CLI verb
+intercepted before passthrough (distinct from the engine's `install`).
+
+It closes the loop with the D-030 lifecycle: the launcher artifacts are listed by
+`footprint.py` (→ `argo-anywhere info`, `artifact` tier) and swept by the package
+`uninstall` verb (the "package-only residue" D-030c removes on top of the engine
+tiers). 9 tests (`tests/test_launcher.py`), platform-parameterized (macOS +
+Linux), no GUI/ANL.
+
 ## Remaining work (P4–P5)
 
 P4–P5 are conventional engineering on top of a proven base; see the phase table

@@ -142,6 +142,14 @@ def footprint(home: Path | None = None) -> list[FootprintEntry]:
                 "client-config backup (restore source; consumed by uninstall --restore-configs)",
             ))
 
+    # artifact: the double-clickable launchers `install-launcher` created.
+    from .launcher import installed_artifacts
+
+    for art in installed_artifacts(home=h):
+        entries.append(FootprintEntry(
+            art, "artifact", "web-app launcher (install-launcher)",
+        ))
+
     return entries
 
 

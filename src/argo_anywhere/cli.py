@@ -37,6 +37,11 @@ argo-anywhere (Python package) additions beyond the engine's help:
                                  (needs the [app] extra: pip install
                                  'argo-anywhere[app]'); falls back to your
                                  browser if pywebview isn't installed.
+  argo-anywhere install-launcher [--desktop] [--app-bundle]
+                                 Install a double-clickable launcher for the
+                                 web UI (macOS .command / .app; Linux .desktop
+                                 + .sh) so you can start it without a terminal.
+                                 Removed by 'argo-anywhere uninstall'.
   argo-anywhere web [--host H] [--port N] [--engine "VERB ARGS"]
                                  Serve the local web UI (needs the [web] extra:
                                  pip install 'argo-anywhere[web]').
@@ -153,17 +158,39 @@ def _cmd_uninstall(args: Sequence[str]) -> int:
     guard. Because :func:`_run_engine_passthrough` sets
     ``ARGO_ANYWHERE_PACKAGED=1`` (D-030a), the engine skips its canonical-dir
     removal (there is none under the package) and sweeps the rest of the
-    footprint. We never self-delete the package; we print the pip/pipx command
-    instead (only when the teardown actually ran / previewed, i.e. rc == 0 --
-    an aborted uninstall shouldn't nudge the user to remove the package).
+    footprint. Then we sweep the **package-only residue** the engine doesn't
+    know about -- the double-clickable launchers ``install-launcher`` created
+    (D-030b's ``artifact`` tier). We never self-delete the package; we print the
+    pip/pipx command instead (only when the teardown actually ran / previewed,
+    i.e. rc == 0 -- an aborted uninstall shouldn't nudge the user to remove the
+    package).
     """
     rc = _run_engine_passthrough(["uninstall", *args])
-    if rc == 0:
-        print(
-            f"\nto remove the package itself, run:\n    {_package_removal_command()}",
-            file=sys.stderr,
-        )
-    return rc
+    if rc != 0:
+        return rc  # aborted / failed teardown: don't touch residue or nudge
+
+    # Package-only residue: the launchers (the engine's manifest never saw them).
+    _sweep_launcher_residue(dry_run="--dry-run" in args)
+    print(
+        f"\nto remove the package itself, run:\n    {_package_removal_command()}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _sweep_launcher_residue(*, dry_run: bool) -> None:
+    """Remove the launcher artifacts ``install-launcher`` created (dry-run aware)."""
+    from .launcher import installed_artifacts, remove_path
+
+    for path in installed_artifacts():
+        if dry_run:
+            print(f"[dry-run] would remove launcher: {path}", file=sys.stderr)
+            continue
+        try:
+            remove_path(path)
+            print(f"removed launcher: {path}", file=sys.stderr)
+        except OSError as exc:
+            print(f"could not remove {path}: {exc}", file=sys.stderr)
 
 
 def _cmd_web(args: Sequence[str]) -> int:
@@ -276,6 +303,44 @@ def _cmd_app(args: Sequence[str]) -> int:
     return 0
 
 
+def _cmd_install_launcher(args: Sequence[str]) -> int:
+    """Install a double-clickable launcher for the web UI (scrollback-style).
+
+    Creates the OS-appropriate launcher(s) that run ``argo-anywhere app`` with
+    the current interpreter baked in, so a non-terminal user can start the UI by
+    double-clicking. Registered in the footprint, so ``argo-anywhere uninstall``
+    removes them.
+    """
+    from pathlib import Path
+
+    from .launcher import install
+
+    parser = argparse.ArgumentParser(
+        prog="argo-anywhere install-launcher",
+        description="Install a double-clickable launcher for the web UI.",
+    )
+    parser.add_argument("--dest", help="override the install directory (Desktop / app-menu by default).")
+    parser.add_argument("--desktop", action="store_true", help="only the Desktop launcher.")
+    parser.add_argument("--app-bundle", action="store_true", help="only the macOS .app bundle.")
+    ns = parser.parse_args(list(args))
+
+    created = install(
+        dest=Path(ns.dest) if ns.dest else None,
+        desktop=ns.desktop,
+        app_bundle=ns.app_bundle,
+    )
+    if not created:
+        print("install-launcher: nothing created.", file=sys.stderr)
+        return 1
+    for p in created:
+        print(f"created: {p}")
+    print(
+        "\nDouble-click it to open argo-anywhere (a native window if the [app] extra\n"
+        "is installed, otherwise your browser). Remove with 'argo-anywhere uninstall'."
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -296,6 +361,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "app":
         return _cmd_app(argv[1:])
+    if argv and argv[0] == "install-launcher":
+        return _cmd_install_launcher(argv[1:])
     if argv and argv[0] == "web":
         return _cmd_web(argv[1:])
     if argv and argv[0] == "info":
