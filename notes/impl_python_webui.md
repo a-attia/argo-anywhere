@@ -1,7 +1,8 @@
 # Implementation plan — Python package + web UI (Model A)
 
-**Status**: building — P1 gate PASSED; **P0 + P2 code complete** (2026-07-10);
-P3–P5 pending. **Owner**: Ahmed Attia. **Last updated**: 2026-07-10.
+**Status**: building — P1 gate PASSED; **P0 + P2 + P3 code complete** (2026-07-10,
+P3 single-terminal model; concurrency deferred to Q12); P4–P5 pending.
+**Owner**: Ahmed Attia. **Last updated**: 2026-07-10.
 **Branch**: `feat/python-package-webui` (forked from `main` at the D-024 verb
 split; not yet merged). **Linked PLAN.md**: design decisions
 [D-026..D-029](../PLAN.md#7-design-decisions-log); open questions
@@ -21,7 +22,8 @@ and built since.
 - [What is built (P0)](#what-is-built-p0)
 - [The two-lane driver contract](#the-two-lane-driver-contract)
 - [What is built (P2)](#what-is-built-p2)
-- [Remaining work (P3–P5)](#remaining-work-p3p5)
+- [What is built (P3)](#what-is-built-p3)
+- [Remaining work (P4–P5)](#remaining-work-p4p5)
 - [Residuals and open questions](#residuals-and-open-questions)
 - [Operational lessons](#operational-lessons)
 - [Develop and run](#develop-and-run)
@@ -45,7 +47,7 @@ the single-file rule (D-001) are recorded as
 | **P1** | Gate: can the whole `connect` flow (incl. Duo) be driven from a browser terminal over a WebSocket-bridged PTY? | **PASS** — incl. a live cold-Duo observation |
 | **P0** | Package skeleton + verbatim engine + two-lane driver + web layer + CLI dispatch | **CODE COMPLETE** — 42 tests pass (see `tests/`) |
 | **P2** | Dashboard + monitor: process registry, `/health` polling, a "show all tunnels" view (new capability; D-006 has none today) | **CODE COMPLETE (2026-07-10)** — status/health core (`status.py`, `argo-anywhere info`, `GET /api/status`) + session registry (`web/registry.py`) + dashboard endpoints (`/api/sessions`, on-demand `/api/health`, guarded `POST /api/sessions/{id}/stop`) + the dashboard UI (channel signal-path + sessions + listeners). 65 tests pass. Residual: one at-the-keyboard `/api/health` observation against a live tunnel (never auto-polled; user-action only) |
-| **P3** | Configure/run in the UI: conflict-escalation to the PTY lane; run-client-in-terminal; info views (list-models/list-tools/status) | pending |
+| **P3** | Configure/run in the UI: conflict-escalation to the PTY lane; run-client-in-terminal; info views (list-models/list-tools/status) | **CODE COMPLETE (2026-07-10, single-terminal model)** — info views (`POST /api/run/{verb}`), parameterized launcher (`/ws?verb=…&cli_tool=…&scope=…`), channel-owner replace-guard. Conflict-escalation is inherent: `configure`/`run` are Lane-2 so their prompts run in the PTY. **Deferred to Q12**: concurrent side-terminals (run `configure`/`run` alongside a held `connect`) — needs the Lane-2 concurrency decision. 85 tests pass |
 | **P4** | Packaging polish: `pywebview` native window, `docs/UPGRADING.md` hard-cutover section, the D-028 clean-break content rename, PyPI publish | pending |
 | **P5** | Optional/upstream-able: add engine flags for the 3 un-pre-answerable prompts so they run headless in Lane 1 | pending |
 
@@ -184,12 +186,48 @@ model lacks):
   endpoints, `/api/health` against a localhost stub — never ANL). Suite: 65
   pass, no ANL/SSH/network.
 
-## Remaining work (P3–P5)
+## What is built (P3)
 
-P3–P5 are conventional engineering on top of a proven base; see the phase table
-above for scope. The immediate next step is **P3 (configure/run in the UI)** —
-conflict-escalation to the PTY lane, run-client-in-terminal, and the
-info views.
+P3 landed on 2026-07-10 (single-terminal model):
+
+- **Info views** (`web/app.py`): `POST /api/run/{verb}` runs a whitelisted
+  returning verb captured (Lane 1, stdin closed) and returns
+  `{argv, returncode, stdout, stderr, reaches_anl}`. `INFO_VERBS` gates the
+  allowlist: `list-tools` (local), `status` + `list-models` (ANL — flagged so
+  the UI confirms before running and **never** auto-runs them). 30 s timeout ->
+  `504`.
+- **Terminal launcher** (`web/app.py`): `/ws` now accepts validated query params
+  (`verb` in `KNOWN_VERBS`, plus `cli_tool` / `scope` / `port` through
+  `build_launch_argv`, a strict allowlist builder — no free-form passthrough).
+  No params -> the server's configured default (unchanged P0/P1 behavior).
+- **Dashboard** (`web/static/index.html`): a "Run in terminal" launcher
+  (command + cli-tool + scope) that reconnects the terminal to the chosen verb,
+  with a **channel-owner confirm** before replacing a live-tunnel session; and
+  an "Info" panel that renders `/api/run` output (ANL buttons badged + confirm).
+  The terminal was refactored to a reconnectable `openTerminal()` so the
+  launcher can switch what it runs.
+- **Conflict-escalation to the PTY lane** is inherent, not a separate feature:
+  `configure`/`run`/`connect`/`tunnel` are Lane 2, so their three un-flaggable
+  prompts (port-migrate / config-conflict / scope-conflict) run in the browser
+  PTY where the user can answer them. Making them run *headless* in Lane 1 is
+  the separate P5 work (engine flags for those prompts).
+- **Tests**: `tests/test_run_launch.py` (argv-builder allowlist, `/api/run`
+  validation, `list-tools` captured, `/ws?verb=help` launch, bad-spec
+  rejection). Suite: 85 pass, no ANL/SSH/network.
+
+**Deferred (Q12).** The launcher uses one terminal: launching a verb replaces
+the current session. Running `configure`/`run` in a *separate* terminal
+*alongside* a held `connect` (so you keep the channel while configuring) needs
+the Lane-2 concurrency model still open as PLAN.md Q12 (multiple concurrent
+PtySessions + where `manifest.json` lives). Not guessed here.
+
+## Remaining work (P4–P5)
+
+P4–P5 are conventional engineering on top of a proven base; see the phase table
+above for scope. The immediate next step is **P4 (packaging polish)** —
+`pywebview` native window, the `docs/UPGRADING.md` hard-cutover section, the
+D-028 clean-break content rename, and PyPI publish. P5 (headless engine flags
+for the three prompts) is optional/upstream-able.
 
 Before P4's clean-break content rename, note the D-028 scope carve-outs recorded
 in PLAN.md: hyphenate user-facing surfaces (filename, `REMOTE_SELF`, log prefix,

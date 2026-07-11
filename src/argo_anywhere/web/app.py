@@ -13,6 +13,8 @@ the browser terminal via :func:`argo_anywhere.web.pty_bridge.run_pty_bridge`.
 
 from __future__ import annotations
 
+import re
+import subprocess
 from contextlib import ExitStack, asynccontextmanager
 from importlib.resources import as_file, files
 from typing import Sequence
@@ -21,12 +23,58 @@ from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from ..driver import PtySession
+from ..driver import KNOWN_VERBS, PtySession, run_engine
 from .pty_bridge import run_pty_bridge
 from .registry import SessionRegistry
 
 #: Host header values (hostname part, port stripped) accepted by the guard.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+#: Lowercase-token guard for user-supplied flag values (cli-tool, scope). The
+#: browser can only ever hand these to the vendored engine, never to a shell,
+#: but we still constrain them to a safe alphabet to keep argv predictable.
+_SAFE_TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+#: Returning verbs the dashboard may run captured (Lane 1) via /api/run. The
+#: ``anl`` flag says whether the verb reaches ANL through the tunnel, so the UI
+#: can gate those behind an explicit confirm and never auto-run them.
+INFO_VERBS: dict[str, dict] = {
+    "list-tools": {"anl": False},   # static local list of supported CLI tools
+    "status": {"anl": True},        # polls the tunnel + /v1/models when up
+    "list-models": {"anl": True},   # fetches models from argo-proxy
+}
+
+
+def build_launch_argv(
+    verb: str,
+    *,
+    cli_tool: str | None = None,
+    scope: str | None = None,
+    port: int | None = None,
+) -> list[str]:
+    """Assemble a validated engine argv for a browser-initiated terminal launch.
+
+    Only a known verb plus a constrained set of flags is allowed; free-form
+    passthrough is deliberately not supported. Raises ``ValueError`` on anything
+    outside the allowlist so the caller can reject the launch.
+    """
+    if verb not in KNOWN_VERBS:
+        raise ValueError(f"unknown verb: {verb!r}")
+    argv: list[str] = []
+    if cli_tool:
+        if not _SAFE_TOKEN.match(cli_tool):
+            raise ValueError(f"bad cli_tool: {cli_tool!r}")
+        argv += ["--cli-tool", cli_tool]
+    if scope:
+        if not _SAFE_TOKEN.match(scope):
+            raise ValueError(f"bad scope: {scope!r}")
+        argv += ["--scope", scope]
+    if port is not None:
+        if not 1 <= int(port) <= 65535:
+            raise ValueError(f"port out of range: {port!r}")
+        argv += ["--port", str(int(port))]
+    argv.append(verb)
+    return argv
 
 
 def _host_is_loopback(host_header: str) -> bool:
@@ -167,6 +215,34 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         managed.session.close()
         return JSONResponse({"stopped": sid})
 
+    @app.post("/api/run/{verb}")
+    def api_run(verb: str, cli_tool: str | None = None) -> JSONResponse:
+        # Run a whitelisted returning verb captured (Lane 1, stdin closed) and
+        # return its output. status/list-models reach ANL through the tunnel, so
+        # the UI only calls those on an explicit user action (INFO_VERBS.anl).
+        spec = INFO_VERBS.get(verb)
+        if spec is None:
+            return JSONResponse(
+                {"error": f"verb not allowed: {verb}", "allowed": sorted(INFO_VERBS)},
+                status_code=400,
+            )
+        argv = [verb]
+        if cli_tool:
+            if not _SAFE_TOKEN.match(cli_tool):
+                return JSONResponse({"error": f"bad cli_tool: {cli_tool}"}, status_code=400)
+            argv += ["--cli-tool", cli_tool]
+        try:
+            result = run_engine(argv, timeout=30)
+        except subprocess.TimeoutExpired:
+            return JSONResponse({"error": f"{verb} timed out"}, status_code=504)
+        return JSONResponse({
+            "argv": result.argv,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "reaches_anl": spec["anl"],
+        })
+
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
     @app.websocket("/ws")
@@ -175,8 +251,25 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         if not _host_is_loopback(ws.headers.get("host", "")):
             await ws.close(code=1008)
             return
+        # Optional launch spec via query params lets the dashboard run a chosen
+        # verb (the launcher); with no params we run the server's configured
+        # default (unchanged P0/P1 behavior).
+        q = ws.query_params
+        if q.get("verb"):
+            try:
+                argv = build_launch_argv(
+                    q["verb"],
+                    cli_tool=q.get("cli_tool"),
+                    scope=q.get("scope"),
+                    port=int(q["port"]) if q.get("port") else None,
+                )
+            except (ValueError, TypeError):
+                await ws.close(code=1008)  # rejected launch spec
+                return
+        else:
+            argv = list(engine_argv)
         await ws.accept()
-        session = PtySession(list(engine_argv), dimensions=(24, 80))
+        session = PtySession(argv, dimensions=(24, 80))
         managed = registry.register(session)
         try:
             await run_pty_bridge(ws, session)

@@ -68,20 +68,26 @@
     .dash {
       display: grid; gap: 12px; padding: 14px 16px;
       grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-      grid-template-areas: "channel sessions" "channel listeners";
+      grid-template-areas:
+        "channel  sessions"
+        "channel  listeners"
+        "launcher info";
       background: var(--bg);
     }
     .dash[hidden] { display: none; }
-    @media (max-width: 780px) {
-      .dash { grid-template-columns: 1fr; grid-template-areas: "channel" "sessions" "listeners"; }
+    @media (max-width: 820px) {
+      .dash { grid-template-columns: 1fr;
+              grid-template-areas: "channel" "sessions" "listeners" "launcher" "info"; }
     }
     .card {
       background: var(--panel); border: 1px solid var(--line-soft);
-      border-radius: var(--radius); padding: 13px 15px 15px;
+      border-radius: var(--radius); padding: 13px 15px 15px; min-width: 0;
     }
     .card.channel   { grid-area: channel; }
     .card.sessions  { grid-area: sessions; }
     .card.listeners { grid-area: listeners; }
+    .card.launcher  { grid-area: launcher; }
+    .card.info      { grid-area: info; }
 
     .eyebrow {
       font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.13em;
@@ -94,10 +100,7 @@
     }
 
     /* ---- SIGNATURE: the channel signal-path ---------------------------- */
-    .signalpath {
-      display: flex; align-items: flex-start; gap: 0;
-      padding: 6px 2px 14px;
-    }
+    .signalpath { display: flex; align-items: flex-start; gap: 0; padding: 6px 2px 14px; }
     .hop { display: flex; flex-direction: column; align-items: center; gap: 7px;
            text-align: center; min-width: 74px; --dot: var(--ink-faint); }
     .hop .hopdot {
@@ -111,10 +114,8 @@
     .hop .hoplabel { font-size: 12px; color: var(--ink); }
     .hop .hopsub   { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim);
                      min-height: 14px; }
-    .wire {
-      flex: 1; position: relative; height: 13px; min-width: 34px;
-      display: flex; align-items: center; justify-content: center;
-    }
+    .wire { flex: 1; position: relative; height: 13px; min-width: 34px;
+            display: flex; align-items: center; justify-content: center; }
     .wire::before {
       content: ""; position: absolute; left: 0; right: 0; top: 6px; height: 2px;
       background: linear-gradient(90deg, var(--from, var(--ink-faint)), var(--to, var(--ink-faint)));
@@ -151,13 +152,10 @@
 
     /* ---- rows (sessions, listeners) ------------------------------------ */
     .rows { display: flex; flex-direction: column; gap: 2px; }
-    .row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 7px 8px; border-radius: 6px; font-family: var(--mono); font-size: 12px;
-    }
+    .row { display: flex; align-items: center; gap: 10px;
+           padding: 7px 8px; border-radius: 6px; font-family: var(--mono); font-size: 12px; }
     .row:hover { background: var(--panel-raised); }
-    .row .rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint);
-                 flex: none; }
+    .row .rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); flex: none; }
     .row.up .rdot   { background: var(--up); }
     .row.down .rdot { background: var(--ink-faint); }
     .row .rid    { color: var(--link); min-width: 24px; }
@@ -172,20 +170,57 @@
     }
     .stop-btn {
       background: transparent; color: var(--ink-dim); border: 1px solid var(--line);
-      border-radius: 5px; padding: 2px 9px; cursor: pointer; font-size: 11px;
-      font-family: var(--sans);
+      border-radius: 5px; padding: 2px 9px; cursor: pointer; font-size: 11px; font-family: var(--sans);
     }
     .stop-btn:hover { color: var(--down); border-color: color-mix(in srgb, var(--down) 50%, transparent); }
-    .empty { color: var(--ink-faint); font-style: italic; padding: 6px 8px; font-size: 12px;
-             font-family: var(--sans); }
+    .empty { color: var(--ink-faint); font-style: italic; padding: 6px 8px; font-size: 12px; font-family: var(--sans); }
+
+    /* ---- launcher form ------------------------------------------------- */
+    .form-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label {
+      font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.09em;
+      color: var(--ink-faint); font-weight: 600;
+    }
+    select, input[type="text"] {
+      background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+      border-radius: 6px; padding: 6px 9px; font-family: var(--mono); font-size: 12px;
+      min-width: 118px;
+    }
+    select:focus, input:focus { border-color: var(--link); }
+    .launch-btn {
+      background: var(--link); color: #06232b; border: none; border-radius: 6px;
+      padding: 7px 15px; cursor: pointer; font-size: 12.5px; font-weight: 600;
+      font-family: var(--sans); align-self: flex-end;
+    }
+    .launch-btn:hover { background: color-mix(in srgb, var(--link) 88%, white); }
+    .launch-hint { font-size: 11px; color: var(--ink-faint); margin-top: 10px; }
+
+    /* ---- info panel ---------------------------------------------------- */
+    .info-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+    .info-btn {
+      background: var(--panel-raised); color: var(--ink); border: 1px solid var(--line);
+      border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-family: var(--sans);
+    }
+    .info-btn:hover { border-color: var(--ink-faint); }
+    .info-btn .anl {
+      font-family: var(--mono); font-size: 9px; color: var(--warn); margin-left: 5px;
+      vertical-align: 1px;
+    }
+    .info-out {
+      margin-top: 12px; background: #0f131b; border: 1px solid var(--line-soft);
+      border-radius: 6px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px;
+      color: var(--ink-dim); white-space: pre-wrap; max-height: 220px; overflow: auto;
+      min-height: 40px;
+    }
+    .info-out:empty::before { content: "run a command to see output"; color: var(--ink-faint);
+                              font-style: italic; }
 
     /* ---- terminal ------------------------------------------------------ */
     .termwrap { flex: 1; display: flex; flex-direction: column; min-height: 220px;
                 border-top: 1px solid var(--line); }
-    .term-head {
-      display: flex; align-items: center; gap: 10px;
-      padding: 7px 14px; background: var(--panel); font-size: 12px;
-    }
+    .term-head { display: flex; align-items: center; gap: 10px;
+                 padding: 7px 14px; background: var(--panel); font-size: 12px; }
     .term-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-faint); }
     .term-head .dot.up { background: var(--up); }
     .term-head .dot.down { background: var(--down); }
@@ -241,6 +276,49 @@
         <div class="eyebrow">Loopback listeners</div>
         <div class="rows" id="listeners"></div>
       </div>
+
+      <div class="card launcher">
+        <div class="eyebrow">Run in terminal</div>
+        <div class="form-row">
+          <div class="field">
+            <label for="lVerb">command</label>
+            <select id="lVerb">
+              <option value="client">client (all-in-one)</option>
+              <option value="connect">connect (channel only)</option>
+              <option value="tunnel">tunnel (forward only)</option>
+              <option value="configure">configure (write config)</option>
+              <option value="run">run (launch tool)</option>
+              <option value="setup">setup (pick tool)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="lTool">cli tool</label>
+            <select id="lTool">
+              <option value="">— default —</option>
+              <option value="opencode">opencode</option>
+              <option value="claudecode">claudecode</option>
+              <option value="aider">aider</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="lScope">scope</label>
+            <input id="lScope" type="text" placeholder="(optional)" autocomplete="off" />
+          </div>
+          <button id="launchBtn" class="launch-btn">Run in terminal</button>
+        </div>
+        <div class="launch-hint">Runs in the terminal below. If the terminal already holds a live
+          channel, you'll be asked before replacing it.</div>
+      </div>
+
+      <div class="card info">
+        <div class="eyebrow">Info</div>
+        <div class="info-btns">
+          <button class="info-btn" id="infoTools">list-tools</button>
+          <button class="info-btn" id="infoStatus">status<span class="anl">ANL</span></button>
+          <button class="info-btn" id="infoModels">list-models<span class="anl">ANL</span></button>
+        </div>
+        <pre class="info-out" id="infoOut"></pre>
+      </div>
     </section>
 
     <section class="termwrap">
@@ -258,8 +336,10 @@
   <script src="/static/xterm.js"></script>
   <script src="/static/xterm-addon-fit.js"></script>
   <script>
+    const el = (id) => document.getElementById(id);
+
     // ===================================================================
-    // Terminal + WebSocket bridge (unchanged behavior from P0/P1)
+    // Terminal + WebSocket bridge (reconnectable for the launcher)
     // ===================================================================
     const term = new Terminal({
       cursorBlink: true,
@@ -269,96 +349,104 @@
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
-    term.open(document.getElementById('term'));
+    term.open(el('term'));
     fit.fit();
 
-    const conn = document.getElementById('conn');
-    const statusEl = document.getElementById('status');
+    const conn = el('conn');
+    const statusEl = el('status');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.binaryType = 'arraybuffer';
-
     const CTRL = '\x00CTRL';
     const EXIT = '\x00EXIT';
     const dec = new TextDecoder();
 
+    let ws = null;  // reassigned by openTerminal(); handlers read the live value
+
     function sendResize() {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      ws.send(CTRL + JSON.stringify({ op: 'resize', rows: term.rows, cols: term.cols }));
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(CTRL + JSON.stringify({ op: 'resize', rows: term.rows, cols: term.cols }));
+      }
     }
 
-    ws.onopen = () => {
-      conn.classList.add('up');
-      statusEl.textContent = 'connected';
-      requestAnimationFrame(() => { fit.fit(); sendResize(); term.focus(); });
-      refreshStatus();  // pull the dashboard as soon as the child is running
-    };
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        if (ev.data.startsWith(EXIT)) {
-          let info = {};
-          try { info = JSON.parse(ev.data.slice(EXIT.length)); } catch (e) {}
-          term.write(`\r\n\x1b[33m[process exited: status=${info.exitstatus}]\x1b[0m\r\n`);
-          statusEl.textContent = `exited (status=${info.exitstatus})`;
-          refreshStatus();
-          return;
-        }
-        term.write(ev.data);
-      } else {
-        term.write(dec.decode(new Uint8Array(ev.data)));
+    function openTerminal(query, label) {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        try { ws.close(); } catch (e) {}
       }
-    };
-    ws.onclose = () => {
-      conn.classList.remove('up'); conn.classList.add('down');
-      statusEl.textContent = 'disconnected';
-    };
-    ws.onerror = () => { statusEl.textContent = 'ws error'; };
+      term.reset();
+      statusEl.textContent = 'connecting…';
+      const sock = new WebSocket(`${proto}://${location.host}/ws` + (query ? '?' + query : ''));
+      sock.binaryType = 'arraybuffer';
+      sock.onopen = () => {
+        conn.classList.remove('down'); conn.classList.add('up');
+        statusEl.textContent = 'connected' + (label ? ' · ' + label : '');
+        requestAnimationFrame(() => { fit.fit(); sendResize(); term.focus(); });
+        refreshStatus();
+      };
+      sock.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+          if (ev.data.startsWith(EXIT)) {
+            let info = {};
+            try { info = JSON.parse(ev.data.slice(EXIT.length)); } catch (e) {}
+            term.write(`\r\n\x1b[33m[process exited: status=${info.exitstatus}]\x1b[0m\r\n`);
+            statusEl.textContent = `exited (status=${info.exitstatus})`;
+            refreshStatus();
+            return;
+          }
+          term.write(ev.data);
+        } else {
+          term.write(dec.decode(new Uint8Array(ev.data)));
+        }
+      };
+      sock.onclose = () => {
+        if (sock !== ws) return;  // an intentional replacement; ignore
+        conn.classList.remove('up'); conn.classList.add('down');
+        statusEl.textContent = 'disconnected';
+      };
+      sock.onerror = () => { statusEl.textContent = 'ws error'; };
+      ws = sock;
+    }
 
-    term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+    term.onData((data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); });
     window.addEventListener('resize', () => { fit.fit(); sendResize(); });
     term.onResize(() => sendResize());
-    document.getElementById('sigint').addEventListener('click', () => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' }));
+    el('sigint').addEventListener('click', () => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' }));
       term.focus();
     });
 
     // ===================================================================
-    // Dashboard (P2): local status auto-refresh + on-demand health
+    // Dashboard: local status auto-refresh + on-demand health
     // ===================================================================
-    const el = (id) => document.getElementById(id);
     let cachedPort = null;
+    let tunnelUp = false;
+    let lastSessions = [];
 
     function fmtUptime(s) {
       s = Math.floor(s);
       if (s < 60) return s + 's';
       const m = Math.floor(s / 60), r = s % 60;
       if (m < 60) return m + 'm' + (r ? ' ' + r + 's' : '');
-      const h = Math.floor(m / 60);
-      return h + 'h ' + (m % 60) + 'm';
+      return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
     }
 
     async function refreshStatus() {
       let data;
-      try {
-        const r = await fetch('/api/status', { cache: 'no-store' });
-        data = await r.json();
-      } catch (e) { return; }
+      try { data = await (await fetch('/api/status', { cache: 'no-store' })).json(); }
+      catch (e) { return; }
 
-      // versions
       const p = data.package || {};
       el('meta').innerHTML =
         `pkg <b>${p.package_version || '?'}</b> · engine <b>${p.engine_version || '?'}</b>` +
         ` <span style="opacity:.6">${p.engine_sha256_short || ''}</span>`;
 
-      // channel: cached identity + tunnel liveness (a loopback listener on the port)
       const st = data.cached || {};
       cachedPort = st.port || null;
       const listeners = data.listeners || [];
-      const tunnelUp = cachedPort && listeners.some((l) => l.port === cachedPort);
+      tunnelUp = !!(cachedPort && listeners.some((l) => l.port === cachedPort));
+      lastSessions = data.sessions || [];
 
       el('portLabel').textContent = cachedPort ? (':' + cachedPort) : ':—';
       setHop('hopNode', tunnelUp ? 'up' : 'unknown');
-      el('nodeSub').textContent = st.node ? shortNode(st.node) : '—';
+      el('nodeSub').textContent = st.node ? st.node.split('.')[0] : '—';
       setWire('wireTunnel', 'up', tunnelUp ? 'up' : 'faint');
       setWire('wireProxy', tunnelUp ? 'up' : 'faint', 'faint');
 
@@ -371,22 +459,14 @@
       el('checkHealth').disabled = !tunnelUp;
       if (!tunnelUp) { setHop('hopProxy', 'unknown'); el('proxySub').textContent = 'no tunnel'; }
 
-      renderSessions(data.sessions || []);
+      renderSessions(lastSessions);
       renderListeners(listeners);
     }
 
-    function shortNode(n) { return n.split('.')[0]; }
-
-    function setHop(id, cls) {
-      const h = el(id);
-      h.classList.remove('up', 'down', 'unknown');
-      h.classList.add(cls);
-    }
+    function setHop(id, cls) { const h = el(id); h.classList.remove('up', 'down', 'unknown'); h.classList.add(cls); }
     function setWire(id, from, to) {
       const c = (k) => k === 'up' ? 'var(--up)' : (k === 'down' ? 'var(--down)' : 'var(--ink-faint)');
-      const w = el(id);
-      w.style.setProperty('--from', c(from));
-      w.style.setProperty('--to', c(to));
+      const w = el(id); w.style.setProperty('--from', c(from)); w.style.setProperty('--to', c(to));
     }
 
     function renderSessions(sessions) {
@@ -399,12 +479,9 @@
         row.className = 'row ' + (s.alive ? 'up' : 'down');
         const state = s.alive ? ('up ' + fmtUptime(s.uptime_s)) : `exited (${s.exitstatus})`;
         row.innerHTML =
-          `<span class="rdot"></span>` +
-          `<span class="rid">${s.id}</span>` +
-          `<span class="rverb">${s.verb}</span>` +
-          `<span class="rmuted">pid ${s.pid}</span>` +
-          `<span class="rmuted">${state}</span>` +
-          `<span class="rgrow"></span>` +
+          `<span class="rdot"></span><span class="rid">${s.id}</span>` +
+          `<span class="rverb">${s.verb}</span><span class="rmuted">pid ${s.pid}</span>` +
+          `<span class="rmuted">${state}</span><span class="rgrow"></span>` +
           (s.owns_channel ? `<span class="own" title="holds the SSH channel">channel</span>` : '');
         if (s.alive) {
           const b = document.createElement('button');
@@ -421,15 +498,13 @@
       if (!listeners.length) { box.innerHTML = '<div class="empty">no loopback listeners</div>'; return; }
       box.innerHTML = '';
       for (const l of listeners) {
-        const row = document.createElement('div');
-        row.className = 'row up';
         const tag = l.port === cachedPort ? ' <span class="rmuted">(tunnel)</span>'
                   : (l.port === 8799 ? ' <span class="rmuted">(web ui)</span>' : '');
+        const row = document.createElement('div');
+        row.className = 'row up';
         row.innerHTML =
-          `<span class="rdot"></span>` +
-          `<span class="rid">:${l.port}</span>` +
-          `<span class="rverb">${l.command}</span>` +
-          `<span class="rmuted">pid ${l.pid}</span>${tag}`;
+          `<span class="rdot"></span><span class="rid">:${l.port}</span>` +
+          `<span class="rverb">${l.command}</span><span class="rmuted">pid ${l.pid}</span>${tag}`;
         box.appendChild(row);
       }
     }
@@ -437,30 +512,21 @@
     // On-demand only: this GET traverses the tunnel to the node. Never auto-run.
     el('checkHealth').addEventListener('click', async () => {
       if (!cachedPort) return;
-      const note = el('healthNote');
-      note.classList.remove('err');
+      const note = el('healthNote'); note.classList.remove('err');
       el('checkHealth').disabled = true;
-      el('proxySub').textContent = 'checking…';
-      note.textContent = 'contacting argo-proxy…';
+      el('proxySub').textContent = 'checking…'; note.textContent = 'contacting argo-proxy…';
       try {
-        const r = await fetch('/api/health?port=' + cachedPort, { cache: 'no-store' });
-        const h = await r.json();
+        const h = await (await fetch('/api/health?port=' + cachedPort, { cache: 'no-store' })).json();
         if (h.up) {
-          setHop('hopProxy', 'up');
-          setWire('wireProxy', 'up', 'up');
+          setHop('hopProxy', 'up'); setWire('wireProxy', 'up', 'up');
           el('proxySub').textContent = h.latency_ms + ' ms';
           note.textContent = `healthy · ${h.status || 'ok'}`;
         } else {
-          setHop('hopProxy', 'down');
-          el('proxySub').textContent = 'no answer';
-          note.textContent = 'no /health response through the tunnel';
-          note.classList.add('err');
+          setHop('hopProxy', 'down'); el('proxySub').textContent = 'no answer';
+          note.textContent = 'no /health response through the tunnel'; note.classList.add('err');
         }
-      } catch (e) {
-        note.textContent = 'health check failed'; note.classList.add('err');
-      } finally {
-        el('checkHealth').disabled = false;
-      }
+      } catch (e) { note.textContent = 'health check failed'; note.classList.add('err'); }
+      finally { el('checkHealth').disabled = false; }
     });
 
     async function stopSession(id) {
@@ -473,6 +539,48 @@
       refreshStatus();
     }
 
+    // ===================================================================
+    // Launcher: run a chosen verb in the terminal (Lane 2)
+    // ===================================================================
+    el('launchBtn').addEventListener('click', () => {
+      const verb = el('lVerb').value;
+      const tool = el('lTool').value;
+      const scope = el('lScope').value.trim();
+      const params = new URLSearchParams({ verb });
+      if (tool) params.set('cli_tool', tool);
+      if (scope) params.set('scope', scope);
+
+      // Channel-owner guard: replacing the terminal closes its session; if that
+      // session holds a live tunnel, closing it tears the channel down.
+      const owner = lastSessions.find((s) => s.alive && s.owns_channel);
+      if (owner && tunnelUp) {
+        const ok = confirm(
+          `The terminal is holding the SSH channel on :${cachedPort} (${owner.verb}).\n` +
+          `Running ${verb} replaces it and tears the tunnel down.\n\nContinue?`
+        );
+        if (!ok) return;
+      }
+      const label = verb + (tool ? ' · ' + tool : '');
+      openTerminal(params.toString(), label);
+    });
+
+    // ===================================================================
+    // Info: run returning verbs captured (Lane 1)
+    // ===================================================================
+    async function runInfo(verb, anl) {
+      if (anl && !confirm(`'${verb}' reaches ANL through the tunnel.\nRun it now?`)) return;
+      const out = el('infoOut');
+      out.textContent = `running ${verb}…`;
+      try {
+        const d = await (await fetch('/api/run/' + verb, { method: 'POST' })).json();
+        if (d.error) { out.textContent = 'error: ' + d.error; return; }
+        out.textContent = (d.stdout || '') + (d.stderr ? '\n' + d.stderr : '') + `\n[exit ${d.returncode}]`;
+      } catch (e) { out.textContent = 'request failed'; }
+    }
+    el('infoTools').addEventListener('click', () => runInfo('list-tools', false));
+    el('infoStatus').addEventListener('click', () => runInfo('status', true));
+    el('infoModels').addEventListener('click', () => runInfo('list-models', true));
+
     // Dashboard toggle.
     el('toggleDash').addEventListener('click', () => {
       const d = el('dash');
@@ -484,8 +592,11 @@
     });
 
     // Auto-refresh LOCAL status only (no health). Pause when the tab is hidden.
-    let timer = setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
+    setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
+
+    // Boot: open the default terminal session + first status pull.
+    openTerminal('', '');
     refreshStatus();
   </script>
 </body>
