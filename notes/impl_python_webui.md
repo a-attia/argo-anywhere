@@ -47,7 +47,7 @@ the single-file rule (D-001) are recorded as
 | **P1** | Gate: can the whole `connect` flow (incl. Duo) be driven from a browser terminal over a WebSocket-bridged PTY? | **PASS** — incl. a live cold-Duo observation |
 | **P0** | Package skeleton + verbatim engine + two-lane driver + web layer + CLI dispatch | **CODE COMPLETE** — 42 tests pass (see `tests/`) |
 | **P2** | Dashboard + monitor: process registry, `/health` polling, a "show all tunnels" view (new capability; D-006 has none today) | **CODE COMPLETE (2026-07-10)** — status/health core (`status.py`, `argo-anywhere info`, `GET /api/status`) + session registry (`web/registry.py`) + dashboard endpoints (`/api/sessions`, on-demand `/api/health`, guarded `POST /api/sessions/{id}/stop`) + the dashboard UI (channel signal-path + sessions + listeners). 65 tests pass. Residual: one at-the-keyboard `/api/health` observation against a live tunnel (never auto-polled; user-action only) |
-| **P3** | Configure/run in the UI: conflict-escalation to the PTY lane; run-client-in-terminal; info views (list-models/list-tools/status) | **CODE COMPLETE (2026-07-10, single-terminal model)** — info views (`POST /api/run/{verb}`), parameterized launcher (`/ws?verb=…&cli_tool=…&scope=…`), channel-owner replace-guard. Conflict-escalation is inherent: `configure`/`run` are Lane-2 so their prompts run in the PTY. **Deferred to Q12**: concurrent side-terminals (run `configure`/`run` alongside a held `connect`) — needs the Lane-2 concurrency decision. 85 tests pass |
+| **P3** | Configure/run in the UI: conflict-escalation to the PTY lane; run-client-in-terminal; info views (list-models/list-tools/status) | **CODE COMPLETE (2026-07-10, single-terminal model)** — info views (`POST /api/run/{verb}`), parameterized embedded launcher (`/ws?verb=…&cli_tool=…&scope=…`) with channel-owner replace-guard, **plus native new-window launch** (`external_terminal.py` + `/api/launch-external` + `/api/terminals`; user-picked terminal, OS default). Conflict-escalation is inherent: `configure`/`run` are Lane-2 so their prompts run in the PTY. Concurrent multi-session now served by new native windows; in-UI PtySession concurrency remains Q12. 103 tests pass |
 | **P4** | Packaging polish: `pywebview` native window, `docs/UPGRADING.md` hard-cutover section, the D-028 clean-break content rename, PyPI publish | pending |
 | **P5** | Optional/upstream-able: add engine flags for the 3 un-pre-answerable prompts so they run headless in Lane 1 | pending |
 
@@ -200,26 +200,40 @@ P3 landed on 2026-07-10 (single-terminal model):
   (`verb` in `KNOWN_VERBS`, plus `cli_tool` / `scope` / `port` through
   `build_launch_argv`, a strict allowlist builder — no free-form passthrough).
   No params -> the server's configured default (unchanged P0/P1 behavior).
-- **Dashboard** (`web/static/index.html`): a "Run in terminal" launcher
-  (command + cli-tool + scope) that reconnects the terminal to the chosen verb,
-  with a **channel-owner confirm** before replacing a live-tunnel session; and
-  an "Info" panel that renders `/api/run` output (ANL buttons badged + confirm).
-  The terminal was refactored to a reconnectable `openTerminal()` so the
-  launcher can switch what it runs.
+- **Native new-window launch** (`external_terminal.py` + `POST /api/launch-external`,
+  `GET /api/terminals`): open a chosen verb in an **independent native terminal
+  window the user owns** (not a server PtySession, not in the registry) running
+  the console script on a real TTY -- full-fidelity Duo / monitor / prompts.
+  Terminal choice is the user's: `available_terminals()` detects Terminal.app +
+  iTerm2 (macOS, via `osascript`) plus Alacritty / kitty / WezTerm / Ghostty and
+  the Linux emulators (by `PATH`); the default is the OS built-in (Terminal.app,
+  **not** iTerm), overridable per-launch or via `ARGO_ANYWHERE_TERMINAL`.
+- **Dashboard** (`web/static/index.html`): a "Launch" card with command +
+  cli-tool + scope + a new-window terminal picker, and two actions -- **Run in
+  embedded terminal** (reconnects the embedded PTY to the chosen verb, with a
+  **channel-owner confirm** before replacing a live-tunnel session) and **Open
+  in new window** (the native launch above). Plus an "Info" panel that renders
+  `/api/run` output (ANL buttons badged + confirm). The terminal was refactored
+  to a reconnectable `openTerminal()` so the embedded launcher can switch what
+  it runs.
 - **Conflict-escalation to the PTY lane** is inherent, not a separate feature:
   `configure`/`run`/`connect`/`tunnel` are Lane 2, so their three un-flaggable
   prompts (port-migrate / config-conflict / scope-conflict) run in the browser
   PTY where the user can answer them. Making them run *headless* in Lane 1 is
   the separate P5 work (engine flags for those prompts).
 - **Tests**: `tests/test_run_launch.py` (argv-builder allowlist, `/api/run`
-  validation, `list-tools` captured, `/ws?verb=help` launch, bad-spec
-  rejection). Suite: 85 pass, no ANL/SSH/network.
+  validation, `list-tools` captured, `/ws?verb=help` launch, bad-spec rejection)
+  + `tests/test_external_terminal.py` (command/AppleScript builders, OS dispatch
+  with fake spawns, terminal detection + default, endpoints with the spawn
+  monkeypatched -- no window ever opens). Suite: 103 pass, no ANL/SSH/network.
 
-**Deferred (Q12).** The launcher uses one terminal: launching a verb replaces
-the current session. Running `configure`/`run` in a *separate* terminal
-*alongside* a held `connect` (so you keep the channel while configuring) needs
-the Lane-2 concurrency model still open as PLAN.md Q12 (multiple concurrent
-PtySessions + where `manifest.json` lives). Not guessed here.
+**On concurrency (Q12).** The *embedded* terminal is still single-session
+(launching replaces it). But the practical need -- run `configure`/`run` (or a
+second `connect`) *alongside* a held session -- is now served by **Open in new
+window**: each native window is an independent process the user owns, exactly
+matching how they already juggle many terminals. The narrower open question
+(multiple concurrent *PtySessions inside the web UI*, and where `manifest.json`
+lives) remains PLAN.md Q12; it is no longer blocking real multi-session use.
 
 ## Remaining work (P4–P5)
 

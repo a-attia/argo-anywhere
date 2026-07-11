@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from contextlib import ExitStack, asynccontextmanager
 from importlib.resources import as_file, files
 from typing import Sequence
@@ -242,6 +243,39 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             "stderr": result.stderr,
             "reaches_anl": spec["anl"],
         })
+
+    @app.get("/api/terminals")
+    def api_terminals() -> JSONResponse:
+        # Native terminals detected on this machine + the default id, so the
+        # launcher can offer a picker instead of assuming one.
+        from ..external_terminal import available_terminals, default_terminal
+
+        return JSONResponse({
+            "terminals": available_terminals(),
+            "default": default_terminal(),
+        })
+
+    @app.post("/api/launch-external")
+    def api_launch_external(
+        verb: str,
+        cli_tool: str | None = None,
+        scope: str | None = None,
+        port: int | None = None,
+        terminal: str | None = None,
+    ) -> JSONResponse:
+        # Open the chosen verb in a NEW native terminal window the user owns
+        # (independent of the web server; not tracked in the registry). The
+        # window runs the console script on a real TTY -- full-fidelity Duo /
+        # monitor / prompts.
+        from ..external_terminal import console_command, open_external_terminal
+
+        try:
+            engine_argv = build_launch_argv(verb, cli_tool=cli_tool, scope=scope, port=port)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        result = open_external_terminal(console_command() + engine_argv, terminal=terminal)
+        return JSONResponse(result, status_code=200 if result.get("ok") else 502)
 
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 

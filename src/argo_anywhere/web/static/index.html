@@ -191,10 +191,20 @@
     .launch-btn {
       background: var(--link); color: #06232b; border: none; border-radius: 6px;
       padding: 7px 15px; cursor: pointer; font-size: 12.5px; font-weight: 600;
-      font-family: var(--sans); align-self: flex-end;
+      font-family: var(--sans);
     }
-    .launch-btn:hover { background: color-mix(in srgb, var(--link) 88%, white); }
+    .launch-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 88%, white); }
+    .launch-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .launch-btn.secondary {
+      background: var(--link-soft); color: var(--link);
+      border: 1px solid color-mix(in srgb, var(--link) 35%, transparent);
+    }
+    .launch-btn.secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 22%, transparent); }
+    .launch-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
     .launch-hint { font-size: 11px; color: var(--ink-faint); margin-top: 10px; }
+    .launch-note { font-size: 11.5px; color: var(--ink-dim); }
+    .launch-note.err { color: var(--down); }
+    .launch-note.ok { color: var(--up); }
 
     /* ---- info panel ---------------------------------------------------- */
     .info-btns { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -278,7 +288,7 @@
       </div>
 
       <div class="card launcher">
-        <div class="eyebrow">Run in terminal</div>
+        <div class="eyebrow">Launch</div>
         <div class="form-row">
           <div class="field">
             <label for="lVerb">command</label>
@@ -304,10 +314,18 @@
             <label for="lScope">scope</label>
             <input id="lScope" type="text" placeholder="(optional)" autocomplete="off" />
           </div>
-          <button id="launchBtn" class="launch-btn">Run in terminal</button>
+          <div class="field">
+            <label for="lTerm">new window</label>
+            <select id="lTerm"><option value="">detecting…</option></select>
+          </div>
         </div>
-        <div class="launch-hint">Runs in the terminal below. If the terminal already holds a live
-          channel, you'll be asked before replacing it.</div>
+        <div class="launch-actions">
+          <button id="launchBtn" class="launch-btn secondary">Run in embedded terminal</button>
+          <button id="launchExtBtn" class="launch-btn">Open in new window</button>
+          <span class="launch-note" id="launchNote"></span>
+        </div>
+        <div class="launch-hint">Embedded runs in the terminal below (replacing it — you'll be asked
+          if it holds a live channel). New window opens an independent native terminal you own.</div>
       </div>
 
       <div class="card info">
@@ -540,18 +558,21 @@
     }
 
     // ===================================================================
-    // Launcher: run a chosen verb in the terminal (Lane 2)
+    // Launcher: run a chosen verb -- embedded terminal or a new native window
     // ===================================================================
-    el('launchBtn').addEventListener('click', () => {
+    function launchParams() {
       const verb = el('lVerb').value;
       const tool = el('lTool').value;
       const scope = el('lScope').value.trim();
       const params = new URLSearchParams({ verb });
       if (tool) params.set('cli_tool', tool);
       if (scope) params.set('scope', scope);
+      return { verb, tool, scope, params };
+    }
 
-      // Channel-owner guard: replacing the terminal closes its session; if that
-      // session holds a live tunnel, closing it tears the channel down.
+    // Embedded: run in the web UI's terminal (replaces the current session).
+    el('launchBtn').addEventListener('click', () => {
+      const { verb, tool, params } = launchParams();
       const owner = lastSessions.find((s) => s.alive && s.owns_channel);
       if (owner && tunnelUp) {
         const ok = confirm(
@@ -560,8 +581,56 @@
         );
         if (!ok) return;
       }
-      const label = verb + (tool ? ' · ' + tool : '');
-      openTerminal(params.toString(), label);
+      openTerminal(params.toString(), verb + (tool ? ' · ' + tool : ''));
+    });
+
+    // New window: open an independent native terminal the user owns. This does
+    // not touch the embedded terminal or the channel it may hold.
+    let terminalsAvailable = false;
+    async function loadTerminals() {
+      const sel = el('lTerm');
+      try {
+        const d = await (await fetch('/api/terminals', { cache: 'no-store' })).json();
+        sel.innerHTML = '';
+        (d.terminals || []).forEach((t) => {
+          const o = document.createElement('option');
+          o.value = t.id; o.textContent = t.label;
+          if (t.id === d.default) o.selected = true;
+          sel.appendChild(o);
+        });
+        terminalsAvailable = (d.terminals || []).length > 0;
+        if (!terminalsAvailable) {
+          sel.innerHTML = '<option value="">none found</option>';
+        }
+      } catch (e) {
+        sel.innerHTML = '<option value="">unavailable</option>';
+      }
+      el('launchExtBtn').disabled = !terminalsAvailable;
+    }
+
+    el('launchExtBtn').addEventListener('click', async () => {
+      const { verb, tool, params } = launchParams();
+      const term = el('lTerm').value;
+      if (term) params.set('terminal', term);
+      const note = el('launchNote');
+      note.className = 'launch-note';
+      note.textContent = 'opening…';
+      el('launchExtBtn').disabled = true;
+      try {
+        const r = await fetch('/api/launch-external?' + params.toString(), { method: 'POST' });
+        const d = await r.json();
+        if (d.ok) {
+          note.textContent = `opened ${verb}${tool ? ' · ' + tool : ''} in ${d.terminal}`;
+          note.classList.add('ok');
+        } else {
+          note.textContent = 'could not open: ' + (d.error || 'unknown');
+          note.classList.add('err');
+        }
+      } catch (e) {
+        note.textContent = 'request failed'; note.classList.add('err');
+      } finally {
+        el('launchExtBtn').disabled = !terminalsAvailable;
+      }
     });
 
     // ===================================================================
@@ -595,9 +664,10 @@
     setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
 
-    // Boot: open the default terminal session + first status pull.
+    // Boot: open the default terminal session + first status pull + terminals.
     openTerminal('', '');
     refreshStatus();
+    loadTerminals();
   </script>
 </body>
 </html>
