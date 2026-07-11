@@ -6522,6 +6522,17 @@ mode_server() {
   else launcher="nohup"
   fi
 
+  # Resolve the venv path for the launch commands below. This USED to be
+  # in scope because the install work lived inline in mode_server; when
+  # `ensure_argoproxy_installed` was extracted (D-022, v2.2.1 prep) the
+  # `local venv` moved with it, leaving the launch lines below referencing
+  # an out-of-scope `${venv}`. Under `set -u` that dies with "venv:
+  # unbound variable" right after the "Starting argo-proxy in screen
+  # session" log line -- the D-005 "main-mode function factored out"
+  # regression class. Recompute it here (same expression the installer
+  # uses) so the launch commands see a bound value.
+  local venv; venv="$(eval echo "$VENV_PATH")"
+
   # We reach this point only when nothing is listening on PROXY_PORT (the
   # earlier "is something already serving?" branch returned). If a screen
   # or tmux session by our name still exists, it's USUALLY empty (the
