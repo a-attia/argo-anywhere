@@ -282,13 +282,21 @@ ARGO_INSTALL_ENV="${ARGO_INSTALL_DIR}/env"
 # Install manifest (D-025 D-c; Lifecycle Phase A). Records, at FIRST touch
 # of each client config, whether the file pre-existed and where its
 # original backup lives, plus which tool binaries this script installed.
-# Read by the (future) `uninstall` subcommand to restore client configs
-# to their pre-argo-anywhere state correctly (delete files we created;
-# restore the true pre-argo backup for files we modified) and to remove
-# only the tool binaries we installed. Laptop-side only (never written on
-# a compute node). First-touch-wins: an existing entry is never
-# overwritten, so the earliest recorded provenance is the true original.
-ARGO_MANIFEST="${ARGO_INSTALL_DIR}/manifest.json"
+# Read by the `uninstall` subcommand to restore client configs to their
+# pre-argo-anywhere state correctly (delete files we created; restore the
+# true pre-argo backup for files we modified) and to remove only the tool
+# binaries we installed. Laptop-side only (never written on a compute
+# node). First-touch-wins: an existing entry is never overwritten, so the
+# earliest recorded provenance is the true original.
+#
+# D-030: the manifest now lives with the rest of the laptop state
+# (STATE_DIR) rather than under the canonical install dir, so it survives
+# package mode -- where ~/.argo_anywhere/ is never created (the package
+# owns the runtime; the engine's self-install stays dormant). ARGO_MANIFEST
+# is defined in the state-dir block below because it references STATE_DIR;
+# ARGO_MANIFEST_LEGACY is the pre-D-030 home, kept only so an existing
+# manifest is migrated once (_manifest_migrate_home).
+ARGO_MANIFEST_LEGACY="${ARGO_INSTALL_DIR}/manifest.json"
 ARGO_MANIFEST_SCHEMA=1
 
 # GitHub project coordinates for `update argo-anywhere`. PROJECT_REPO
@@ -362,6 +370,11 @@ NODE_CACHE="${STATE_DIR}/node"
 # state alongside user + node; per-tool client configs become downstream
 # renderings that receive the port from the cache. Closes M4.
 PORT_CACHE="${STATE_DIR}/port"
+# D-030: the install manifest lives with the rest of the laptop state (see
+# the manifest comment block in the install-dir section above). Defined
+# here because it references STATE_DIR; migrated once from
+# ARGO_MANIFEST_LEGACY by _manifest_migrate_home.
+ARGO_MANIFEST="${STATE_DIR}/manifest.json"
 
 # OpenCode config paths (read by us, written by setup_opencode_cli_tool +
 # update-models). Centralized constants so future renames touch one site.
@@ -1213,6 +1226,12 @@ maybe_bootstrap_canonical_install() {
   # Opt-out.
   [ "${ARGO_ANYWHERE_SKIP_BOOTSTRAP:-0}" = 1 ] && return 0
 
+  # D-030a: dormant under the Python package. The package (pipx/pip) owns the
+  # runtime; a canonical self-install would be a divergent second copy of the
+  # engine (the two-homes drift D-029 warns about). The engine still runs
+  # fine from wherever the package invoked it.
+  [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ] && return 0
+
   # No-op if already installed.
   if canonical_install_present; then
     return 0
@@ -1249,6 +1268,29 @@ maybe_bootstrap_canonical_install() {
   ok "  Wrappers: ${ARGO_INSTALL_WRAP_INSTALL}, ${ARGO_INSTALL_WRAP_UNINSTALL}"
   ok "  PATH helper written to ${ARGO_INSTALL_ENV}"
   _print_path_setup_hint
+}
+
+# _packaged_use_pipx_hint <action>: under the Python package (D-030a) the
+# engine's own install / self-update is dormant -- the package (pipx/pip) owns
+# the runtime, so a self-install would create a divergent second copy of the
+# engine (the two-homes drift D-029 warns about). Instead of doing the work,
+# tell the user the package-manager command. <action> is 'install' or 'update'.
+_packaged_use_pipx_hint() {
+  local action="${1:-install}"
+  case "$action" in
+    install)
+      warn "Running inside the argo-anywhere Python package; the script self-install is not used here."
+      log  "  The package owns the runtime -- no separate script install is needed."
+      log  "  Install or upgrade the tool with your Python installer, e.g.:"
+      log  "      pipx install argo-anywhere        # first time"
+      log  "      pipx upgrade argo-anywhere        # later upgrades"
+      ;;
+    *)
+      warn "Running inside the argo-anywhere Python package; 'update argo-anywhere' is managed by pipx/pip."
+      log  "  Upgrade the whole tool (the vendored engine travels with it) via:"
+      log  "      pipx upgrade argo-anywhere        # or: pip install -U argo-anywhere"
+      ;;
+  esac
 }
 
 # ============================================================================
@@ -2236,12 +2278,29 @@ yaml_scalar() {
 #                               "path": <str>, "method": <str>,
 #                               "recorded_at": <iso> } } }
 
+# _manifest_migrate_home: one-shot move of the manifest from its pre-D-030
+# home (ARGO_MANIFEST_LEGACY = ${ARGO_INSTALL_DIR}/manifest.json) to the
+# state dir (ARGO_MANIFEST). Idempotent + best-effort; runs before any
+# manifest read/write (via _manifest_available) so both the record and the
+# uninstall-restore paths see the migrated file. No-op when the legacy file
+# is absent, the new file already exists, or the two paths coincide.
+_manifest_migrate_home() {
+  [ -f "$ARGO_MANIFEST_LEGACY" ] || return 0
+  [ "$ARGO_MANIFEST_LEGACY" = "$ARGO_MANIFEST" ] && return 0
+  [ -f "$ARGO_MANIFEST" ] && return 0
+  mkdir -p "$(dirname "$ARGO_MANIFEST")" 2>/dev/null || return 0
+  mv -f "$ARGO_MANIFEST_LEGACY" "$ARGO_MANIFEST" 2>/dev/null || true
+  return 0
+}
+
 # _manifest_available: 0 if we can + should write the manifest (python3
 # present AND not on a compute node), 1 otherwise. Keeps the guards in one
-# place so callers stay one-liners.
+# place so callers stay one-liners. Migrates the manifest home (D-030)
+# before returning success so every read/write sees the current location.
 _manifest_available() {
   [ "$(on_anl_compute_node)" = "yes" ] && return 1
   command -v python3 >/dev/null 2>&1 || return 1
+  _manifest_migrate_home
   return 0
 }
 
@@ -8170,6 +8229,19 @@ _update_argoproxy_post_refresh() {
 update_argo_anywhere_component() {
   local check_only="${UPDATE_CHECK_ONLY:-0}"
 
+  # D-030a: the package (pipx/pip) owns the runtime; the engine's self-update
+  # is dormant here. Report/redirect instead of rewriting a second copy (and
+  # skip the GitHub-tag probe entirely, which is meaningless under the package).
+  if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
+    if [ "$check_only" = 1 ]; then
+      log "argo-anywhere: engine v${SCRIPT_VERSION}; release version managed by pipx/pip."
+      log "  Check for upgrades with:  pipx upgrade argo-anywhere"
+    else
+      _packaged_use_pipx_hint update
+    fi
+    return 0
+  fi
+
   log "Current script: argo_anywhere.sh v${SCRIPT_VERSION}"
 
   # Resolve upstream latest tag. Two-step probe:
@@ -8809,6 +8881,12 @@ EOF
 # Honors --dry-run (preview only). Beautified, scicomp-research-skills
 # style: show the plan, then act.
 mode_install() {
+  # D-030a: no self-install under the Python package; point the user at pipx.
+  if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
+    _packaged_use_pipx_hint install
+    return 0
+  fi
+
   local self_abs; self_abs="$(_resolve_self_path)"
   if [ -z "$self_abs" ] || [ ! -f "$self_abs" ]; then
     die "install: could not resolve the running script's path ($0)."
@@ -8916,7 +8994,7 @@ mode_uninstall() {
   # ---- Plan box ----------------------------------------------------------
   print_summary_box "argo_anywhere  --  uninstall plan" "$C_YLW" \
     "Mode              : $( [ "$dry" = 1 ] && echo 'DRY RUN (no changes)' || echo 'LIVE' )" \
-    "Tier 1 (always)   : canonical install (${ARGO_INSTALL_DIR}), state dir, tunnels/sockets" \
+    "Tier 1 (always)   : $( [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ] && echo 'state dir, tunnels/sockets  (canonical install: n/a in package mode)' || echo "canonical install (${ARGO_INSTALL_DIR}), state dir, tunnels/sockets" )" \
     "Tier 2 configs    : $( [ "$do_restore" = 1 ] && echo 'RESTORE to pre-argo state (--restore-configs)' || echo 'left as-is (pass --restore-configs)' )" \
     "Tier 3 binaries   : $( [ "$do_binaries" = 1 ] && echo 'REMOVE ones we installed (--remove-binaries)' || echo 'left installed (pass --remove-binaries)' )" \
     "Tier 4 remote     : $( [ "$do_remote" = 1 ] && echo 'tear down compute-node venv (--remote)' || echo 'skipped (pass --remote)' )" \
@@ -9036,18 +9114,23 @@ EOF
   if [ -d "$SSH_MUX_DIR" ]; then
     _uninstall_rm "$SSH_MUX_DIR"
   fi
-  # State dir (user/node/port cache + ssh-fail-lock).
+  # State dir (user/node/port cache + ssh-fail-lock + the install manifest,
+  # which lives here since D-030). Removed AFTER Tiers 2/3 read the manifest.
   if [ -d "$STATE_DIR" ]; then
     _uninstall_rm "$STATE_DIR"
   fi
 
-  # Canonical install LAST (self-removal). We may be running from inside
-  # it; remove the flat script + wrappers + env + manifest first, then the
-  # dir. Since rm -rf on the dir containing the running script is safe on
-  # POSIX (the inode persists until the process exits), a plain removal is
-  # fine here -- but we order it last so earlier tiers can still read the
-  # manifest.
-  _uninstall_rm "$ARGO_INSTALL_DIR"
+  # Canonical install LAST (self-removal). D-030a: under the Python package
+  # there is NO canonical install -- the bootstrap stays dormant and pipx/pip
+  # owns the runtime -- so skip it here. In engine mode we may be running from
+  # inside the dir; rm -rf on the dir holding the running script is safe on
+  # POSIX (the inode persists until the process exits), and we order it last
+  # so earlier tiers could still read the (pre-D-030) manifest.
+  if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
+    log "  Canonical install: skipped (package mode -- the runtime is owned by pipx/pip)."
+  else
+    _uninstall_rm "$ARGO_INSTALL_DIR"
+  fi
 
   log ""
   ok "Uninstall complete$( [ "$dry" = 1 ] && echo ' (dry-run; nothing changed)' )."

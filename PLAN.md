@@ -1714,7 +1714,8 @@ return 404, incl. the `argo_anywhere` / `argoanywhere` normalized variants).
    not a user-facing upgrade channel.
 2. **The engine self-update retires for the package era.** Running as
    package-data, `argo-anywhere update argo-anywhere` becomes a no-op that
-   points the user at `pipx`/`pip`. The other `update`-registry rows —
+   points the user at `pipx`/`pip` (mechanism: the `ARGO_ANYWHERE_PACKAGED`
+   passthrough marker, [D-030]). The other `update`-registry rows —
    `argoproxy` (server-side venv-pip), `opencode`, `claudecode` (laptop tools)
    — are **UNAFFECTED**: they remain independently-installed binaries the tool
    upgrades in place.
@@ -1727,6 +1728,49 @@ return 404, incl. the `argo_anywhere` / `argoanywhere` normalized variants).
 install/upgrade flow. `--print-script` (D-026) still re-emits the raw engine
 for inspect/fork but is explicitly **not** an install/upgrade channel. The
 still-queued CITATION.cff / Zenodo DOI aligns to the PyPI release + git tag.
+
+### D-030 — Unified lifecycle under the package; engine self-install dormant in package mode (2026-07-11)
+
+**Status**: accepted; **CODE COMPLETE on `feat/python-package-webui`
+(2026-07-11)** — unit-tested (13 tests) + sandbox-verified; live-test gate
+pending (with the D-028 rename). Depends on [D-026], [D-029]; qualifies
+[D-023], [D-025] in package mode. Full design + phasing in
+[`notes/impl_python_webui.md` → Lifecycle unification](notes/impl_python_webui.md#lifecycle-unification-d-030-proposed).
+Modeled on the sibling `scrollback` project's lifecycle design.
+
+**Context.** On the `feat/python-package-webui` branch two lifecycle systems
+coexist unaware of each other: `pipx` (D-029) and the engine's own
+bootstrap/self-install (D-023/D-025), which still fires on passthrough because
+`cli._run_engine_passthrough` sets no environment. A `pipx` user therefore
+silently gains a second, self-updating engine copy at `~/.argo_anywhere/`;
+`pipx uninstall` orphans it and `update argo-anywhere` drifts from the package
+version — the concrete form of the two-homes ambiguity D-026/D-029 flag.
+
+**Decision.**
+
+1. **D-030a** — a `ARGO_ANYWHERE_PACKAGED=1` marker set on every CLI→engine
+   passthrough makes the engine's bootstrap / self-install / `update
+   argo-anywhere` / `update --check` self-row dormant in package mode; the
+   engine-mode `--print-script` fork is untouched (one env var distinguishes
+   the modes).
+2. **D-030b** — a Python footprint ledger (mirroring scrollback's
+   `footprint()`) extends `argo-anywhere info` for visibility; removal stays
+   delegated to the engine `uninstall`, the ledger sweeping only package-only
+   residue.
+3. **D-030c** — the CLI intercepts `uninstall` (as it does `web`/`app`/`info`),
+   delegates the D-025 tiers inward with the marker set, then prints the
+   `pipx`/`pip` removal command; it never self-deletes.
+4. **D-030d** — the manifest (D-025) is kept; it is the config-provenance
+   restore scrollback doesn't need and argo can't do without.
+
+Folds into P4 alongside the D-028 rename (both edit the vendored engine, both
+want one live re-test). Depends on the Q12 manifest-home resolution (§11:
+state dir).
+
+**Consequences.** Closes the two-homes ambiguity concretely (D-029 said the
+self-update "becomes a no-op that points at pipx"; D-030a is the mechanism).
+Not a publish blocker — a first `v3.0.0` can document "remove with `pipx
+uninstall`; full config-restore + `~/.argo_anywhere` teardown lands in 3.0.x."
 
 ---
 
@@ -1935,9 +1979,12 @@ gates.
     Lane-2 prompt (config-conflict / scope-conflict, D-026) while `connect`'s
     monitor PTY is already streaming in another tab. Decide the arbitration:
     one PTY per browser session, a single shared session, or a queued
-    prompt-broker. Related: **manifest.json's home** once `~/.argo_anywhere/`
-    loses its install role (D-026 F1 note) — likely `~/.config/argo_anywhere/`
-    with the rest of the state.
+    prompt-broker. **Related sub-question — manifest.json's home — RESOLVED
+    2026-07-11 (D-030)**: with `~/.argo_anywhere/` losing its install role under
+    the package (D-026 F1 note), the manifest moves to
+    `~/.config/argo_anywhere/manifest.json` alongside the rest of the state
+    (re-point `ARGO_MANIFEST` + a one-time migration; one path under both
+    modes). The PTY-concurrency half above remains open.
 
 ---
 

@@ -14,14 +14,35 @@ shapes are provided:
 from __future__ import annotations
 
 import contextlib
+import os
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Mapping
 
 # The vendored filename is hyphenated (D-028); the repo-root source is still the
 # underscore name until the clean-break cutover.
 ENGINE_FILENAME = "argo-anywhere.sh"
 _ENGINE_RESOURCE = f"engine/{ENGINE_FILENAME}"
+
+# D-030a: environment marker set on EVERY engine invocation the package spawns
+# (CLI passthrough + web/PTY driver lanes). It tells the vendored engine it is
+# driven by the Python package, so the engine's own first-run bootstrap /
+# self-install / `update argo-anywhere` self-update stay dormant -- the package
+# (pipx/pip) owns the runtime (D-029). A raw `--print-script` fork runs `bash`
+# directly and never sets this, so a forked engine keeps full D-023/D-025
+# self-install behavior. One env var distinguishes the two modes.
+PACKAGED_MARKER = "ARGO_ANYWHERE_PACKAGED"
+
+
+def packaged_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return ``os.environ`` plus the D-030a package marker (+ optional overrides).
+
+    Use for any subprocess/PTY spawn of the vendored engine from the package.
+    """
+    env: dict[str, str] = {**os.environ, PACKAGED_MARKER: "1"}
+    if extra:
+        env.update(extra)
+    return env
 
 
 def engine_bytes() -> bytes:

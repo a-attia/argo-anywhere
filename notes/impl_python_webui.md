@@ -23,6 +23,7 @@ and built since.
 - [The two-lane driver contract](#the-two-lane-driver-contract)
 - [What is built (P2)](#what-is-built-p2)
 - [What is built (P3)](#what-is-built-p3)
+- [Lifecycle unification (D-030, proposed)](#lifecycle-unification-d-030-proposed)
 - [Remaining work (P4–P5)](#remaining-work-p4p5)
 - [Residuals and open questions](#residuals-and-open-questions)
 - [Operational lessons](#operational-lessons)
@@ -253,10 +254,243 @@ matching how they already juggle many terminals. The narrower open question
 (multiple concurrent *PtySessions inside the web UI*, and where `manifest.json`
 lives) remains PLAN.md Q12; it is no longer blocking real multi-session use.
 
+## Lifecycle unification (D-030, proposed)
+
+**Status**: **CODE COMPLETE on the branch (2026-07-11)**; unit-tested (13 new
+tests), sandbox-verified (no ANL); **live-test gate pending** (the engine edit
+wants one real re-test alongside the D-028 rename). Was written design-first and
+reviewed before coding, at the user's request. Models on the sibling
+`scrollback` project's lifecycle design (`../scrollback`:
+`src/scrollback/launcher_install.py` `footprint()` + `src/scrollback/cli.py`
+`cmd_uninstall` / `_detect_install_tool`). Recorded in PLAN.md as the `D-030`
+entry (§7) with the Q12 manifest-home resolution (§11).
+
+**What landed (all four steps + the Q12 prerequisite):**
+
+- **Manifest → state dir** (Q12): `ARGO_MANIFEST` re-pointed to
+  `${STATE_DIR}/manifest.json`; `ARGO_MANIFEST_LEGACY` + `_manifest_migrate_home`
+  do a one-shot, first-touch-wins-preserving migration (run from
+  `_manifest_available`, so both record + restore paths see it). Sandbox-verified
+  end-to-end.
+- **D-030a marker**: `packaged_env()` in `_engine.py` sets
+  `ARGO_ANYWHERE_PACKAGED=1` on all three package→engine spawn sites (CLI
+  passthrough + driver Lane 1 `run_engine` + Lane 2 `PtySession`). Engine honors
+  it: bootstrap dormant, `install` → pipx hint, `update argo-anywhere` → pipx
+  hint, `update --check` self-row → "managed by pipx" (no GitHub probe),
+  `uninstall` Tier-1 canonical-dir removal skipped. Engine-mode (`--print-script`
+  fork) untouched. Sandbox-verified for all five behaviors + a marker unit test.
+- **D-030b footprint** (`footprint.py`): `footprint(home=…)` ledger
+  (disposable/artifact tiers; canonical dir, state dir, SSH sockets, config
+  backups; never lists live agent data), extends `argo-anywhere info` (text +
+  `--json`). Visibility-first; removal delegated to the engine `uninstall`.
+- **D-030c package `uninstall` verb**: `cli.main` intercepts `uninstall` before
+  passthrough; delegates the D-025 tiers inward (marker set → canonical-dir
+  skip), then prints the `pipx`/`pip` removal command (`_package_removal_command`,
+  `sys.executable`-based) only on rc == 0 (no nudge on an aborted teardown).
+  Never self-deletes.
+
+New tests: `tests/test_packaged_marker.py` (5), `tests/test_footprint.py` (7),
+`tests/test_uninstall_verb.py` (6). Suite: **123 pass**, no ANL/SSH/network;
+engine copies byte-identical.
+
+The original design write-up follows (kept as the record of what was decided and
+why).
+
+### The problem: two lifecycle systems that don't know about each other
+
+On `main`, argo-anywhere owns its whole lifecycle through the engine:
+
+- **Install** — `argo_anywhere.sh install` + the first-run bootstrap
+  (`maybe_bootstrap_canonical_install`, fired from `mode_client`/`mode_setup`)
+  materialize a canonical rustup-style install at `~/.argo_anywhere/bin/`
+  (D-023), with a sourceable `env` and an install `manifest.json` (D-025).
+- **Update** — `update argo-anywhere` self-updates that copy from GitHub tags
+  (D-023).
+- **Uninstall** — `argo_anywhere.sh uninstall`: tiered teardown + manifest-driven
+  config restore (D-025).
+
+On this branch the package (D-029) adds a *second* install system —
+`pipx install argo-anywhere` — that is unaware of the first. Because the CLI
+passes `client`/`setup` straight through to the vendored engine
+(`cli._run_engine_passthrough`, which sets **no** environment), the engine's
+first-run bootstrap still fires. A pipx user therefore silently ends up with
+**both**:
+
+- the pipx venv + the `~/.local/bin/argo-anywhere` console-script shim, and
+- a `~/.argo_anywhere/bin/argo_anywhere.sh` — a *second, independently
+  self-updating* copy of the engine.
+
+Two concrete failures follow:
+
+1. `pipx uninstall argo-anywhere` removes the venv but **orphans**
+   `~/.argo_anywhere/` (+ manifest + config backups + the second engine copy).
+2. `update argo-anywhere` self-updates the `~/.argo_anywhere/bin/` copy from
+   GitHub tags, which **drifts** from the pip-installed version — defeating
+   D-029's "the package version is the single source of release identity."
+
+### The model borrowed from scrollback
+
+scrollback solved the same shape cleanly. Its spine:
+
+1. **The package manager owns the package.** `scrollback uninstall` removes only
+   files scrollback dropped on disk, then *prints* the removal command
+   (`pipx uninstall` vs `pip uninstall`, chosen from `sys.executable`); it never
+   tries to self-delete ("a process cannot reliably uninstall the package it is
+   executing from").
+2. **One footprint ledger.** A single `footprint()` enumerates every path
+   scrollback created, each tagged by tier; **both** `doctor` (visibility) and
+   `uninstall` (removal) consume it — what you see listed is exactly what gets
+   removed.
+3. **Tiers as data, not branches**: `disposable` (cache/index — rebuilt on
+   demand), `artifact` (things install created), `durable` (user data — kept
+   unless `--purge-archive`).
+4. **Never touch data it only reads** (the agent transcripts) — structurally
+   excluded from the footprint, not merely handled carefully.
+5. **Escalating confirmation** for irreversible loss (typing a literal phrase
+   even with `-y`).
+
+The one place argo is *ahead* of scrollback and must keep: scrollback only ever
+*creates* files, so "restore" = "delete"; argo *modifies* the user's client
+configs, so it needs the **manifest-driven restore** (D-025) to put back the true
+pre-argo original. That machinery has no scrollback analogue and stays.
+
+### Decisions (D-030)
+
+- **D-030a — the package owns the runtime; the engine's self-install goes
+  dormant in package mode.** The CLI marks every engine passthrough with a new
+  env signal `ARGO_ANYWHERE_PACKAGED=1` (set in `cli._run_engine_passthrough`).
+  The engine honors it:
+  - the first-run bootstrap is skipped — no `~/.argo_anywhere/bin/` is ever
+    created under the package (a superset of today's
+    `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`);
+  - `argo_anywhere.sh install` and the `argo-anywhere` **self-update component**
+    of `update` become "use pipx" hints. The *other* update components
+    (`argoproxy` / `opencode` / `claudecode`) are unaffected — they are not the
+    package;
+  - `update --check`'s `argo-anywhere` row reports **"managed by pipx"** instead
+    of installed-vs-GitHub-tag (the tag comparison is meaningless when pipx owns
+    the version);
+  - the engine's own `argo_anywhere.sh uninstall` still runs (reachable via
+    passthrough and delegated to by D-030c), but its **Tier-1 canonical-dir/`env`
+    removal becomes a no-op** (there is no canonical dir under the package); the
+    tunnel/socket teardown, config-restore (Tier 2), binary (Tier 3) and remote
+    (Tier 4) tiers are unaffected.
+  - **Bonus UX win**: suppressing the bootstrap also stops PATH gaining a
+    *second, differently-named* command — the package installs `argo-anywhere`
+    (hyphen) while the engine bootstrap would drop `argo_anywhere.sh`
+    (underscore) alongside it. One command under the package, not two.
+  - **Engine mode is unchanged.** A user who forks the raw `.sh` via
+    `--print-script` (the D-026/D-027 escape hatch) runs `bash` directly with no
+    marker, so D-023/D-025 behave exactly as on `main`. The two modes are
+    distinguished by one env var and nothing else. (A forked engine predates the
+    marker and never receives it — forks are engine-mode by definition; the
+    vendored engine is always version-locked to its package, so CLI↔engine skew
+    cannot arise within one install.)
+
+- **D-030b — a single footprint ledger for argo's own on-disk files
+  (ledger-first; removal delegated).** A new enumerator (Python, in the package —
+  the natural home now, mirroring scrollback's `footprint()`) tags every path
+  argo created. Its **primary role is visibility**: it extends the existing
+  `argo-anywhere info` command (not a new `doctor` verb — argo already chose
+  `info`) so a user can answer "what has argo put on my machine?" in one place,
+  scrollback-style. Its **removal role is thin and mostly delegated**: the engine
+  `uninstall` Tier-1 already sweeps the state dir + sockets (with the ownership
+  guard), so D-030c hands those to the engine and the ledger only *removes*
+  package-only residue the engine doesn't know about (e.g. a pywebview cache).
+  Tiers for argo:
+  - `disposable` — state dir (`~/.config/argo_anywhere/`, cached
+    user/node/port + the relocated `manifest.json`, see below), SSH mux sockets
+    (`~/.ssh/sockets/argo-anywhere-*`), any pywebview cache.
+  - `artifact` — the canonical `~/.argo_anywhere/` + `env` (**engine mode only**;
+    absent under the package), and the client-config `.bak.*` backups the
+    manifest points at, tagged **"restore source; consumed on uninstall"** (they
+    are the restore *source*, so they are not removed independently — an
+    uninstall consumes them via the config-restore, never strands one).
+  - argo has **no `durable` / user-owned tier**: unlike scrollback's vault, argo
+    owns no user data. The client configs are the *user's*, only
+    modified-and-restored, never argo's to delete.
+  - **Live-channel guard reused**: any socket/listener in the footprint is
+    classified through `local_tunnel_status` before removal (the same guard
+    `stop`/`uninstall` use), so teardown never kills a live or foreign channel.
+
+- **D-030c — a package-level `argo-anywhere uninstall` verb.** In package mode
+  this is THE front door. The CLI **intercepts** `uninstall` before the engine
+  passthrough (exactly as it already intercepts `web`/`app`/`info` in
+  `cli.main`) so the package verb — not the engine's own — is what a pipx user
+  hits. It then **delegates** the config-restore + binary + remote tiers inward
+  to the engine's existing `uninstall` (D-025, invoked with
+  `ARGO_ANYWHERE_PACKAGED=1`) rather than reimplementing them, removes any
+  package-only footprint residue (D-030b), and finally **prints** the exact
+  `pipx uninstall argo-anywhere` / `pip uninstall argo-anywhere` command (chosen
+  from `sys.executable`, scrollback-style). It never self-deletes the package.
+  `--dry-run` previews; the irreversible pieces keep D-025's confirmation
+  discipline. (`install` is *not* intercepted — under the package the engine's
+  own `install` simply prints a "use pipx" hint per D-030a; only `uninstall`
+  needs to do real cross-layer work.)
+
+- **D-030d — keep the manifest.** Config-provenance restore (D-025) is retained
+  verbatim; it is the piece scrollback doesn't need and argo can't do without.
+
+### Resolved dependency: manifest's home (Q12 → state dir)
+
+In package mode the bootstrap never creates `~/.argo_anywhere/`, so the manifest's
+current path `~/.argo_anywhere/manifest.json` may not exist. **Decided
+2026-07-11: the manifest moves to the state dir,
+`~/.config/argo_anywhere/manifest.json`** — always present under the package, and
+a single teardown root alongside the cached user/node/port state. This settles
+the open half of PLAN.md Q12. Implementation notes:
+
+- The engine's `ARGO_MANIFEST` constant (currently `${ARGO_INSTALL_DIR}/manifest.json`)
+  re-points at the state dir; the manifest read/write helpers
+  (`_manifest_stamp_installed_at`, `manifest_record_config`,
+  `manifest_record_binary`, and uninstall's `_manifest_configs_to_restore` /
+  `_manifest_binaries_we_installed`) follow the constant, so this is a one-line
+  path change plus a one-time migration.
+- **Migration**: an existing `~/.argo_anywhere/manifest.json` (D-025 flat layout)
+  is moved to the state dir on first touch, first-touch-wins preserved. Engine
+  mode still creates `~/.argo_anywhere/bin/`, but the manifest lives in the state
+  dir under **both** modes now (one code path, no mode-branch on the manifest).
+- Feeds PLAN.md Q12's "manifest.json's new home" directly; record the resolution
+  there when the PLAN.md D-030 stub lands.
+
+### Risks / review notes
+
+- **Marker propagation to remote `server`.** `ARGO_ANYWHERE_PACKAGED=1` is set on
+  the *local* passthrough; the engine's `remote_bootstrap` scp's a plain `.sh`
+  and re-execs it as `server` over SSH, which does not forward this env. Benign
+  either way (server mode never bootstraps/self-installs), but assert it in the
+  live re-test.
+- **Overlap resolved by delegation, not duplication.** D-030c wrapping the
+  engine `uninstall` (à la scrollback's `uninstall` reusing `footprint()`) is
+  what keeps the two uninstall paths from diverging.
+- **Shippable without it.** A first PyPI v3.0.0 can honestly document "remove
+  with `pipx uninstall`; full config-restore + `~/.argo_anywhere` teardown lands
+  in 3.0.x." D-030 tightens the story in a point release; it is **not** a
+  publish blocker.
+
+### Scope / phasing
+
+Proposed as **P4 lifecycle work** — landed with, or just after, the D-028
+content rename, since both edit the vendored engine and both want a single live
+re-test. Sequence:
+
+1. **Manifest → state dir** (Q12, decided): re-point `ARGO_MANIFEST` +
+   one-time migration. Prereq for D-030a's package-mode manifest access.
+2. **D-030a** — engine guard (`ARGO_ANYWHERE_PACKAGED`, set in
+   `cli._run_engine_passthrough`) + dormant self-install / self-update /
+   `update --check` row. Engine edit → live re-test alongside the rename.
+3. **D-030b** — footprint enumerator (package) extending `argo-anywhere info`.
+4. **D-030c** — CLI intercepts `uninstall`; delegates the D-025 tiers inward,
+   removes package-only residue, prints the pip/pipx command.
+
+Each step is independently testable without ANL infra, except the final live
+re-test of the engine edit.
+
 ## Remaining work (P4–P5)
 
 P4–P5 are conventional engineering on top of a proven base; see the phase table
-above for scope. The immediate next step is **P4 (packaging polish)** —
+above for scope. **Lifecycle unification (D-030, above)** is folded into P4. The
+immediate next step is **P4 (packaging polish)** —
 `pywebview` native window, the `docs/UPGRADING.md` hard-cutover section, the
 D-028 clean-break content rename, and PyPI publish. P5 (headless engine flags
 for the three prompts) is optional/upstream-able.

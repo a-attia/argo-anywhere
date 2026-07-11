@@ -39,7 +39,7 @@ import termios
 from dataclasses import dataclass
 from typing import Sequence
 
-from ._engine import engine_path
+from ._engine import engine_path, packaged_env
 
 # ---------------------------------------------------------------------------
 # Verb classification (mirrors the engine's main() dispatcher, argo-anywhere.sh)
@@ -139,12 +139,13 @@ def run_engine(
 
     ``stdin`` is closed (``DEVNULL``) so any prompt the engine would raise takes
     its non-TTY default rather than blocking. ``env`` is merged over the current
-    environment; ``None`` inherits it unchanged. Intended for verbs that return
-    (see :data:`SUBPROCESS_VERBS`); running an interactive verb here will hit a
-    silent default (that is why :func:`classify` routes those to Lane 2).
+    environment. Intended for verbs that return (see :data:`SUBPROCESS_VERBS`);
+    running an interactive verb here will hit a silent default (that is why
+    :func:`classify` routes those to Lane 2). The D-030a package marker is always
+    set (this is a package-spawned invocation).
     """
     argv = list(argv)
-    full_env = None if env is None else {**os.environ, **env}
+    full_env = packaged_env(env)
     with engine_path() as script:
         proc = subprocess.run(
             ["bash", str(script), *argv],
@@ -201,7 +202,8 @@ class PtySession:
         rows, cols = dimensions
         _set_winsize(master, rows, cols)
 
-        full_env = {**os.environ, **(env or {})}
+        # D-030a package marker on every package-spawned engine invocation.
+        full_env = packaged_env(env)
         full_env.setdefault("TERM", "xterm-256color")
 
         try:

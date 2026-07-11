@@ -28,7 +28,7 @@ import sys
 from typing import Sequence
 
 from . import __version__
-from ._engine import ENGINE_FILENAME, engine_bytes, engine_path
+from ._engine import ENGINE_FILENAME, engine_bytes, engine_path, packaged_env
 
 _PACKAGE_ADDENDUM = f"""
 argo-anywhere (Python package) additions beyond the engine's help:
@@ -40,8 +40,14 @@ argo-anywhere (Python package) additions beyond the engine's help:
   argo-anywhere web [--host H] [--port N] [--engine "VERB ARGS"]
                                  Serve the local web UI (needs the [web] extra:
                                  pip install 'argo-anywhere[web]').
-  argo-anywhere info [--json]    Local status: package + engine versions and
-                                 loopback listeners (no ANL contact).
+  argo-anywhere info [--json]    Local status: package + engine versions,
+                                 loopback listeners, and argo-anywhere's own
+                                 on-disk footprint (no ANL contact).
+  argo-anywhere uninstall [...]  Remove argo-anywhere's on-disk footprint
+                                 (config restore via the manifest; tiered per
+                                 --restore-configs/--remove-binaries/--remote;
+                                 --dry-run), then print the pip/pipx command to
+                                 remove the package itself.
   argo-anywhere --print-script   Emit the raw bash engine to stdout
                                  (e.g. > {ENGINE_FILENAME}); inspect-and-fork.
   argo-anywhere --version        Print the package version.
@@ -49,9 +55,14 @@ argo-anywhere (Python package) additions beyond the engine's help:
 
 
 def _run_engine_passthrough(args: Sequence[str]) -> int:
-    """Run the engine with the current process's stdio (full-fidelity)."""
+    """Run the engine with the current process's stdio (full-fidelity).
+
+    The ``ARGO_ANYWHERE_PACKAGED=1`` marker (D-030a) tells the engine it is
+    driven by the package, so its own bootstrap / self-install / self-update
+    stay dormant -- pipx/pip owns the runtime.
+    """
     with engine_path() as script:
-        proc = subprocess.run(["bash", str(script), *args])
+        proc = subprocess.run(["bash", str(script), *args], env=packaged_env())
     return proc.returncode
 
 
@@ -63,6 +74,7 @@ def _cmd_info(args: Sequence[str]) -> int:
     """
     import json
 
+    from .footprint import footprint, format_size
     from .status import cached_state, local_listeners, package_info
 
     info = package_info()
@@ -72,10 +84,17 @@ def _cmd_info(args: Sequence[str]) -> int:
     # would dump every loopback listener on the machine.)
     ports = sorted({p for p in (state["port"], 8799) if p})
     listeners = [ln.as_dict() for ln in local_listeners(ports)]
+    fp = footprint()  # D-030b: argo-anywhere's own on-disk footprint
 
     if "--json" in args:
         print(json.dumps(
-            {"package": info, "cached": state, "listeners": listeners}, indent=2
+            {
+                "package": info,
+                "cached": state,
+                "listeners": listeners,
+                "footprint": [e.as_dict() for e in fp],
+            },
+            indent=2,
         ))
         return 0
 
@@ -99,7 +118,52 @@ def _cmd_info(args: Sequence[str]) -> int:
     web = by_port.get(8799)
     if web:
         print(f"  web UI :8799  UP (pid {web['pid']}, {web['command']})")
+
+    # D-030b: on-disk footprint (argo-anywhere's own files; agent data is never
+    # here -- we only read-and-restore those).
+    print("on-disk footprint (argo-anywhere's own files; your agent data is never here):")
+    if not fp:
+        print("  (nothing created yet)")
+    else:
+        for e in fp:
+            print(f"  [{e.tier:10}] {format_size(e.size_bytes()):>9}  {e.path}")
+            print(f"               {e.description}")
+        print("  remove with 'argo-anywhere uninstall' (restores client configs + sweeps")
+        print("  these); then 'pipx uninstall argo-anywhere' to remove the package.")
     return 0
+
+
+def _package_removal_command() -> str:
+    """The command that removes the package itself, guessed from how it was
+    installed (scrollback-style). We never run it: a process can't reliably
+    uninstall the package it is executing from, and the right tool depends on
+    the install method."""
+    exe = (sys.executable or "").replace("\\", "/")
+    if "/pipx/" in exe or "/.local/pipx/" in exe:
+        return "pipx uninstall argo-anywhere"
+    return "pip uninstall argo-anywhere"
+
+
+def _cmd_uninstall(args: Sequence[str]) -> int:
+    """Package-level uninstall (D-030c): delegate the tiered teardown to the
+    engine, then print how to remove the package itself.
+
+    The engine's ``uninstall`` (D-025) owns the real work -- manifest-driven
+    config restore, binary removal, remote venv, and the live-channel ownership
+    guard. Because :func:`_run_engine_passthrough` sets
+    ``ARGO_ANYWHERE_PACKAGED=1`` (D-030a), the engine skips its canonical-dir
+    removal (there is none under the package) and sweeps the rest of the
+    footprint. We never self-delete the package; we print the pip/pipx command
+    instead (only when the teardown actually ran / previewed, i.e. rc == 0 --
+    an aborted uninstall shouldn't nudge the user to remove the package).
+    """
+    rc = _run_engine_passthrough(["uninstall", *args])
+    if rc == 0:
+        print(
+            f"\nto remove the package itself, run:\n    {_package_removal_command()}",
+            file=sys.stderr,
+        )
+    return rc
 
 
 def _cmd_web(args: Sequence[str]) -> int:
@@ -236,6 +300,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_web(argv[1:])
     if argv and argv[0] == "info":
         return _cmd_info(argv[1:])
+    if argv and argv[0] == "uninstall":
+        return _cmd_uninstall(argv[1:])
 
     # help/-h: show the engine's help, then the package addendum.
     if argv and argv[0] in ("help", "-h", "--help"):
