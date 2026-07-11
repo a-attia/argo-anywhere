@@ -208,14 +208,26 @@ P3 landed on 2026-07-10 (single-terminal model):
   iTerm2 (macOS, via `osascript`) plus Alacritty / kitty / WezTerm / Ghostty and
   the Linux emulators (by `PATH`); the default is the OS built-in (Terminal.app,
   **not** iTerm), overridable per-launch or via `ARGO_ANYWHERE_TERMINAL`.
-- **Dashboard** (`web/static/index.html`): a "Launch" card with command +
-  cli-tool + scope + a new-window terminal picker, and two actions -- **Run in
-  embedded terminal** (reconnects the embedded PTY to the chosen verb, with a
-  **channel-owner confirm** before replacing a live-tunnel session) and **Open
-  in new window** (the native launch above). Plus an "Info" panel that renders
-  `/api/run` output (ANL buttons badged + confirm). The terminal was refactored
-  to a reconnectable `openTerminal()` so the embedded launcher can switch what
-  it runs.
+- **Dashboard, redesigned monitor-first** (`web/static/index.html`, 2026-07-10
+  pm): the page is the monitor; the terminal is a hidden drawer that reveals on
+  a `Connect`/embedded launch or the header `Terminal` toggle, and **the page no
+  longer auto-runs `connect` on boot** (opening the UI shows the monitor;
+  connecting is explicit). Model locked with the user: the embedded terminal's
+  job is **establishing the connection** (Duo-in-browser), while **CLI tools run
+  in a new native window by default**. Concretely:
+  - **Channel card** is the hero + the live status (no raw `status` dump): a
+    `Connect` CTA when the tunnel is down (-> embedded terminal), and
+    signal-path + meta + `Check health` when up, naming who holds the channel
+    (this UI vs an external terminal).
+  - **`+ Launch tool`** header button opens a focused popover (command / cli-tool
+    / scope / **target**). Target defaults per command -- new native window for
+    `run`/`client`/`configure`/`setup`, embedded for `connect`/`tunnel` -- and
+    is overridable; the embedded path keeps the channel-owner replace-guard.
+  - Cards: **Tunnels** (loopback listeners), **Held by this UI** (registry
+    sessions; usually empty by design), **Tools & models** (tools as chips from
+    `list-tools`; models as a scrollable list loaded on demand via
+    `list-models`, ANL-gated). The reconnectable `openTerminal()` drives the
+    drawer.
 - **Conflict-escalation to the PTY lane** is inherent, not a separate feature:
   `configure`/`run`/`connect`/`tunnel` are Lane 2, so their three un-flaggable
   prompts (port-migrate / config-conflict / scope-conflict) run in the browser

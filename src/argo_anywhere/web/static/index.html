@@ -6,8 +6,6 @@
   <title>argo-anywhere</title>
   <link rel="stylesheet" href="/static/xterm.css" />
   <style>
-    /* ---- instrument-panel tokens (single committed dark look; a terminal
-           companion, so it sits with the xterm surface below) -------------- */
     :root {
       color-scheme: dark;
       --bg: #131720;
@@ -21,223 +19,138 @@
       --up: #46c76a;
       --warn: #e0a53a;
       --down: #f2685f;
-      --link: #4fd1cf;      /* channel path + interactive accent */
+      --link: #4fd1cf;
       --link-soft: rgba(79, 209, 207, 0.13);
       --radius: 8px;
       --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
       --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     }
-
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }  /* beat class display rules (e.g. .connect-cta) */
     html, body { margin: 0; height: 100%; }
-    body {
-      background: var(--bg); color: var(--ink);
-      font-family: var(--sans); font-size: 13px; line-height: 1.45;
-      -webkit-font-smoothing: antialiased;
-    }
+    body { background: var(--bg); color: var(--ink); font-family: var(--sans);
+           font-size: 13px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
     #app { display: flex; flex-direction: column; height: 100%; }
 
-    /* ---- top bar ------------------------------------------------------- */
-    .topbar {
-      display: flex; align-items: center; gap: 14px;
-      padding: 10px 16px; background: var(--panel);
-      border-bottom: 1px solid var(--line);
-    }
-    .brand { display: flex; align-items: center; gap: 9px; font-weight: 600;
-             letter-spacing: -0.01em; }
-    .brand .mark {
-      width: 9px; height: 9px; border-radius: 2px;
-      background: var(--link); box-shadow: 0 0 10px var(--link);
-    }
-    .brand .tag {
-      font-family: var(--mono); font-size: 10px; font-weight: 500;
-      color: var(--link); background: var(--link-soft);
-      padding: 1px 6px; border-radius: 4px; letter-spacing: 0.04em;
-    }
+    /* ---- top bar ---- */
+    .topbar { display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+              background: var(--panel); border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; letter-spacing: -0.01em; }
+    .brand .mark { width: 9px; height: 9px; border-radius: 2px; background: var(--link);
+                   box-shadow: 0 0 10px var(--link); }
+    .brand .tag { font-family: var(--mono); font-size: 10px; font-weight: 500; color: var(--link);
+                  background: var(--link-soft); padding: 1px 6px; border-radius: 4px; letter-spacing: 0.04em; }
     .meta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); }
     .meta b { color: var(--ink); font-weight: 500; }
     .spacer { margin-left: auto; }
-    .ghost-btn {
-      background: transparent; color: var(--ink-dim);
-      border: 1px solid var(--line); border-radius: 6px;
-      padding: 4px 11px; cursor: pointer; font-size: 12px; font-family: var(--sans);
-    }
-    .ghost-btn:hover { color: var(--ink); border-color: var(--ink-faint); }
+    .btn { border-radius: 6px; cursor: pointer; font-family: var(--sans); font-size: 12.5px; border: 1px solid transparent; }
+    .btn-primary { background: var(--link); color: #06232b; font-weight: 600; padding: 7px 14px; }
+    .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 88%, white); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-ghost { background: transparent; color: var(--ink-dim); border-color: var(--line); padding: 6px 12px; }
+    .btn-ghost:hover { color: var(--ink); border-color: var(--ink-faint); }
+    .btn-ghost.on { color: var(--link); border-color: color-mix(in srgb, var(--link) 45%, transparent); }
+    .btn-soft { background: var(--link-soft); color: var(--link);
+                border-color: color-mix(in srgb, var(--link) 35%, transparent); padding: 6px 13px; font-weight: 500; }
+    .btn-soft:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 22%, transparent); }
+    .btn-soft:disabled { opacity: 0.4; cursor: not-allowed; }
+    .tdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); display: inline-block; }
+    .tdot.on { background: var(--up); }
 
-    /* ---- dashboard grid ------------------------------------------------ */
-    .dash {
-      display: grid; gap: 12px; padding: 14px 16px;
-      grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-      grid-template-areas:
-        "channel  sessions"
-        "channel  listeners"
-        "launcher info";
-      background: var(--bg);
-    }
-    .dash[hidden] { display: none; }
-    @media (max-width: 820px) {
-      .dash { grid-template-columns: 1fr;
-              grid-template-areas: "channel" "sessions" "listeners" "launcher" "info"; }
-    }
-    .card {
-      background: var(--panel); border: 1px solid var(--line-soft);
-      border-radius: var(--radius); padding: 13px 15px 15px; min-width: 0;
-    }
-    .card.channel   { grid-area: channel; }
-    .card.sessions  { grid-area: sessions; }
-    .card.listeners { grid-area: listeners; }
-    .card.launcher  { grid-area: launcher; }
-    .card.info      { grid-area: info; }
+    /* ---- monitor ---- */
+    .monitor { flex: 1; overflow: auto; padding: 15px 16px; display: flex; flex-direction: column; gap: 12px; }
+    .grid3 { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    @media (max-width: 860px) { .grid3 { grid-template-columns: 1fr; } }
+    .card { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius);
+            padding: 13px 15px 15px; min-width: 0; }
+    .eyebrow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.13em; color: var(--ink-faint);
+               font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .eyebrow .count { font-family: var(--mono); letter-spacing: 0; text-transform: none; color: var(--ink-dim); font-weight: 500; }
+    .pill { margin-left: auto; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0; text-transform: none;
+            padding: 1px 8px; border-radius: 20px; border: 1px solid var(--line); color: var(--ink-dim); }
+    .pill.up { color: var(--up); border-color: color-mix(in srgb, var(--up) 40%, transparent); }
+    .pill.down { color: var(--ink-dim); }
 
-    .eyebrow {
-      font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.13em;
-      color: var(--ink-faint); font-weight: 600; margin-bottom: 12px;
-      display: flex; align-items: center; gap: 8px;
-    }
-    .eyebrow .count {
-      font-family: var(--mono); letter-spacing: 0; text-transform: none;
-      color: var(--ink-dim); font-weight: 500;
-    }
-
-    /* ---- SIGNATURE: the channel signal-path ---------------------------- */
+    /* ---- signal path (signature) ---- */
     .signalpath { display: flex; align-items: flex-start; gap: 0; padding: 6px 2px 14px; }
-    .hop { display: flex; flex-direction: column; align-items: center; gap: 7px;
-           text-align: center; min-width: 74px; --dot: var(--ink-faint); }
-    .hop .hopdot {
-      width: 13px; height: 13px; border-radius: 50%;
-      background: var(--dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--dot) 16%, transparent);
-    }
-    .hop.up      { --dot: var(--up); }
-    .hop.down    { --dot: var(--down); }
-    .hop.unknown { --dot: var(--ink-faint); }
+    .hop { display: flex; flex-direction: column; align-items: center; gap: 7px; text-align: center;
+           min-width: 74px; --dot: var(--ink-faint); }
+    .hop .hopdot { width: 13px; height: 13px; border-radius: 50%; background: var(--dot);
+                   box-shadow: 0 0 0 4px color-mix(in srgb, var(--dot) 16%, transparent); }
+    .hop.up { --dot: var(--up); } .hop.down { --dot: var(--down); } .hop.unknown { --dot: var(--ink-faint); }
     .hop.up .hopdot { animation: pulse 2.4s ease-in-out infinite; }
     .hop .hoplabel { font-size: 12px; color: var(--ink); }
-    .hop .hopsub   { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim);
-                     min-height: 14px; }
-    .wire { flex: 1; position: relative; height: 13px; min-width: 34px;
-            display: flex; align-items: center; justify-content: center; }
-    .wire::before {
-      content: ""; position: absolute; left: 0; right: 0; top: 6px; height: 2px;
-      background: linear-gradient(90deg, var(--from, var(--ink-faint)), var(--to, var(--ink-faint)));
-      opacity: 0.75;
-    }
-    .wire .wirelabel {
-      position: relative; font-family: var(--mono); font-size: 10.5px;
-      color: var(--link); background: var(--panel); padding: 0 6px;
-      border-radius: 4px; z-index: 1; white-space: nowrap;
-    }
-    @keyframes pulse {
-      0%, 100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--dot) 16%, transparent); }
-      50%      { box-shadow: 0 0 0 7px color-mix(in srgb, var(--dot) 5%, transparent); }
-    }
+    .hop .hopsub { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); min-height: 14px; }
+    .wire { flex: 1; position: relative; height: 13px; min-width: 34px; display: flex; align-items: center; justify-content: center; }
+    .wire::before { content: ""; position: absolute; left: 0; right: 0; top: 6px; height: 2px;
+                    background: linear-gradient(90deg, var(--from, var(--ink-faint)), var(--to, var(--ink-faint))); opacity: 0.75; }
+    .wire .wirelabel { position: relative; font-family: var(--mono); font-size: 10.5px; color: var(--link);
+                       background: var(--panel); padding: 0 6px; border-radius: 4px; z-index: 1; white-space: nowrap; }
+    @keyframes pulse { 0%,100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--dot) 16%, transparent); }
+                       50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--dot) 5%, transparent); } }
     @media (prefers-reduced-motion: reduce) { .hop.up .hopdot { animation: none; } }
 
-    .channel-meta {
-      font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim);
-      border-top: 1px solid var(--line-soft); padding-top: 11px;
-      display: flex; flex-wrap: wrap; gap: 4px 18px;
-    }
+    .channel-body { border-top: 1px solid var(--line-soft); padding-top: 12px; }
+    .channel-meta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); display: flex; flex-wrap: wrap; gap: 4px 18px; }
     .channel-meta b { color: var(--ink); font-weight: 500; }
     .channel-actions { display: flex; align-items: center; gap: 11px; margin-top: 12px; }
-    .act-btn {
-      background: var(--link-soft); color: var(--link);
-      border: 1px solid color-mix(in srgb, var(--link) 35%, transparent);
-      border-radius: 6px; padding: 5px 13px; cursor: pointer;
-      font-size: 12px; font-family: var(--sans); font-weight: 500;
-    }
-    .act-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 22%, transparent); }
-    .act-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .act-note { font-size: 11.5px; color: var(--ink-dim); }
-    .act-note.err { color: var(--down); }
+    .act-note.err { color: var(--down); } .act-note.ok { color: var(--up); }
+    .connect-cta { display: flex; align-items: center; gap: 12px; }
+    .connect-cta .sub { font-size: 12px; color: var(--ink-dim); }
 
-    /* ---- rows (sessions, listeners) ------------------------------------ */
+    /* ---- rows / chips ---- */
     .rows { display: flex; flex-direction: column; gap: 2px; }
-    .row { display: flex; align-items: center; gap: 10px;
-           padding: 7px 8px; border-radius: 6px; font-family: var(--mono); font-size: 12px; }
+    .row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 6px;
+           font-family: var(--mono); font-size: 12px; }
     .row:hover { background: var(--panel-raised); }
     .row .rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); flex: none; }
-    .row.up .rdot   { background: var(--up); }
-    .row.down .rdot { background: var(--ink-faint); }
-    .row .rid    { color: var(--link); min-width: 24px; }
-    .row .rverb  { color: var(--ink); min-width: 66px; }
-    .row .rmuted { color: var(--ink-dim); }
-    .row .rgrow  { flex: 1; }
-    .row .own {
-      font-family: var(--sans); font-size: 9.5px; text-transform: uppercase;
-      letter-spacing: 0.06em; color: var(--warn);
-      border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
-      border-radius: 4px; padding: 0 5px;
-    }
-    .stop-btn {
-      background: transparent; color: var(--ink-dim); border: 1px solid var(--line);
-      border-radius: 5px; padding: 2px 9px; cursor: pointer; font-size: 11px; font-family: var(--sans);
-    }
+    .row.up .rdot { background: var(--up); }
+    .row .rid { color: var(--link); min-width: 24px; } .row .rverb { color: var(--ink); min-width: 60px; }
+    .row .rmuted { color: var(--ink-dim); } .row .rgrow { flex: 1; }
+    .row .own { font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em;
+                color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); border-radius: 4px; padding: 0 5px; }
+    .stop-btn { background: transparent; color: var(--ink-dim); border: 1px solid var(--line); border-radius: 5px;
+                padding: 2px 9px; cursor: pointer; font-size: 11px; font-family: var(--sans); }
     .stop-btn:hover { color: var(--down); border-color: color-mix(in srgb, var(--down) 50%, transparent); }
     .empty { color: var(--ink-faint); font-style: italic; padding: 6px 8px; font-size: 12px; font-family: var(--sans); }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--panel-raised);
+            border: 1px solid var(--line); border-radius: 20px; padding: 2px 10px; }
+    .models-list { margin-top: 10px; max-height: 150px; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+    .model { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); padding: 2px 6px; }
+    .model:hover { color: var(--ink); background: var(--panel-raised); border-radius: 4px; }
+    .subhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-faint);
+               font-weight: 600; margin: 12px 0 7px; }
 
-    /* ---- launcher form ------------------------------------------------- */
-    .form-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    .field { display: flex; flex-direction: column; gap: 4px; }
-    .field label {
-      font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.09em;
-      color: var(--ink-faint); font-weight: 600;
-    }
-    select, input[type="text"] {
-      background: var(--bg); color: var(--ink); border: 1px solid var(--line);
-      border-radius: 6px; padding: 6px 9px; font-family: var(--mono); font-size: 12px;
-      min-width: 118px;
-    }
-    select:focus, input:focus { border-color: var(--link); }
-    .launch-btn {
-      background: var(--link); color: #06232b; border: none; border-radius: 6px;
-      padding: 7px 15px; cursor: pointer; font-size: 12.5px; font-weight: 600;
-      font-family: var(--sans);
-    }
-    .launch-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 88%, white); }
-    .launch-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .launch-btn.secondary {
-      background: var(--link-soft); color: var(--link);
-      border: 1px solid color-mix(in srgb, var(--link) 35%, transparent);
-    }
-    .launch-btn.secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 22%, transparent); }
-    .launch-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
-    .launch-hint { font-size: 11px; color: var(--ink-faint); margin-top: 10px; }
-    .launch-note { font-size: 11.5px; color: var(--ink-dim); }
-    .launch-note.err { color: var(--down); }
-    .launch-note.ok { color: var(--up); }
-
-    /* ---- info panel ---------------------------------------------------- */
-    .info-btns { display: flex; flex-wrap: wrap; gap: 8px; }
-    .info-btn {
-      background: var(--panel-raised); color: var(--ink); border: 1px solid var(--line);
-      border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-family: var(--sans);
-    }
-    .info-btn:hover { border-color: var(--ink-faint); }
-    .info-btn .anl {
-      font-family: var(--mono); font-size: 9px; color: var(--warn); margin-left: 5px;
-      vertical-align: 1px;
-    }
-    .info-out {
-      margin-top: 12px; background: #0f131b; border: 1px solid var(--line-soft);
-      border-radius: 6px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px;
-      color: var(--ink-dim); white-space: pre-wrap; max-height: 220px; overflow: auto;
-      min-height: 40px;
-    }
-    .info-out:empty::before { content: "run a command to see output"; color: var(--ink-faint);
-                              font-style: italic; }
-
-    /* ---- terminal ------------------------------------------------------ */
-    .termwrap { flex: 1; display: flex; flex-direction: column; min-height: 220px;
+    /* ---- terminal drawer ---- */
+    .termwrap { display: flex; flex-direction: column; height: 42vh; min-height: 200px;
                 border-top: 1px solid var(--line); }
-    .term-head { display: flex; align-items: center; gap: 10px;
-                 padding: 7px 14px; background: var(--panel); font-size: 12px; }
+    .termwrap[hidden] { display: none; }
+    .term-head { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: var(--panel); font-size: 12px; }
     .term-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-faint); }
-    .term-head .dot.up { background: var(--up); }
-    .term-head .dot.down { background: var(--down); }
-    .term-head .thlabel { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.13em;
-                          color: var(--ink-faint); font-weight: 600; }
-    .term-head #status { font-family: var(--mono); color: var(--ink-dim); }
+    .term-head .dot.up { background: var(--up); } .term-head .dot.down { background: var(--down); }
+    .term-head .thlabel { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.13em; color: var(--ink-faint); font-weight: 600; }
+    .term-head #tstatus { font-family: var(--mono); color: var(--ink-dim); }
     #term { flex: 1; padding: 6px 8px; background: #0f131b; min-height: 0; }
+
+    /* ---- launch popover ---- */
+    .backdrop { position: fixed; inset: 0; background: rgba(8, 10, 14, 0.55); display: flex;
+                align-items: flex-start; justify-content: center; padding-top: 12vh; z-index: 50; }
+    .backdrop[hidden] { display: none; }
+    .popover { width: min(440px, 92vw); background: var(--panel); border: 1px solid var(--line);
+               border-radius: 10px; padding: 16px 18px 18px; box-shadow: 0 18px 50px rgba(0,0,0,0.5); }
+    .popover h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+    .popover .lede { color: var(--ink-dim); font-size: 12px; margin-bottom: 14px; }
+    .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+    .field label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-faint); font-weight: 600; }
+    select, input[type="text"] { background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+                                 border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 12.5px; width: 100%; }
+    select:focus, input:focus { border-color: var(--link); }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .pop-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+    .pop-note { font-size: 11.5px; color: var(--ink-dim); }
+    .pop-note.err { color: var(--down); } .pop-note.ok { color: var(--up); }
 
     :focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
   </style>
@@ -248,107 +161,112 @@
       <div class="brand"><span class="mark"></span> argo-anywhere <span class="tag">web</span></div>
       <div class="meta" id="meta">…</div>
       <span class="spacer"></span>
-      <button id="toggleDash" class="ghost-btn" aria-expanded="true">Hide dashboard</button>
+      <button id="openLaunch" class="btn btn-primary">+ Launch tool</button>
+      <button id="toggleTerm" class="btn btn-ghost" aria-pressed="false">
+        <span class="tdot" id="termDot"></span> Terminal
+      </button>
     </header>
 
-    <section class="dash" id="dash" aria-label="Channel dashboard">
-      <div class="card channel">
-        <div class="eyebrow">Channel</div>
+    <main class="monitor">
+      <section class="card channel">
+        <div class="eyebrow">Channel <span class="pill down" id="chPill">unknown</span></div>
         <div class="signalpath">
-          <div class="hop up" id="hopLaptop">
-            <span class="hopdot"></span><span class="hoplabel">this laptop</span>
-            <span class="hopsub">local</span>
-          </div>
+          <div class="hop up" id="hopLaptop"><span class="hopdot"></span><span class="hoplabel">this laptop</span><span class="hopsub">local</span></div>
           <div class="wire" id="wireTunnel"><span class="wirelabel" id="portLabel">:—</span></div>
-          <div class="hop unknown" id="hopNode">
-            <span class="hopdot"></span><span class="hoplabel">node</span>
-            <span class="hopsub" id="nodeSub">—</span>
-          </div>
+          <div class="hop unknown" id="hopNode"><span class="hopdot"></span><span class="hoplabel">node</span><span class="hopsub" id="nodeSub">—</span></div>
           <div class="wire" id="wireProxy"></div>
-          <div class="hop unknown" id="hopProxy">
-            <span class="hopdot"></span><span class="hoplabel">argo-proxy</span>
-            <span class="hopsub" id="proxySub">not checked</span>
+          <div class="hop unknown" id="hopProxy"><span class="hopdot"></span><span class="hoplabel">argo-proxy</span><span class="hopsub" id="proxySub">—</span></div>
+        </div>
+        <div class="channel-body">
+          <div class="connect-cta" id="connectCta" hidden>
+            <button id="connectBtn" class="btn btn-primary">Connect</button>
+            <span class="sub">Establish the channel — Duo runs in the terminal below.</span>
+          </div>
+          <div id="channelUp" hidden>
+            <div class="channel-meta" id="channelMeta"></div>
+            <div class="channel-actions">
+              <button id="checkHealth" class="btn btn-soft">Check health</button>
+              <span class="act-note" id="healthNote">one-shot probe through the tunnel</span>
+            </div>
           </div>
         </div>
-        <div class="channel-meta" id="channelMeta"></div>
-        <div class="channel-actions">
-          <button id="checkHealth" class="act-btn">Check health</button>
-          <span class="act-note" id="healthNote">health check reaches the node through the tunnel</span>
-        </div>
-      </div>
+      </section>
 
-      <div class="card sessions">
-        <div class="eyebrow">Sessions <span class="count" id="sessCount"></span></div>
-        <div class="rows" id="sessions"></div>
-      </div>
-
-      <div class="card listeners">
-        <div class="eyebrow">Loopback listeners</div>
-        <div class="rows" id="listeners"></div>
-      </div>
-
-      <div class="card launcher">
-        <div class="eyebrow">Launch</div>
-        <div class="form-row">
-          <div class="field">
-            <label for="lVerb">command</label>
-            <select id="lVerb">
-              <option value="client">client (all-in-one)</option>
-              <option value="connect">connect (channel only)</option>
-              <option value="tunnel">tunnel (forward only)</option>
-              <option value="configure">configure (write config)</option>
-              <option value="run">run (launch tool)</option>
-              <option value="setup">setup (pick tool)</option>
-            </select>
+      <div class="grid3">
+        <section class="card">
+          <div class="eyebrow">Tunnels</div>
+          <div class="rows" id="listeners"></div>
+        </section>
+        <section class="card">
+          <div class="eyebrow">Held by this UI <span class="count" id="sessCount"></span></div>
+          <div class="rows" id="sessions"></div>
+        </section>
+        <section class="card">
+          <div class="eyebrow">Tools &amp; models</div>
+          <div class="chips" id="toolChips"><span class="empty">loading…</span></div>
+          <div class="subhead">Models
+            <button id="loadModels" class="stop-btn" style="margin-left:8px">Load (ANL)</button>
           </div>
-          <div class="field">
-            <label for="lTool">cli tool</label>
-            <select id="lTool">
-              <option value="">— default —</option>
-              <option value="opencode">opencode</option>
-              <option value="claudecode">claudecode</option>
-              <option value="aider">aider</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="lScope">scope</label>
-            <input id="lScope" type="text" placeholder="(optional)" autocomplete="off" />
-          </div>
-          <div class="field">
-            <label for="lTerm">new window</label>
-            <select id="lTerm"><option value="">detecting…</option></select>
-          </div>
-        </div>
-        <div class="launch-actions">
-          <button id="launchBtn" class="launch-btn secondary">Run in embedded terminal</button>
-          <button id="launchExtBtn" class="launch-btn">Open in new window</button>
-          <span class="launch-note" id="launchNote"></span>
-        </div>
-        <div class="launch-hint">Embedded runs in the terminal below (replacing it — you'll be asked
-          if it holds a live channel). New window opens an independent native terminal you own.</div>
+          <div class="models-list" id="modelsList"><span class="empty">not loaded</span></div>
+        </section>
       </div>
+    </main>
 
-      <div class="card info">
-        <div class="eyebrow">Info</div>
-        <div class="info-btns">
-          <button class="info-btn" id="infoTools">list-tools</button>
-          <button class="info-btn" id="infoStatus">status<span class="anl">ANL</span></button>
-          <button class="info-btn" id="infoModels">list-models<span class="anl">ANL</span></button>
-        </div>
-        <pre class="info-out" id="infoOut"></pre>
-      </div>
-    </section>
-
-    <section class="termwrap">
+    <section class="termwrap" id="termwrap" hidden>
       <div class="term-head">
         <span class="dot" id="conn"></span>
         <span class="thlabel">Terminal</span>
-        <span id="status">connecting…</span>
+        <span id="tstatus">idle</span>
         <span class="spacer" style="margin-left:auto"></span>
-        <button id="sigint" class="ghost-btn" title="Send Ctrl-C to the child">Ctrl-C</button>
+        <button id="sigint" class="btn btn-ghost" title="Send Ctrl-C">Ctrl-C</button>
+        <button id="closeTerm" class="btn btn-ghost" title="Hide the terminal">Hide</button>
       </div>
       <div id="term"></div>
     </section>
+  </div>
+
+  <div class="backdrop" id="launchBackdrop" hidden>
+    <div class="popover" role="dialog" aria-modal="true" aria-label="Launch">
+      <h2>Launch</h2>
+      <div class="lede">Run an argo-anywhere command. CLI tools default to a new native window; connect runs in the embedded terminal.</div>
+      <div class="two">
+        <div class="field">
+          <label for="lVerb">command</label>
+          <select id="lVerb">
+            <option value="run">run (launch tool)</option>
+            <option value="client">client (all-in-one)</option>
+            <option value="configure">configure (write config)</option>
+            <option value="setup">setup (pick tool)</option>
+            <option value="connect">connect (channel only)</option>
+            <option value="tunnel">tunnel (forward only)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="lTool">cli tool</label>
+          <select id="lTool">
+            <option value="">— default —</option>
+            <option value="opencode">opencode</option>
+            <option value="claudecode">claudecode</option>
+            <option value="aider">aider</option>
+          </select>
+        </div>
+      </div>
+      <div class="two">
+        <div class="field">
+          <label for="lScope">scope (optional)</label>
+          <input id="lScope" type="text" placeholder="e.g. project" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="lTarget">where to run</label>
+          <select id="lTarget"><option value="embedded">Embedded terminal</option></select>
+        </div>
+      </div>
+      <div class="pop-actions">
+        <button id="doLaunch" class="btn btn-primary">Launch</button>
+        <button id="cancelLaunch" class="btn btn-ghost">Cancel</button>
+        <span class="pop-note" id="popNote"></span>
+      </div>
+    </div>
   </div>
 
   <script src="/static/xterm.js"></script>
@@ -356,111 +274,68 @@
   <script>
     const el = (id) => document.getElementById(id);
 
-    // ===================================================================
-    // Terminal + WebSocket bridge (reconnectable for the launcher)
-    // ===================================================================
-    const term = new Terminal({
-      cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
-      theme: { background: '#0f131b' },
-    });
+    // ---- terminal (reconnectable; revealed on demand) --------------------
+    const term = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                                fontSize: 13, theme: { background: '#0f131b' } });
     const fit = new FitAddon.FitAddon();
-    term.loadAddon(fit);
-    term.open(el('term'));
-    fit.fit();
-
-    const conn = el('conn');
-    const statusEl = el('status');
+    term.loadAddon(fit); term.open(el('term'));
+    const conn = el('conn'); const tstatus = el('tstatus'); const termDot = el('termDot');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const CTRL = '\x00CTRL';
-    const EXIT = '\x00EXIT';
-    const dec = new TextDecoder();
+    const CTRL = '\x00CTRL', EXIT = '\x00EXIT', dec = new TextDecoder();
+    let ws = null;
 
-    let ws = null;  // reassigned by openTerminal(); handlers read the live value
-
-    function sendResize() {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(CTRL + JSON.stringify({ op: 'resize', rows: term.rows, cols: term.cols }));
-      }
+    function showTerminal(show) {
+      const w = el('termwrap');
+      if (show) w.removeAttribute('hidden'); else w.setAttribute('hidden', '');
+      el('toggleTerm').setAttribute('aria-pressed', String(show));
+      el('toggleTerm').classList.toggle('on', show);
+      if (show) requestAnimationFrame(() => { fit.fit(); sendResize(); term.focus(); });
     }
-
+    function sendResize() {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(CTRL + JSON.stringify({ op: 'resize', rows: term.rows, cols: term.cols }));
+    }
     function openTerminal(query, label) {
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        try { ws.close(); } catch (e) {}
-      }
-      term.reset();
-      statusEl.textContent = 'connecting…';
+      showTerminal(true);
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) { try { ws.close(); } catch (e) {} }
+      term.reset(); tstatus.textContent = 'connecting…';
       const sock = new WebSocket(`${proto}://${location.host}/ws` + (query ? '?' + query : ''));
       sock.binaryType = 'arraybuffer';
-      sock.onopen = () => {
-        conn.classList.remove('down'); conn.classList.add('up');
-        statusEl.textContent = 'connected' + (label ? ' · ' + label : '');
-        requestAnimationFrame(() => { fit.fit(); sendResize(); term.focus(); });
-        refreshStatus();
-      };
+      sock.onopen = () => { conn.classList.remove('down'); conn.classList.add('up'); termDot.classList.add('on');
+        tstatus.textContent = 'running' + (label ? ' · ' + label : ''); requestAnimationFrame(() => { fit.fit(); sendResize(); term.focus(); }); refreshStatus(); };
       sock.onmessage = (ev) => {
         if (typeof ev.data === 'string') {
-          if (ev.data.startsWith(EXIT)) {
-            let info = {};
-            try { info = JSON.parse(ev.data.slice(EXIT.length)); } catch (e) {}
+          if (ev.data.startsWith(EXIT)) { let info = {}; try { info = JSON.parse(ev.data.slice(EXIT.length)); } catch (e) {}
             term.write(`\r\n\x1b[33m[process exited: status=${info.exitstatus}]\x1b[0m\r\n`);
-            statusEl.textContent = `exited (status=${info.exitstatus})`;
-            refreshStatus();
-            return;
-          }
+            tstatus.textContent = `exited (status=${info.exitstatus})`; termDot.classList.remove('on'); refreshStatus(); return; }
           term.write(ev.data);
-        } else {
-          term.write(dec.decode(new Uint8Array(ev.data)));
-        }
+        } else { term.write(dec.decode(new Uint8Array(ev.data))); }
       };
-      sock.onclose = () => {
-        if (sock !== ws) return;  // an intentional replacement; ignore
-        conn.classList.remove('up'); conn.classList.add('down');
-        statusEl.textContent = 'disconnected';
-      };
-      sock.onerror = () => { statusEl.textContent = 'ws error'; };
+      sock.onclose = () => { if (sock !== ws) return; conn.classList.remove('up'); conn.classList.add('down');
+        termDot.classList.remove('on'); tstatus.textContent = 'disconnected'; };
+      sock.onerror = () => { tstatus.textContent = 'ws error'; };
       ws = sock;
     }
-
-    term.onData((data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); });
-    window.addEventListener('resize', () => { fit.fit(); sendResize(); });
+    term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
+    window.addEventListener('resize', () => { if (!el('termwrap').hasAttribute('hidden')) { fit.fit(); sendResize(); } });
     term.onResize(() => sendResize());
-    el('sigint').addEventListener('click', () => {
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' }));
-      term.focus();
-    });
+    el('sigint').addEventListener('click', () => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' })); term.focus(); });
+    el('closeTerm').addEventListener('click', () => showTerminal(false));
+    el('toggleTerm').addEventListener('click', () => showTerminal(el('termwrap').hasAttribute('hidden')));
 
-    // ===================================================================
-    // Dashboard: local status auto-refresh + on-demand health
-    // ===================================================================
-    let cachedPort = null;
-    let tunnelUp = false;
-    let lastSessions = [];
-
-    function fmtUptime(s) {
-      s = Math.floor(s);
-      if (s < 60) return s + 's';
-      const m = Math.floor(s / 60), r = s % 60;
-      if (m < 60) return m + 'm' + (r ? ' ' + r + 's' : '');
-      return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
-    }
+    // ---- monitor: local status auto-refresh ------------------------------
+    let cachedPort = null, tunnelUp = false, lastSessions = [];
+    const fmtUptime = (s) => { s = Math.floor(s); if (s < 60) return s + 's';
+      const m = Math.floor(s / 60), r = s % 60; if (m < 60) return m + 'm' + (r ? ' ' + r + 's' : '');
+      return Math.floor(m / 60) + 'h ' + (m % 60) + 'm'; };
 
     async function refreshStatus() {
-      let data;
-      try { data = await (await fetch('/api/status', { cache: 'no-store' })).json(); }
-      catch (e) { return; }
-
+      let data; try { data = await (await fetch('/api/status', { cache: 'no-store' })).json(); } catch (e) { return; }
       const p = data.package || {};
-      el('meta').innerHTML =
-        `pkg <b>${p.package_version || '?'}</b> · engine <b>${p.engine_version || '?'}</b>` +
-        ` <span style="opacity:.6">${p.engine_sha256_short || ''}</span>`;
-
-      const st = data.cached || {};
-      cachedPort = st.port || null;
-      const listeners = data.listeners || [];
+      el('meta').innerHTML = `pkg <b>${p.package_version || '?'}</b> · engine <b>${p.engine_version || '?'}</b>`;
+      const st = data.cached || {}; cachedPort = st.port || null;
+      const listeners = data.listeners || []; lastSessions = data.sessions || [];
       tunnelUp = !!(cachedPort && listeners.some((l) => l.port === cachedPort));
-      lastSessions = data.sessions || [];
 
       el('portLabel').textContent = cachedPort ? (':' + cachedPort) : ':—';
       setHop('hopNode', tunnelUp ? 'up' : 'unknown');
@@ -468,206 +343,157 @@
       setWire('wireTunnel', 'up', tunnelUp ? 'up' : 'faint');
       setWire('wireProxy', tunnelUp ? 'up' : 'faint', 'faint');
 
-      el('channelMeta').innerHTML =
-        `user <b>${st.user || '—'}</b>` +
-        `node <b>${st.node || '—'}</b>` +
-        `port <b>${cachedPort || '—'}</b>` +
-        `tunnel <b style="color:${tunnelUp ? 'var(--up)' : 'var(--ink-dim)'}">${tunnelUp ? 'up' : 'down'}</b>`;
+      const pill = el('chPill');
+      pill.className = 'pill ' + (tunnelUp ? 'up' : 'down');
+      pill.textContent = tunnelUp ? 'up' : 'down';
+      el('connectCta').hidden = tunnelUp;
+      el('channelUp').hidden = !tunnelUp;
+      if (tunnelUp) {
+        const held = lastSessions.find((s) => s.alive && s.owns_channel);
+        el('channelMeta').innerHTML =
+          `user <b>${st.user || '—'}</b>node <b>${st.node || '—'}</b>port <b>${cachedPort}</b>` +
+          `held by <b>${held ? 'this UI (' + held.id + ')' : 'external terminal'}</b>`;
+      } else { setHop('hopProxy', 'unknown'); el('proxySub').textContent = '—'; }
 
-      el('checkHealth').disabled = !tunnelUp;
-      if (!tunnelUp) { setHop('hopProxy', 'unknown'); el('proxySub').textContent = 'no tunnel'; }
-
-      renderSessions(lastSessions);
-      renderListeners(listeners);
+      renderSessions(lastSessions); renderListeners(listeners);
     }
-
     function setHop(id, cls) { const h = el(id); h.classList.remove('up', 'down', 'unknown'); h.classList.add(cls); }
-    function setWire(id, from, to) {
-      const c = (k) => k === 'up' ? 'var(--up)' : (k === 'down' ? 'var(--down)' : 'var(--ink-faint)');
-      const w = el(id); w.style.setProperty('--from', c(from)); w.style.setProperty('--to', c(to));
-    }
+    function setWire(id, from, to) { const c = (k) => k === 'up' ? 'var(--up)' : (k === 'down' ? 'var(--down)' : 'var(--ink-faint)');
+      const w = el(id); w.style.setProperty('--from', c(from)); w.style.setProperty('--to', c(to)); }
 
     function renderSessions(sessions) {
-      el('sessCount').textContent = sessions.length ? `(${sessions.length})` : '';
+      const alive = sessions.filter((s) => s.alive);
+      el('sessCount').textContent = alive.length ? `(${alive.length})` : '';
       const box = el('sessions');
-      if (!sessions.length) { box.innerHTML = '<div class="empty">no managed sessions</div>'; return; }
+      if (!sessions.length) { box.innerHTML = '<div class="empty">nothing running in this UI</div>'; return; }
       box.innerHTML = '';
       for (const s of sessions) {
-        const row = document.createElement('div');
-        row.className = 'row ' + (s.alive ? 'up' : 'down');
+        const row = document.createElement('div'); row.className = 'row ' + (s.alive ? 'up' : 'down');
         const state = s.alive ? ('up ' + fmtUptime(s.uptime_s)) : `exited (${s.exitstatus})`;
-        row.innerHTML =
-          `<span class="rdot"></span><span class="rid">${s.id}</span>` +
-          `<span class="rverb">${s.verb}</span><span class="rmuted">pid ${s.pid}</span>` +
+        row.innerHTML = `<span class="rdot"></span><span class="rid">${s.id}</span><span class="rverb">${s.verb}</span>` +
           `<span class="rmuted">${state}</span><span class="rgrow"></span>` +
           (s.owns_channel ? `<span class="own" title="holds the SSH channel">channel</span>` : '');
-        if (s.alive) {
-          const b = document.createElement('button');
-          b.className = 'stop-btn'; b.textContent = 'Stop';
-          b.addEventListener('click', () => stopSession(s.id));
-          row.appendChild(b);
-        }
+        if (s.alive) { const b = document.createElement('button'); b.className = 'stop-btn'; b.textContent = 'Stop';
+          b.addEventListener('click', () => stopSession(s.id)); row.appendChild(b); }
         box.appendChild(row);
       }
     }
-
     function renderListeners(listeners) {
       const box = el('listeners');
-      if (!listeners.length) { box.innerHTML = '<div class="empty">no loopback listeners</div>'; return; }
+      if (!listeners.length) { box.innerHTML = '<div class="empty">no tunnels</div>'; return; }
       box.innerHTML = '';
       for (const l of listeners) {
-        const tag = l.port === cachedPort ? ' <span class="rmuted">(tunnel)</span>'
+        const tag = l.port === cachedPort ? ' <span class="rmuted">(channel)</span>'
                   : (l.port === 8799 ? ' <span class="rmuted">(web ui)</span>' : '');
-        const row = document.createElement('div');
-        row.className = 'row up';
-        row.innerHTML =
-          `<span class="rdot"></span><span class="rid">:${l.port}</span>` +
-          `<span class="rverb">${l.command}</span><span class="rmuted">pid ${l.pid}</span>${tag}`;
+        const row = document.createElement('div'); row.className = 'row up';
+        row.innerHTML = `<span class="rdot"></span><span class="rid">:${l.port}</span><span class="rverb">${l.command}</span><span class="rmuted">pid ${l.pid}</span>${tag}`;
         box.appendChild(row);
       }
     }
 
-    // On-demand only: this GET traverses the tunnel to the node. Never auto-run.
+    // ---- channel: connect + health --------------------------------------
+    el('connectBtn').addEventListener('click', () => openTerminal('verb=connect', 'connect'));
     el('checkHealth').addEventListener('click', async () => {
       if (!cachedPort) return;
-      const note = el('healthNote'); note.classList.remove('err');
-      el('checkHealth').disabled = true;
-      el('proxySub').textContent = 'checking…'; note.textContent = 'contacting argo-proxy…';
+      const note = el('healthNote'); note.className = 'act-note';
+      el('checkHealth').disabled = true; el('proxySub').textContent = 'checking…'; note.textContent = 'contacting argo-proxy…';
       try {
         const h = await (await fetch('/api/health?port=' + cachedPort, { cache: 'no-store' })).json();
-        if (h.up) {
-          setHop('hopProxy', 'up'); setWire('wireProxy', 'up', 'up');
-          el('proxySub').textContent = h.latency_ms + ' ms';
-          note.textContent = `healthy · ${h.status || 'ok'}`;
-        } else {
-          setHop('hopProxy', 'down'); el('proxySub').textContent = 'no answer';
-          note.textContent = 'no /health response through the tunnel'; note.classList.add('err');
-        }
+        if (h.up) { setHop('hopProxy', 'up'); setWire('wireProxy', 'up', 'up'); el('proxySub').textContent = h.latency_ms + ' ms';
+          note.textContent = `healthy · ${h.status || 'ok'}`; note.classList.add('ok'); }
+        else { setHop('hopProxy', 'down'); el('proxySub').textContent = 'no answer';
+          note.textContent = 'no /health response through the tunnel'; note.classList.add('err'); }
       } catch (e) { note.textContent = 'health check failed'; note.classList.add('err'); }
       finally { el('checkHealth').disabled = false; }
     });
-
     async function stopSession(id) {
       let r = await fetch(`/api/sessions/${id}/stop`, { method: 'POST' });
-      if (r.status === 409) {
-        const w = await r.json();
-        if (!confirm(w.detail + '\n\nStop it anyway?')) return;
-        r = await fetch(`/api/sessions/${id}/stop?force=true`, { method: 'POST' });
-      }
+      if (r.status === 409) { const w = await r.json(); if (!confirm(w.detail + '\n\nStop it anyway?')) return;
+        r = await fetch(`/api/sessions/${id}/stop?force=true`, { method: 'POST' }); }
       refreshStatus();
     }
 
-    // ===================================================================
-    // Launcher: run a chosen verb -- embedded terminal or a new native window
-    // ===================================================================
-    function launchParams() {
+    // ---- tools + models --------------------------------------------------
+    async function loadTools() {
+      try { const d = await (await fetch('/api/run/list-tools', { method: 'POST' })).json();
+        const tools = (d.stdout || '').split('\n').map((l) => l.trim().split(/\s+/)[0])
+          .filter((w) => /^(opencode|claudecode|aider|codex|cursor)$/.test(w));
+        el('toolChips').innerHTML = tools.length ? tools.map((t) => `<span class="chip">${t}</span>`).join('') : '<span class="empty">none</span>';
+      } catch (e) { el('toolChips').innerHTML = '<span class="empty">unavailable</span>'; }
+    }
+    el('loadModels').addEventListener('click', async () => {
+      const box = el('modelsList'); box.innerHTML = '<span class="empty">loading… (reaches ANL)</span>';
+      try {
+        const d = await (await fetch('/api/run/list-models', { method: 'POST' })).json();
+        if (d.error) { box.innerHTML = `<span class="empty">error: ${d.error}</span>`; return; }
+        const lines = (d.stdout || '').split('\n').map((l) => l.trim()).filter((l) => l && !/^[-=]+$/.test(l));
+        box.innerHTML = lines.length ? lines.map((l) => `<div class="model">${l.replace(/</g, '&lt;')}</div>`).join('')
+                                     : '<span class="empty">no output</span>';
+      } catch (e) { box.innerHTML = '<span class="empty">request failed</span>'; }
+    });
+
+    // ---- launch popover --------------------------------------------------
+    let nativeTerminals = [];
+    async function loadTerminals() {
+      try { const d = await (await fetch('/api/terminals', { cache: 'no-store' })).json(); nativeTerminals = d.terminals || []; }
+      catch (e) { nativeTerminals = []; }
+      rebuildTargets();
+    }
+    function rebuildTargets() {
+      const sel = el('lTarget'); sel.innerHTML = '';
+      nativeTerminals.forEach((t) => { const o = document.createElement('option'); o.value = 'win:' + t.id;
+        o.textContent = 'New window · ' + t.label; sel.appendChild(o); });
+      const emb = document.createElement('option'); emb.value = 'embedded'; emb.textContent = 'Embedded terminal';
+      sel.appendChild(emb);
+      applyTargetDefault();
+    }
+    // Per the model: cli-tool commands default to a new window; connect/tunnel to embedded.
+    function applyTargetDefault() {
       const verb = el('lVerb').value;
-      const tool = el('lTool').value;
-      const scope = el('lScope').value.trim();
+      const wantEmbedded = (verb === 'connect' || verb === 'tunnel') || nativeTerminals.length === 0;
+      const sel = el('lTarget');
+      sel.value = wantEmbedded ? 'embedded' : (nativeTerminals.length ? 'win:' + nativeTerminals[0].id : 'embedded');
+    }
+    el('lVerb').addEventListener('change', applyTargetDefault);
+
+    function openLaunch() { el('popNote').textContent = ''; el('popNote').className = 'pop-note';
+      el('launchBackdrop').removeAttribute('hidden'); el('lVerb').focus(); }
+    function closeLaunch() { el('launchBackdrop').setAttribute('hidden', ''); }
+    el('openLaunch').addEventListener('click', openLaunch);
+    el('cancelLaunch').addEventListener('click', closeLaunch);
+    el('launchBackdrop').addEventListener('click', (e) => { if (e.target === el('launchBackdrop')) closeLaunch(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el('launchBackdrop').hasAttribute('hidden')) closeLaunch(); });
+
+    el('doLaunch').addEventListener('click', async () => {
+      const verb = el('lVerb').value, tool = el('lTool').value, scope = el('lScope').value.trim(), target = el('lTarget').value;
       const params = new URLSearchParams({ verb });
       if (tool) params.set('cli_tool', tool);
       if (scope) params.set('scope', scope);
-      return { verb, tool, scope, params };
-    }
 
-    // Embedded: run in the web UI's terminal (replaces the current session).
-    el('launchBtn').addEventListener('click', () => {
-      const { verb, tool, params } = launchParams();
-      const owner = lastSessions.find((s) => s.alive && s.owns_channel);
-      if (owner && tunnelUp) {
-        const ok = confirm(
-          `The terminal is holding the SSH channel on :${cachedPort} (${owner.verb}).\n` +
-          `Running ${verb} replaces it and tears the tunnel down.\n\nContinue?`
-        );
-        if (!ok) return;
+      if (target === 'embedded') {
+        const owner = lastSessions.find((s) => s.alive && s.owns_channel);
+        if (owner && tunnelUp && !confirm(
+          `The embedded terminal is holding the channel on :${cachedPort} (${owner.verb}).\nRunning ${verb} replaces it and drops the tunnel.\n\nContinue?`)) return;
+        closeLaunch(); openTerminal(params.toString(), verb + (tool ? ' · ' + tool : ''));
+        return;
       }
-      openTerminal(params.toString(), verb + (tool ? ' · ' + tool : ''));
+      // New native window.
+      const termId = target.slice(4);
+      params.set('terminal', termId);
+      const note = el('popNote'); note.className = 'pop-note'; note.textContent = 'opening…';
+      el('doLaunch').disabled = true;
+      try {
+        const d = await (await fetch('/api/launch-external?' + params.toString(), { method: 'POST' })).json();
+        if (d.ok) { note.textContent = `opened in ${d.terminal}`; note.classList.add('ok'); setTimeout(closeLaunch, 900); }
+        else { note.textContent = 'could not open: ' + (d.error || 'unknown'); note.classList.add('err'); }
+      } catch (e) { note.textContent = 'request failed'; note.classList.add('err'); }
+      finally { el('doLaunch').disabled = false; }
     });
 
-    // New window: open an independent native terminal the user owns. This does
-    // not touch the embedded terminal or the channel it may hold.
-    let terminalsAvailable = false;
-    async function loadTerminals() {
-      const sel = el('lTerm');
-      try {
-        const d = await (await fetch('/api/terminals', { cache: 'no-store' })).json();
-        sel.innerHTML = '';
-        (d.terminals || []).forEach((t) => {
-          const o = document.createElement('option');
-          o.value = t.id; o.textContent = t.label;
-          if (t.id === d.default) o.selected = true;
-          sel.appendChild(o);
-        });
-        terminalsAvailable = (d.terminals || []).length > 0;
-        if (!terminalsAvailable) {
-          sel.innerHTML = '<option value="">none found</option>';
-        }
-      } catch (e) {
-        sel.innerHTML = '<option value="">unavailable</option>';
-      }
-      el('launchExtBtn').disabled = !terminalsAvailable;
-    }
-
-    el('launchExtBtn').addEventListener('click', async () => {
-      const { verb, tool, params } = launchParams();
-      const term = el('lTerm').value;
-      if (term) params.set('terminal', term);
-      const note = el('launchNote');
-      note.className = 'launch-note';
-      note.textContent = 'opening…';
-      el('launchExtBtn').disabled = true;
-      try {
-        const r = await fetch('/api/launch-external?' + params.toString(), { method: 'POST' });
-        const d = await r.json();
-        if (d.ok) {
-          note.textContent = `opened ${verb}${tool ? ' · ' + tool : ''} in ${d.terminal}`;
-          note.classList.add('ok');
-        } else {
-          note.textContent = 'could not open: ' + (d.error || 'unknown');
-          note.classList.add('err');
-        }
-      } catch (e) {
-        note.textContent = 'request failed'; note.classList.add('err');
-      } finally {
-        el('launchExtBtn').disabled = !terminalsAvailable;
-      }
-    });
-
-    // ===================================================================
-    // Info: run returning verbs captured (Lane 1)
-    // ===================================================================
-    async function runInfo(verb, anl) {
-      if (anl && !confirm(`'${verb}' reaches ANL through the tunnel.\nRun it now?`)) return;
-      const out = el('infoOut');
-      out.textContent = `running ${verb}…`;
-      try {
-        const d = await (await fetch('/api/run/' + verb, { method: 'POST' })).json();
-        if (d.error) { out.textContent = 'error: ' + d.error; return; }
-        out.textContent = (d.stdout || '') + (d.stderr ? '\n' + d.stderr : '') + `\n[exit ${d.returncode}]`;
-      } catch (e) { out.textContent = 'request failed'; }
-    }
-    el('infoTools').addEventListener('click', () => runInfo('list-tools', false));
-    el('infoStatus').addEventListener('click', () => runInfo('status', true));
-    el('infoModels').addEventListener('click', () => runInfo('list-models', true));
-
-    // Dashboard toggle.
-    el('toggleDash').addEventListener('click', () => {
-      const d = el('dash');
-      const hidden = d.hasAttribute('hidden');
-      if (hidden) d.removeAttribute('hidden'); else d.setAttribute('hidden', '');
-      el('toggleDash').textContent = hidden ? 'Hide dashboard' : 'Show dashboard';
-      el('toggleDash').setAttribute('aria-expanded', String(hidden));
-      fit.fit(); sendResize();
-    });
-
-    // Auto-refresh LOCAL status only (no health). Pause when the tab is hidden.
+    // ---- boot: monitor only; no auto-connect ----------------------------
     setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
-
-    // Boot: open the default terminal session + first status pull + terminals.
-    openTerminal('', '');
-    refreshStatus();
-    loadTerminals();
+    refreshStatus(); loadTools(); loadTerminals();
   </script>
 </body>
 </html>
