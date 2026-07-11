@@ -7,6 +7,12 @@ script does automatically on first v2.x run, and what you may need to
 do manually. New users (no prior install) should follow
 [`README.md`](../README.md) directly.
 
+> **Upgrading a v2.x install to v3.0.0?** v3 is a **clean break in how
+> argo-anywhere is installed** (a `pipx`-installable Python package) but **not
+> in how it works** (the same bash engine, vendored verbatim). Jump to
+> [v2.x → v3.0.0: the Python-package rebuild](#v2x--v300-the-python-package-rebuild).
+> Everything below concerns the v1.x → v2.x bash-script era.
+
 The v2.0.0 → v2.1.0 jump is small (7 defensive-hardening fixes; no
 state migration). The v2.1.0 → v2.2.0 jump adds the per-tool scope
 framework, port-as-state caching, OpenCode project-scope, and
@@ -758,6 +764,84 @@ If something broke during your upgrade that isn't covered here, file
 an issue at <https://github.com/a-attia/argo-anywhere/issues> with
 the `client` invocation that failed and the relevant log lines.
 
+## v2.x → v3.0.0: the Python-package rebuild
+
+**This is a clean break in how argo-anywhere is _installed_ — not in how it
+_works_.** v3.0.0 turns argo-anywhere from a single bash script you `curl` into
+a `pipx`-installable **Python package** that owns the runtime and adds a local
+**web UI** and an optional **native desktop app**. The orchestration engine is
+the *same* bash script, vendored inside the package **verbatim** — so every
+subcommand you already use behaves identically.
+
+### TL;DR
+
+|              | v2.x                              | v3.0.0                                            |
+|:-------------|:----------------------------------|:--------------------------------------------------|
+| Install      | `curl … argo_anywhere.sh -o …`    | `pipx install argo-anywhere`                      |
+| Upgrade      | re-`curl` / `git pull` / `update` | `pipx upgrade argo-anywhere`                      |
+| Run          | `bash argo_anywhere.sh <cmd>`     | `argo-anywhere <cmd>`                             |
+| The engine   | the file you curled               | vendored verbatim; `argo-anywhere --print-script` re-emits it |
+| New          | —                                 | `argo-anywhere web` (browser UI), `argo-anywhere app` (native window) |
+
+Your configs, cached state (`~/.config/argo_anywhere/`), SSH sockets, and the
+whole connect/Duo flow are **unchanged**. v3 wraps the engine; it does not
+reimplement it.
+
+### Install
+
+Requires Python 3.10+ (plus the engine's usual `bash` / `ssh` / `scp` / `curl` /
+`lsof`).
+
+```bash
+pipx install argo-anywhere            # CLI only
+pipx install 'argo-anywhere[web]'     # + local web UI   (argo-anywhere web)
+pipx install 'argo-anywhere[app]'     # + native window  (argo-anywhere app)
+```
+
+Prefer `pipx` so the CLI lands on your `PATH` in its own isolated environment;
+`pip install --user` works too. Until v3.0.0 is published to PyPI, install the
+pre-release straight from the branch:
+
+```bash
+pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'
+```
+
+### What you do
+
+1. Install via `pipx` (above).
+2. Use `argo-anywhere <command>` wherever you ran `bash argo_anywhere.sh
+   <command>`. Every engine subcommand — `client`, `connect`, `configure`,
+   `run`, `status`, `update`, `clean`, … — is passed straight through to the
+   vendored engine on your real terminal, so Duo, the monitor, and every prompt
+   work exactly as before.
+3. *(Optional)* delete the old curled script. You can always recover the exact
+   engine for inspection or forking:
+   ```bash
+   argo-anywhere --print-script > argo_anywhere.sh
+   ```
+
+### New: web UI and native app
+
+- **`argo-anywhere web`** serves a loopback-only web UI — a live channel
+  monitor, a browser terminal for connecting (Duo runs in the browser), and a
+  launcher that opens your CLI tools in new native terminal windows. Needs the
+  `[web]` extra.
+- **`argo-anywhere app`** opens that same UI in a native desktop window
+  (pywebview); it falls back to your default browser if the `[app]` extra isn't
+  installed. Needs the `[app]` extra for the native window.
+
+Both are optional — the CLI is fully usable without them.
+
+### Why the clean break
+
+The single-file `curl`-and-run distribution was the load-bearing UX of v1/v2.
+The web UI and native app need a runtime that owns process lifecycle, an HTTP/WS
+server, and a PTY bridge — which a lone bash script can't provide. v3 keeps the
+engine a single self-contained file (vendored verbatim; still `scp`-able to a
+compute node and re-exec'd as `server`) and wraps a thin Python runtime around
+it. The `curl one .sh && bash it` route is retired as the *primary* install
+path; `--print-script` preserves the inspect-and-fork workflow.
+
 ---
 
 *Created 2026-05-15 by Ahmed Attia (with substantial AI assistance
@@ -769,4 +853,7 @@ L6, L10). Revised 2026-05-18 (Phase 4 / v2.2.0) to add the
 "Behavior changes in v2.2.0" section covering the per-tool scope
 framework (D-017+D-018+D-019), port-as-state (D-020), OpenCode
 project-scope, cross-client port-coherence (D-021), and the
-`mode_stop` case-label fix.*
+`mode_stop` case-label fix. Revised 2026-07-10 (v3.0.0, Model A) to
+add the "v2.x → v3.0.0: the Python-package rebuild" section (D-026..
+D-029: pipx/PyPI install, vendored-verbatim engine, web UI + native
+app).*

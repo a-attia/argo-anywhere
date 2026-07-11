@@ -37,7 +37,13 @@ web = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
 ]
-all = ["argo-anywhere[web]"]
+# Native desktop window (argo-anywhere app). pywebview uses the OS webview
+# (Cocoa/WebKit on macOS, GTK/Qt on Linux); it degrades to the browser if absent.
+app = [
+    "argo-anywhere[web]",
+    "pywebview>=5",
+]
+all = ["argo-anywhere[app]"]
 # Dev/test: pytest + httpx (FastAPI's TestClient needs httpx).
 test = [
     "argo-anywhere[web]",

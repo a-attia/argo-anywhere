@@ -77,6 +77,19 @@ def test_web_subcommand_parses_help() -> None:
     assert exc.value.code == 0
 
 
+def test_app_subcommand_parses_help() -> None:
+    # `app --help` exits 0 via argparse without opening a window / server.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["app", "--help"])
+    assert exc.value.code == 0
+
+
+def test_app_in_help_addendum(capfd: pytest.CaptureFixture[str]) -> None:
+    rc = cli.main(["help"])
+    assert rc == 0
+    assert "argo-anywhere app" in capfd.readouterr().err
+
+
 @pytest.mark.skipif(
     not _SOURCE_ENGINE.exists(),
     reason="repo-root engine source absent (installed wheel, not a dev checkout)",

@@ -20,6 +20,7 @@ the package-only extras the engine doesn't know about.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shlex
 import subprocess
@@ -31,9 +32,14 @@ from ._engine import ENGINE_FILENAME, engine_bytes, engine_path
 
 _PACKAGE_ADDENDUM = f"""
 argo-anywhere (Python package) additions beyond the engine's help:
+  argo-anywhere app [--port N] [--browser]
+                                 Open the web UI in a native desktop window
+                                 (needs the [app] extra: pip install
+                                 'argo-anywhere[app]'); falls back to your
+                                 browser if pywebview isn't installed.
   argo-anywhere web [--host H] [--port N] [--engine "VERB ARGS"]
-                                 Launch the local web-terminal UI (needs the
-                                 [web] extra: pip install 'argo-anywhere[web]').
+                                 Serve the local web UI (needs the [web] extra:
+                                 pip install 'argo-anywhere[web]').
   argo-anywhere info [--json]    Local status: package + engine versions and
                                  loopback listeners (no ANL contact).
   argo-anywhere --print-script   Emit the raw bash engine to stdout
@@ -130,6 +136,82 @@ def _cmd_web(args: Sequence[str]) -> int:
     return 0
 
 
+def _cmd_app(args: Sequence[str]) -> int:
+    """Open the web UI in a native desktop window (pywebview), server and all.
+
+    Starts the web server on loopback in a background thread, then opens a native
+    window pointed at it. Falls back to the default browser if pywebview (the
+    ``[app]`` extra) isn't installed or ``--browser`` is passed.
+    """
+    parser = argparse.ArgumentParser(
+        prog="argo-anywhere app",
+        description="Open the local web UI in a native desktop window (loopback-only).",
+    )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("ARGO_ANYWHERE_WEB_PORT", "8799")))
+    parser.add_argument("--engine", default=os.environ.get("ARGO_ANYWHERE_WEB_ENGINE", "connect"))
+    parser.add_argument("--browser", action="store_true", help="use the default browser instead of a native window")
+    ns = parser.parse_args(list(args))
+
+    try:
+        from .web.app import create_app
+    except ModuleNotFoundError:
+        print(
+            "argo-anywhere app: the UI needs the web server.\n"
+            "  Install it with:  pip install 'argo-anywhere[app]'",
+            file=sys.stderr,
+        )
+        return 1
+
+    import threading
+    import time
+    import urllib.request
+
+    import uvicorn
+
+    app = create_app(engine_argv=tuple(shlex.split(ns.engine)))
+    config = uvicorn.Config(app, host=ns.host, port=ns.port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    url = f"http://{ns.host}:{ns.port}"
+    for _ in range(100):  # wait up to ~10s for the server to answer
+        try:
+            urllib.request.urlopen(f"{url}/healthz", timeout=0.5)  # noqa: S310 (loopback)
+            break
+        except OSError:
+            time.sleep(0.1)
+
+    if not ns.browser:
+        try:
+            import webview
+
+            webview.create_window("argo-anywhere", url, width=1200, height=820, min_size=(900, 600))
+            print(f"argo-anywhere: native window on {url}")
+            webview.start()  # blocks on the main thread until the window closes
+            server.should_exit = True
+            return 0
+        except ModuleNotFoundError:
+            print(
+                "(native window needs the [app] extra: pip install 'argo-anywhere[app]'; "
+                "opening your browser instead)",
+                file=sys.stderr,
+            )
+
+    import webbrowser
+
+    webbrowser.open(url)
+    print(f"argo-anywhere: serving {url}  (Ctrl-C to stop)")
+    try:
+        while thread.is_alive():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    server.should_exit = True
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -138,9 +220,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"argo-anywhere {__version__}")
         return 0
     if "--print-script" in argv:
-        sys.stdout.buffer.write(engine_bytes())
-        sys.stdout.buffer.flush()
+        try:
+            sys.stdout.buffer.write(engine_bytes())
+            sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            # A downstream reader (head/less) closed the pipe early. Redirect
+            # stdout to devnull so the interpreter's shutdown flush doesn't
+            # re-raise, then exit cleanly like a normal Unix tool.
+            with contextlib.suppress(OSError):
+                os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
+    if argv and argv[0] == "app":
+        return _cmd_app(argv[1:])
     if argv and argv[0] == "web":
         return _cmd_web(argv[1:])
     if argv and argv[0] == "info":
