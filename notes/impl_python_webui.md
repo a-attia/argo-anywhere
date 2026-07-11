@@ -217,8 +217,14 @@ P3 landed on 2026-07-10 (single-terminal model):
   in a new native window by default**. Concretely:
   - **Channel card** is the hero + the live status (no raw `status` dump): a
     `Connect` CTA when the tunnel is down (-> embedded terminal), and
-    signal-path + meta + `Check health` when up, naming who holds the channel
-    (this UI vs an external terminal).
+    signal-path + meta + **live health** when up, naming who holds the channel
+    (this UI vs an external terminal). Health is polled every 10s while the
+    tunnel is up (a `Live` toggle, default on; `Check now` for a manual probe).
+    **Safety**: the probe is an HTTP GET to `/health` through the *existing*
+    tunnel -- it never opens an SSH connection, so it cannot trigger the
+    3-failures/15-min Duo lockout (the engine's own monitor already polls
+    `/health` in a loop). It self-gates on tunnel-up + tab-visible and never
+    initiates tunnel/SSH setup.
   - **`+ Launch tool`** header button opens a focused popover (command / cli-tool
     / scope / **target**). Target defaults per command -- new native window for
     `run`/`client`/`configure`/`setup`, embedded for `connect`/`tunnel` -- and
