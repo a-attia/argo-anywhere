@@ -96,6 +96,11 @@
     .channel-actions { display: flex; align-items: center; gap: 11px; margin-top: 12px; }
     .act-note { font-size: 11.5px; color: var(--ink-dim); }
     .act-note.err { color: var(--down); } .act-note.ok { color: var(--up); }
+    .live-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+                   color: var(--ink-dim); cursor: pointer; user-select: none; }
+    .live-toggle input { accent-color: var(--link); margin: 0; }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-faint); }
+    .live-dot.on { background: var(--up); animation: pulse 2.4s ease-in-out infinite; --dot: var(--up); }
     .connect-cta { display: flex; align-items: center; gap: 12px; }
     .connect-cta .sub { font-size: 12px; color: var(--ink-dim); }
 
@@ -185,8 +190,12 @@
           <div id="channelUp" hidden>
             <div class="channel-meta" id="channelMeta"></div>
             <div class="channel-actions">
-              <button id="checkHealth" class="btn btn-soft">Check health</button>
-              <span class="act-note" id="healthNote">one-shot probe through the tunnel</span>
+              <button id="checkHealth" class="btn btn-soft">Check now</button>
+              <label class="live-toggle" title="Polls /health through the existing tunnel every 10s. No new SSH connection — it cannot trigger a Duo lockout.">
+                <span class="live-dot" id="liveDot"></span>
+                <input type="checkbox" id="liveToggle" checked> Live
+              </label>
+              <span class="act-note" id="healthNote">live — polls /health through the tunnel (no new SSH)</span>
             </div>
           </div>
         </div>
@@ -325,6 +334,9 @@
 
     // ---- monitor: local status auto-refresh ------------------------------
     let cachedPort = null, tunnelUp = false, lastSessions = [];
+    let prevTunnelUp = false;                                  // for edge-triggered probe
+    let liveHealth = true, healthInFlight = false, lastHealthTs = 0;
+    const HEALTH_POLL_MS = 10000;
     const fmtUptime = (s) => { s = Math.floor(s); if (s < 60) return s + 's';
       const m = Math.floor(s / 60), r = s % 60; if (m < 60) return m + 'm' + (r ? ' ' + r + 's' : '');
       return Math.floor(m / 60) + 'h ' + (m % 60) + 'm'; };
@@ -354,6 +366,12 @@
           `user <b>${st.user || '—'}</b>node <b>${st.node || '—'}</b>port <b>${cachedPort}</b>` +
           `held by <b>${held ? 'this UI (' + held.id + ')' : 'external terminal'}</b>`;
       } else { setHop('hopProxy', 'unknown'); el('proxySub').textContent = '—'; }
+
+      // Live health: probe immediately when the tunnel first comes up; reset
+      // when it drops. Steady-state polling is handled by the interval below.
+      if (tunnelUp && liveHealth && !prevTunnelUp) doHealthCheck();
+      if (!tunnelUp) { lastHealthTs = 0; el('liveDot').classList.remove('on'); }
+      prevTunnelUp = tunnelUp;
 
       renderSessions(lastSessions); renderListeners(listeners);
     }
@@ -393,19 +411,43 @@
 
     // ---- channel: connect + health --------------------------------------
     el('connectBtn').addEventListener('click', () => openTerminal('verb=connect', 'connect'));
-    el('checkHealth').addEventListener('click', async () => {
-      if (!cachedPort) return;
+
+    // One /health probe through the EXISTING tunnel. This never opens an SSH
+    // connection, so it cannot trigger a Duo lockout -- safe to run on a loop.
+    // manual=true forces a probe (button); otherwise it self-gates on live +
+    // tunnel-up + visible + no-overlap.
+    async function doHealthCheck({ manual = false } = {}) {
+      if (!cachedPort || healthInFlight) return;
+      if (!manual && (!liveHealth || !tunnelUp || document.hidden)) return;
+      healthInFlight = true;
       const note = el('healthNote'); note.className = 'act-note';
-      el('checkHealth').disabled = true; el('proxySub').textContent = 'checking…'; note.textContent = 'contacting argo-proxy…';
+      if (manual) { el('checkHealth').disabled = true; el('proxySub').textContent = 'checking…'; note.textContent = 'contacting argo-proxy…'; }
       try {
         const h = await (await fetch('/api/health?port=' + cachedPort, { cache: 'no-store' })).json();
-        if (h.up) { setHop('hopProxy', 'up'); setWire('wireProxy', 'up', 'up'); el('proxySub').textContent = h.latency_ms + ' ms';
-          note.textContent = `healthy · ${h.status || 'ok'}`; note.classList.add('ok'); }
-        else { setHop('hopProxy', 'down'); el('proxySub').textContent = 'no answer';
-          note.textContent = 'no /health response through the tunnel'; note.classList.add('err'); }
-      } catch (e) { note.textContent = 'health check failed'; note.classList.add('err'); }
-      finally { el('checkHealth').disabled = false; }
+        lastHealthTs = Date.now();
+        if (h.up) {
+          setHop('hopProxy', 'up'); setWire('wireProxy', 'up', 'up');
+          el('proxySub').textContent = h.latency_ms + ' ms';
+          el('liveDot').classList.toggle('on', liveHealth);
+          note.textContent = (liveHealth ? 'live · ' : '') + `healthy · ${h.status || 'ok'}`;
+          note.classList.add('ok');
+        } else {
+          setHop('hopProxy', 'down'); el('proxySub').textContent = 'no answer';
+          el('liveDot').classList.remove('on');
+          note.textContent = 'no /health response through the tunnel'; note.classList.add('err');
+        }
+      } catch (e) {
+        if (manual) { note.textContent = 'health check failed'; note.classList.add('err'); }
+      } finally { healthInFlight = false; if (manual) el('checkHealth').disabled = false; }
+    }
+    el('checkHealth').addEventListener('click', () => doHealthCheck({ manual: true }));
+    el('liveToggle').addEventListener('change', () => {
+      liveHealth = el('liveToggle').checked;
+      if (liveHealth) { if (tunnelUp) doHealthCheck(); }
+      else { el('liveDot').classList.remove('on'); el('healthNote').textContent = 'live off — click Check now to probe'; el('healthNote').className = 'act-note'; }
     });
+    // Steady-state live polling (self-gates inside doHealthCheck).
+    setInterval(() => doHealthCheck(), HEALTH_POLL_MS);
     async function stopSession(id) {
       let r = await fetch(`/api/sessions/${id}/stop`, { method: 'POST' });
       if (r.status === 409) { const w = await r.json(); if (!confirm(w.detail + '\n\nStop it anyway?')) return;
