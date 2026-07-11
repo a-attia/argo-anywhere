@@ -19,6 +19,7 @@
 #   argo_anywhere.sh status                  # check tunnel + proxy health
 #   argo_anywhere.sh stop                    # tear down the local tunnel
 #   argo_anywhere.sh update-models           # refresh OpenCode model list
+#   argo_anywhere.sh list-models             # tabulate models served by /v1/models
 #   argo_anywhere.sh clean                   # remove every artifact created
 #   argo_anywhere.sh list-tools              # print supported --cli-tool values
 #   argo_anywhere.sh help                    # long-form guide
@@ -181,7 +182,7 @@ esac
 #   19. SUMMARY GATHERING        -- fetch_proxy_models, gather_summary
 #   20. SUMMARY RENDERING        -- render_summary (the big box)
 #   21. STATUS / STOP            -- mode_status, mode_stop
-#   22. UPDATE-MODELS            -- mode_update_models
+#   22. UPDATE-MODELS + LIST-MODELS -- mode_update_models, mode_list_models
 #   23. CLEAN HELPERS            -- _clean_rm, _clean_risky_file
 #   24. CLEAN MODE               -- mode_clean (local + remote)
 #   25. HELP / DISPATCH          -- usage, long_help, main
@@ -246,6 +247,60 @@ _legacy_CLAUDECODE_SCOPE="${CLAUDECODE_SCOPE:-}"
 # ============================================================================
 # SECTION: 2. USER-EDITABLE CONFIG
 # ============================================================================
+# Script-version string used by `update argo-anywhere` for the
+# installed-vs-upstream comparison and by `status` / `help` for display.
+# Bump in lockstep with `git tag vX.Y.Z` on release (per the PLAN.md
+# release process). Format: "<major>.<minor>.<patch>" with optional
+# "-rc<N>" / "-dev" suffix for pre-release builds; _extract_version
+# normalizes both forms.
+SCRIPT_VERSION="2.2.1-dev"
+
+# Canonical install root for the script itself (managed by the
+# bootstrap helper triggered on first 'client' / 'setup' run, and by
+# the 'update argo-anywhere' subcommand). Contains:
+#   * argo_anywhere.sh   -- the script itself (PATH-discoverable)
+#   * env                -- sourceable PATH-setup helper (rustup style)
+# The user adds `. ~/.argo_anywhere/env` (or equivalent) to their shell
+# rc; the script never edits the rc directly. Per D-023 (PLAN.md):
+# canonical install lives at $HOME/.argo_anywhere (a directory; do NOT
+# confuse with the legacy $HOME/.argo_anywhere.sh single-file path used
+# on the REMOTE compute node for the scp'd self-copy; that path is the
+# REMOTE_SELF constant below).
+ARGO_INSTALL_DIR="${HOME}/.argo_anywhere"
+# bin/ layout (Lifecycle Phase C / D-025 D-a): the script + thin
+# install/uninstall wrappers live under bin/ so there's a canonical,
+# sweepable location. ARGO_INSTALL_SCRIPT points at the bin/ copy;
+# ARGO_INSTALL_SCRIPT_FLAT is the pre-Phase-C (D-023) flat location kept
+# only for one-shot migration detection.
+ARGO_INSTALL_BIN_DIR="${ARGO_INSTALL_DIR}/bin"
+ARGO_INSTALL_SCRIPT="${ARGO_INSTALL_BIN_DIR}/argo_anywhere.sh"
+ARGO_INSTALL_SCRIPT_FLAT="${ARGO_INSTALL_DIR}/argo_anywhere.sh"
+ARGO_INSTALL_WRAP_INSTALL="${ARGO_INSTALL_BIN_DIR}/install"
+ARGO_INSTALL_WRAP_UNINSTALL="${ARGO_INSTALL_BIN_DIR}/uninstall"
+ARGO_INSTALL_ENV="${ARGO_INSTALL_DIR}/env"
+
+# Install manifest (D-025 D-c; Lifecycle Phase A). Records, at FIRST touch
+# of each client config, whether the file pre-existed and where its
+# original backup lives, plus which tool binaries this script installed.
+# Read by the (future) `uninstall` subcommand to restore client configs
+# to their pre-argo-anywhere state correctly (delete files we created;
+# restore the true pre-argo backup for files we modified) and to remove
+# only the tool binaries we installed. Laptop-side only (never written on
+# a compute node). First-touch-wins: an existing entry is never
+# overwritten, so the earliest recorded provenance is the true original.
+ARGO_MANIFEST="${ARGO_INSTALL_DIR}/manifest.json"
+ARGO_MANIFEST_SCHEMA=1
+
+# GitHub project coordinates for `update argo-anywhere`. PROJECT_REPO
+# is the "owner/repo" slug; PROJECT_RAW_URL_PREFIX is the
+# raw.githubusercontent.com prefix (without the ref; the ref is
+# appended at fetch time, either the latest release tag or the fallback
+# branch). PROJECT_RELEASES_API is the GitHub Releases API endpoint.
+PROJECT_REPO="a-attia/argo-anywhere"
+PROJECT_RAW_URL_PREFIX="https://raw.githubusercontent.com/${PROJECT_REPO}"
+PROJECT_RELEASES_API="https://api.github.com/repos/${PROJECT_REPO}/releases/latest"
+PROJECT_DEFAULT_BRANCH="main"
+
 # Add or remove ANL compute nodes here. The client probes them in order and
 # uses the first one reachable through the jump host (or lets the user pick).
 # To add a node, append a fully-qualified hostname.
@@ -341,6 +396,17 @@ OPENCODE_PROJECT_CONFIG_BASENAME="opencode.json"
 # also use this proxy). claudecode_pick_scope() decides which.
 CLAUDECODE_GLOBAL_CONFIG="${HOME}/.claude/settings.json"
 CLAUDECODE_PROJECT_CONFIG="./.claude/settings.local.json"
+
+# aider config paths (read by us, written by setup_aider_cli_tool).
+#
+# aider searches for its YAML config (`.aider.conf.yml`) in this order,
+# last-wins: home dir -> git-root -> cwd (plus an explicit --config path
+# we do not use). We write to either the global (home) file or a
+# project-local file at the git-root (cwd fallback). The project basename
+# matches aider's own discovery name so the file we write is the file
+# aider reads. See <https://aider.chat/docs/config/aider_conf.html>.
+AIDER_GLOBAL_CONFIG="${HOME}/.aider.conf.yml"
+AIDER_PROJECT_CONFIG_BASENAME=".aider.conf.yml"
 
 # Remote paths (compute node side). Canonical name as of v2.0 is
 # argo_anywhere; legacy .argo_opencode.* files are removed by `clean`
@@ -926,6 +992,263 @@ and start fresh, see the 'aggressive' cleanup in UPGRADING.md.
 
 EOF
   return 1
+}
+
+# ----------------------------------------------------------------------------
+# Canonical-install bootstrap (per PLAN.md D-023)
+# ----------------------------------------------------------------------------
+# The script ships as a single file the user `curl`s into any directory.
+# That works fine for one-off invocations, but power users want a stable,
+# PATH-discoverable install at $ARGO_INSTALL_DIR (=~/.argo_anywhere/) so
+# `argo_anywhere.sh ...` works from any shell.
+#
+# Convention (rustup / cargo style):
+#   $ARGO_INSTALL_DIR/argo_anywhere.sh   the script (chmod +x)
+#   $ARGO_INSTALL_DIR/env                sourceable PATH-setup helper
+#
+# The user adds one line to their shell rc (`. ~/.argo_anywhere/env`); the
+# script NEVER edits the rc directly (decision: explicit > implicit; matches
+# the user's answer in the design Q&A).
+#
+# Bootstrap fires only on `client` / `setup` (the canonical "I'm setting
+# this up" workflows) and only when $ARGO_INSTALL_DIR does not yet exist.
+# It is a no-op when:
+#   * we're already running from the canonical install (`$0` -> $ARGO_INSTALL_SCRIPT)
+#   * we're running on a compute node (the on-node short-circuit doesn't
+#     benefit from a laptop-side canonical install; the remote bootstrap
+#     uses REMOTE_SELF = ~/.argo_anywhere.sh which is a different path)
+#   * $ARGO_INSTALL_DIR already exists (don't second-guess the user; that's
+#     `update argo-anywhere`'s job)
+#
+# Skip-knob: ARGO_ANYWHERE_SKIP_BOOTSTRAP=1 in the env (or after a one-shot
+# decline on the prompt).
+
+# canonical_install_present: 0 if the canonical install exists, 1 otherwise.
+canonical_install_present() {
+  # Present if EITHER the new bin/ layout OR the pre-Phase-C flat layout
+  # has a script. The flat case is migrated into bin/ by _install_core on
+  # the next install/bootstrap; until then it still counts as installed.
+  [ -d "$ARGO_INSTALL_DIR" ] && { [ -f "$ARGO_INSTALL_SCRIPT" ] || [ -f "$ARGO_INSTALL_SCRIPT_FLAT" ]; }
+}
+
+# _resolve_self_path: print the absolute path of the currently-running
+# script (`$0` after readlink). Best-effort; tools/OS differences:
+#   * macOS lacks GNU readlink -f; use perl Cwd::abs_path as fallback.
+# Returns empty string on resolution failure (caller treats empty as
+# "non-canonical location"; the bootstrap will then offer install).
+_resolve_self_path() {
+  local self="$0"
+  # If $0 is a relative path or a bare name, prefer the discovered absolute.
+  if command -v readlink >/dev/null 2>&1 && readlink -f / >/dev/null 2>&1; then
+    readlink -f "$self" 2>/dev/null || true
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$self" 2>/dev/null || true
+  else
+    # Last-resort: assume $0 is already absolute, or join with PWD.
+    case "$self" in
+      /*) printf '%s' "$self" ;;
+      *)  printf '%s/%s' "$PWD" "$self" ;;
+    esac
+  fi
+}
+
+# _write_argo_env_file <path>: write the rustup-style sourceable PATH
+# helper at <path>. Idempotent (overwrites any existing file at that
+# location; the file is fully script-owned).
+_write_argo_env_file() {
+  local out="$1"
+  cat > "$out" <<'ARGO_ENV_EOF'
+#!/bin/sh
+# argo-anywhere PATH helper. Source this from your shell rc to make
+# `argo_anywhere.sh` (and the `install` / `uninstall` wrappers)
+# discoverable as bare commands:
+#
+#   . "$HOME/.argo_anywhere/env"
+#
+# Managed by argo_anywhere.sh's install/bootstrap + `update argo-anywhere`
+# helpers. Safe to re-source (idempotent PATH prepend with a presence
+# guard so the entry doesn't accumulate on repeated sourcings).
+#
+# As of the bin/ layout the script lives in ~/.argo_anywhere/bin. The
+# flat ~/.argo_anywhere entry is kept too for backward compatibility with
+# pre-bin/ installs that may still have a script at the dir root.
+case ":${PATH}:" in
+  *:"$HOME/.argo_anywhere/bin":*)
+    ;;
+  *)
+    export PATH="$HOME/.argo_anywhere/bin:$HOME/.argo_anywhere:$PATH"
+    ;;
+esac
+ARGO_ENV_EOF
+}
+
+# _write_install_wrappers: write the thin bin/install + bin/uninstall
+# wrappers that call `argo_anywhere.sh install` / `uninstall`. Keeps the
+# single-file distribution (D-001) -- these are 3-line discoverability
+# shims, not real logic. Idempotent (script-owned; overwritten each time).
+_write_install_wrappers() {
+  cat > "$ARGO_INSTALL_WRAP_INSTALL" <<'ARGO_WRAP_EOF'
+#!/bin/sh
+# Thin wrapper -> argo_anywhere.sh install (real logic lives in the
+# single-file script; this exists only for `install` discoverability).
+exec "$(dirname "$0")/argo_anywhere.sh" install "$@"
+ARGO_WRAP_EOF
+  cat > "$ARGO_INSTALL_WRAP_UNINSTALL" <<'ARGO_WRAP_EOF'
+#!/bin/sh
+# Thin wrapper -> argo_anywhere.sh uninstall.
+exec "$(dirname "$0")/argo_anywhere.sh" uninstall "$@"
+ARGO_WRAP_EOF
+  chmod +x "$ARGO_INSTALL_WRAP_INSTALL" "$ARGO_INSTALL_WRAP_UNINSTALL" 2>/dev/null || true
+}
+
+# _install_core <self_abs>: materialize the canonical bin/ install from
+# the running script at <self_abs>. Creates bin/, copies the script,
+# writes wrappers + env, migrates a pre-Phase-C flat-layout script if
+# present, and stamps the manifest's installed_at. Shared by the explicit
+# `install` subcommand and the first-run bootstrap. Returns 0 on success,
+# 1 on a non-fatal failure (caller decides how loud to be).
+_install_core() {
+  local self_abs="$1"
+  if ! mkdir -p "$ARGO_INSTALL_BIN_DIR"; then
+    warn "install: could not create ${ARGO_INSTALL_BIN_DIR}."
+    return 1
+  fi
+  # Migrate a pre-Phase-C flat-layout script (D-023) into bin/ if present
+  # and we're not already installing over it.
+  if [ -f "$ARGO_INSTALL_SCRIPT_FLAT" ] && [ "$self_abs" != "$ARGO_INSTALL_SCRIPT_FLAT" ]; then
+    log "  Migrating flat-layout script ${ARGO_INSTALL_SCRIPT_FLAT} -> ${ARGO_INSTALL_SCRIPT}"
+    mv -f "$ARGO_INSTALL_SCRIPT_FLAT" "$ARGO_INSTALL_SCRIPT" 2>/dev/null || true
+  fi
+  if ! cp "$self_abs" "$ARGO_INSTALL_SCRIPT"; then
+    warn "install: could not copy ${self_abs} -> ${ARGO_INSTALL_SCRIPT}."
+    return 1
+  fi
+  chmod +x "$ARGO_INSTALL_SCRIPT" 2>/dev/null || true
+  _write_install_wrappers
+  if ! _write_argo_env_file "$ARGO_INSTALL_ENV"; then
+    warn "install: could not write ${ARGO_INSTALL_ENV}; PATH integration incomplete."
+  else
+    chmod +x "$ARGO_INSTALL_ENV" 2>/dev/null || true
+  fi
+  # Stamp installed_at in the manifest (best-effort; creates the manifest
+  # if it doesn't exist yet).
+  _manifest_stamp_installed_at
+  return 0
+}
+
+# _manifest_stamp_installed_at: set the manifest's installed_at to now if
+# it isn't already set. Best-effort; laptop-side only.
+_manifest_stamp_installed_at() {
+  _manifest_available || return 0
+  python3 - "$ARGO_MANIFEST" "$ARGO_MANIFEST_SCHEMA" <<'PYEOF' 2>/dev/null || true
+import json, os, sys, tempfile, datetime
+manifest, schema = sys.argv[1], int(sys.argv[2])
+data = {}
+if os.path.isfile(manifest):
+    try:
+        with open(manifest) as f:
+            data = json.load(f) or {}
+    except Exception:
+        data = {}
+if not isinstance(data, dict):
+    data = {}
+data.setdefault("schema", schema)
+data.setdefault("configs", {})
+data.setdefault("binaries", {})
+if not data.get("installed_at"):
+    data["installed_at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+os.makedirs(os.path.dirname(manifest), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(manifest), prefix=".manifest.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2); f.write("\n")
+    os.replace(tmp, manifest)
+except Exception:
+    try: os.unlink(tmp)
+    except Exception: pass
+PYEOF
+}
+
+# _print_path_setup_hint: tell the user how to add the env file to
+# their shell rc. Printed ONCE per bootstrap (and again on first
+# successful `update argo-anywhere` if the env file was just rewritten).
+_print_path_setup_hint() {
+  local shell_name
+  shell_name="$(basename "${SHELL:-/bin/sh}")"
+  local rc_file=""
+  case "$shell_name" in
+    zsh)  rc_file="${ZDOTDIR:-$HOME}/.zshrc" ;;
+    bash) rc_file="$HOME/.bashrc"            ;;
+    *)    rc_file="$HOME/.profile"           ;;
+  esac
+  cat >&2 <<EOF
+
+  ${C_GRN}To make 'argo_anywhere.sh' discoverable as a bare command in new shells,${C_OFF}
+  ${C_GRN}add this ONE line to ${rc_file}:${C_OFF}
+
+      . "\$HOME/.argo_anywhere/env"
+
+  Then either open a new shell, or run:
+
+      . "\$HOME/.argo_anywhere/env"
+
+  in this shell to pick up the change immediately.
+
+EOF
+}
+
+# maybe_bootstrap_canonical_install: invoked from mode_client / mode_setup
+# BEFORE any other work. No-op in all the cases listed in the section
+# preamble. When it does fire, it copies $0 to $ARGO_INSTALL_SCRIPT,
+# writes $ARGO_INSTALL_ENV, and prints the PATH-setup hint.
+#
+# Honors ARGO_ANYWHERE_SKIP_BOOTSTRAP=1 (env knob; not a CLI flag --
+# bootstrap is supposed to be one-shot and invisible after that, so a
+# CLI flag would be overkill).
+#
+# Never aborts the outer flow on failure: a failed bootstrap (e.g.
+# read-only $HOME, missing cp) prints a warn and proceeds; the user's
+# `client` run still works from wherever $0 was invoked.
+maybe_bootstrap_canonical_install() {
+  # Opt-out.
+  [ "${ARGO_ANYWHERE_SKIP_BOOTSTRAP:-0}" = 1 ] && return 0
+
+  # No-op if already installed.
+  if canonical_install_present; then
+    return 0
+  fi
+
+  # No-op on compute nodes (server-side bootstrap is its own path; the
+  # canonical laptop-side install at ~/.argo_anywhere/ is not what the
+  # on-node short-circuit wants).
+  if [ "$(on_anl_compute_node)" = "yes" ]; then
+    return 0
+  fi
+
+  local self_abs; self_abs="$(_resolve_self_path)"
+  if [ -z "$self_abs" ] || [ ! -f "$self_abs" ]; then
+    warn "Bootstrap: could not resolve absolute path of running script ($0)."
+    warn "  Skipping canonical install. You can run 'update argo-anywhere' later"
+    warn "  to install it explicitly."
+    return 0
+  fi
+
+  # No-op if we ARE the canonical install (defensive; the
+  # canonical_install_present check above would normally catch this).
+  if [ "$self_abs" = "$ARGO_INSTALL_SCRIPT" ]; then
+    return 0
+  fi
+
+  log "First-run setup: installing argo_anywhere.sh into ${ARGO_INSTALL_BIN_DIR}..."
+  if ! _install_core "$self_abs"; then
+    warn "Bootstrap: canonical install incomplete (run from ${self_abs} still works)."
+    return 0
+  fi
+
+  ok "Installed argo_anywhere.sh v${SCRIPT_VERSION} at ${ARGO_INSTALL_SCRIPT}"
+  ok "  Wrappers: ${ARGO_INSTALL_WRAP_INSTALL}, ${ARGO_INSTALL_WRAP_UNINSTALL}"
+  ok "  PATH helper written to ${ARGO_INSTALL_ENV}"
+  _print_path_setup_hint
 }
 
 # ============================================================================
@@ -1893,6 +2216,137 @@ yaml_scalar() {
 }
 
 # ============================================================================
+# SECTION: 10b. INSTALL MANIFEST (D-025 / Lifecycle Phase A)
+# ============================================================================
+# The manifest records provenance so a future `uninstall` can restore
+# client configs correctly + remove only binaries we installed. It is:
+#   * laptop-side only (never written on a compute node);
+#   * first-touch-wins (an existing entry is never overwritten -> the
+#     earliest recording is the true pre-argo-anywhere original);
+#   * best-effort (a manifest failure must NEVER break a config write --
+#     this is bookkeeping, not a load-bearing operation). Every helper
+#     swallows its own errors and returns 0.
+#
+# Schema (see ARGO_MANIFEST_SCHEMA):
+#   { "schema": 1, "installed_at": <iso|null>,
+#     "configs": { "<abspath>": { "first_touched": <iso>,
+#                                 "preexisted": bool,
+#                                 "created_by_us": bool } },
+#     "binaries": { "<tool>": { "installed_by_us": true,
+#                               "path": <str>, "method": <str>,
+#                               "recorded_at": <iso> } } }
+
+# _manifest_available: 0 if we can + should write the manifest (python3
+# present AND not on a compute node), 1 otherwise. Keeps the guards in one
+# place so callers stay one-liners.
+_manifest_available() {
+  [ "$(on_anl_compute_node)" = "yes" ] && return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# manifest_record_config <abspath> <preexisted:0|1>: record a client
+# config's provenance at first touch. First-touch-wins: if an entry for
+# <abspath> already exists, this is a no-op (preserves the true original).
+# Best-effort; never fails the caller.
+manifest_record_config() {
+  _manifest_available || return 0
+  local path="$1" preexisted="$2"
+  python3 - "$ARGO_MANIFEST" "$ARGO_MANIFEST_SCHEMA" "$path" "$preexisted" <<'PYEOF' 2>/dev/null || true
+import json, os, sys, tempfile, datetime
+manifest, schema, path, preexisted = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+
+data = {}
+if os.path.isfile(manifest):
+    try:
+        with open(manifest) as f:
+            data = json.load(f) or {}
+    except Exception:
+        data = {}
+if not isinstance(data, dict):
+    data = {}
+data.setdefault("schema", schema)
+data.setdefault("installed_at", None)
+data.setdefault("configs", {})
+data.setdefault("binaries", {})
+if not isinstance(data["configs"], dict):
+    data["configs"] = {}
+
+# First-touch-wins: never overwrite an existing entry.
+if path not in data["configs"]:
+    pre = (preexisted == "1")
+    data["configs"][path] = {
+        "first_touched": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "preexisted": pre,
+        "created_by_us": (not pre),
+    }
+
+os.makedirs(os.path.dirname(manifest), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(manifest), prefix=".manifest.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, manifest)   # atomic within the same filesystem
+except Exception:
+    try:
+        os.unlink(tmp)
+    except Exception:
+        pass
+PYEOF
+}
+
+# manifest_record_binary <tool> <path> <method>: record that THIS script
+# installed a tool binary (so uninstall --remove-binaries can remove only
+# our installs). First-touch-wins per tool. Best-effort.
+manifest_record_binary() {
+  _manifest_available || return 0
+  local tool="$1" path="$2" method="$3"
+  python3 - "$ARGO_MANIFEST" "$ARGO_MANIFEST_SCHEMA" "$tool" "$path" "$method" <<'PYEOF' 2>/dev/null || true
+import json, os, sys, tempfile, datetime
+manifest, schema, tool, path, method = sys.argv[1:6]
+schema = int(schema)
+
+data = {}
+if os.path.isfile(manifest):
+    try:
+        with open(manifest) as f:
+            data = json.load(f) or {}
+    except Exception:
+        data = {}
+if not isinstance(data, dict):
+    data = {}
+data.setdefault("schema", schema)
+data.setdefault("installed_at", None)
+data.setdefault("configs", {})
+data.setdefault("binaries", {})
+if not isinstance(data["binaries"], dict):
+    data["binaries"] = {}
+
+if tool not in data["binaries"]:
+    data["binaries"][tool] = {
+        "installed_by_us": True,
+        "path": path,
+        "method": method,
+        "recorded_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+os.makedirs(os.path.dirname(manifest), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(manifest), prefix=".manifest.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, manifest)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except Exception:
+        pass
+PYEOF
+}
+
+# ============================================================================
 # SECTION: 11. CONFIG FILE HANDLING (handle_config_file, k/b/d/m/a prompt)
 # ============================================================================
 # Used for both ~/.config/opencode/config.json and the argo-proxy YAML.
@@ -1902,6 +2356,17 @@ handle_config_file() {
   local target="$1" desc="$2" writer="$3"
   local dir; dir="$(dirname "$target")"
   mkdir -p "$dir"
+
+  # Manifest (Lifecycle Phase A): record this config's provenance at the
+  # FIRST moment we touch it -- BEFORE any write -- because right now is
+  # when we still know whether it pre-existed. First-touch-wins inside
+  # the helper means re-runs don't clobber the true original. Best-effort;
+  # a no-op on compute nodes (the argo-proxy YAML also flows through here
+  # in mode_server, but the manifest is a laptop-side client-config
+  # concept and _manifest_available screens the node out).
+  local _preexisted=0
+  [ -f "$target" ] && _preexisted=1
+  manifest_record_config "$target" "$_preexisted"
 
   if [ ! -f "$target" ]; then
     log "No existing ${desc} at ${target}; writing fresh one."
@@ -2181,6 +2646,10 @@ ensure_opencode_installed() {
     die "Cannot continue without a runnable opencode binary."
   fi
   ok "OpenCode installed: $(command -v opencode)"
+  # Manifest: we (not the user) installed this binary -> eligible for
+  # `uninstall --remove-binaries`. Recorded only on the just-installed
+  # path (the already-installed early return above never reaches here).
+  manifest_record_binary opencode "$(command -v opencode)" "upstream-installer"
 }
 
 # ----------------------------------------------------------------------------
@@ -2277,7 +2746,7 @@ _opencode_check_conflicts() {
     # [k/b/d/m/a] would normally handle this, but offering the scope
     # switch here is a more visible signal that there's a choice.
     if [ -f "$OPENCODE_GLOBAL_CONFIG" ] && [ -s "$OPENCODE_GLOBAL_CONFIG" ]; then
-      conflict_desc="${OPENCODE_GLOBAL_CONFIG} already exists and is non-empty. handle_config_file's [k/b/d/m/a] prompt will offer per-file resolution, but you can also switch to project scope to leave your global file untouched (writes <git-root>/opencode.json or cwd/opencode.json instead)."
+      conflict_desc="${OPENCODE_GLOBAL_CONFIG} already exists and is non-empty. You can keep global scope (a later prompt will ask how to handle the existing file), or switch to project scope now to leave your global file untouched (writes <git-root>/opencode.json or cwd/opencode.json instead)."
     fi
   elif [ "$intended" = "project" ]; then
     other_scope="global"
@@ -2394,6 +2863,9 @@ ensure_claudecode_installed() {
     die "Cannot continue without a runnable claude binary."
   fi
   ok "Claude Code installed: $(command -v claude)"
+  # Manifest: we installed this binary (already-installed early return
+  # above never reaches here) -> eligible for `uninstall --remove-binaries`.
+  manifest_record_binary claudecode "$(command -v claude)" "upstream-installer"
 }
 
 # =============================================================================
@@ -2563,7 +3035,7 @@ PYEOF
         [ -s "$CLAUDECODE_GLOBAL_CONFIG" ] && _has_content=1
       fi
       if [ "$_has_content" = 1 ]; then
-        conflict_desc="${CLAUDECODE_GLOBAL_CONFIG} already exists and has content. handle_config_file's [k/b/d/m/a] prompt will offer per-file resolution, but you can also switch to project scope to leave your global file untouched."
+        conflict_desc="${CLAUDECODE_GLOBAL_CONFIG} already exists and has content. You can keep global scope (a later prompt will ask how to handle the existing file), or switch to project scope now to leave your global file untouched."
       fi
     fi
     # A.3 -- project file in cwd already has our env keys (project will
@@ -2737,6 +3209,465 @@ setup_claudecode_cli_tool() {
   handle_config_file "$_CLAUDECODE_SCOPE_PATH" \
     "Claude Code config (${_CLAUDECODE_SCOPE_NAME})" \
     write_claudecode_config
+}
+
+# ----------------------------------------------------------------------------
+# aider config writer + installer + end-to-end client setup
+# (subsection of 12; peer of setup_opencode_cli_tool / setup_claudecode_cli_tool)
+#
+# Phase 5a. aider is the low-risk multi-tool addition: it rides the same
+# OpenAI-Chat-compatible surface (/v1/chat/completions) that OpenCode
+# already uses, so no new argo-proxy behaviour is required. The config is
+# YAML (~/.aider.conf.yml). We own three keys (openai-api-base,
+# openai-api-key, model) and preserve every other user-set key via a
+# PyYAML round-trip when python3 + PyYAML are available; when they are
+# not, we fall back to a from-scratch write (documented below).
+#
+# Scope model mirrors opencode: global (~/.aider.conf.yml) vs project
+# (<git-root>/.aider.conf.yml, cwd fallback). No OAuth-state concern
+# (aider has no personal-subscription login to shadow), so the per-tool
+# default is global. Conflict detection reuses the opencode shape
+# (A.1 existing-content; B.2 cwd-not-a-project for explicit --scope
+# project).
+# ----------------------------------------------------------------------------
+
+# aider_scope_values: D-018 per-tool scope vocabulary. aider supports
+# both global (~/.aider.conf.yml) and project
+# (<git-root>/.aider.conf.yml, cwd fallback) scopes.
+aider_scope_values() {
+  printf 'global project'
+}
+
+_AIDER_SCOPE_PATH=""
+_AIDER_SCOPE_NAME=""
+
+# aider_pick_scope: D-017 scope resolution + conflict detection for aider.
+# Structurally identical to opencode_pick_scope (aider has no OAuth
+# state), so the per-tool default is global; conflict detection still
+# runs (A.1 existing-content-collision; B.2 cwd-not-a-project for
+# explicit --scope project). Sets _AIDER_SCOPE_PATH / _AIDER_SCOPE_NAME
+# for write_aider_config + the dispatcher to consume. DO NOT capture via
+# $() -- may prompt the user.
+aider_pick_scope() {
+  local _intended_scope=""
+  local _scope_source=""
+  if [ -n "${_SCOPE_OVERRIDE:-}" ]; then
+    _intended_scope="$_SCOPE_OVERRIDE"
+    _scope_source="--scope ${_intended_scope}"
+  elif [ -n "${ARGO_ANYWHERE_SCOPE:-}" ]; then
+    _intended_scope="$ARGO_ANYWHERE_SCOPE"
+    _scope_source="ARGO_ANYWHERE_SCOPE env"
+  fi
+
+  if [ -n "$_intended_scope" ]; then
+    _validate_scope_for_tool aider "$_intended_scope"
+  else
+    # Per-tool auto-default: global. (No OAuth-state concern.)
+    _intended_scope="global"
+    _scope_source="auto (aider default; no OAuth-state concern)"
+  fi
+
+  case "$_intended_scope" in
+    global)
+      _AIDER_SCOPE_PATH="$AIDER_GLOBAL_CONFIG"
+      _AIDER_SCOPE_NAME="global (${AIDER_GLOBAL_CONFIG})"
+      ;;
+    project)
+      local _proj_root; _proj_root="$(_git_root_or_cwd)"
+      _AIDER_SCOPE_PATH="${_proj_root}/${AIDER_PROJECT_CONFIG_BASENAME}"
+      _AIDER_SCOPE_NAME="project (${_AIDER_SCOPE_PATH})"
+      ;;
+    *)
+      die "aider_pick_scope: internal error -- intended scope '${_intended_scope}' not in vocabulary (aider_scope_values returns: $(aider_scope_values))."
+      ;;
+  esac
+
+  log "aider scope: ${_intended_scope} (${_scope_source})."
+  if [ "$_intended_scope" = "project" ]; then
+    log "  Config will land at ${_AIDER_SCOPE_PATH} and apply only when"
+    log "  'aider' is invoked from within this project tree."
+  else
+    log "  Config will land at ${_AIDER_SCOPE_PATH} and apply when"
+    log "  'aider' is invoked from any directory."
+  fi
+
+  _aider_check_conflicts "$_intended_scope"
+}
+
+# _aider_check_conflicts: per-scope conflict detection + scope-switch
+# prompt. Mirrors _opencode_check_conflicts. Mutates _AIDER_SCOPE_PATH /
+# _AIDER_SCOPE_NAME if the user chooses to switch.
+_aider_check_conflicts() {
+  local intended="$1"
+  local conflict_desc=""
+  local other_scope=""
+  if [ "$intended" = "global" ]; then
+    other_scope="project"
+    if [ -f "$AIDER_GLOBAL_CONFIG" ] && [ -s "$AIDER_GLOBAL_CONFIG" ]; then
+      conflict_desc="${AIDER_GLOBAL_CONFIG} already exists and is non-empty. You can keep global scope (a later prompt will ask how to handle the existing file), or switch to project scope now to leave your global file untouched (writes <git-root>/.aider.conf.yml or cwd/.aider.conf.yml instead)."
+    fi
+  elif [ "$intended" = "project" ]; then
+    other_scope="global"
+    local _is_project=0
+    if command -v git >/dev/null 2>&1 && git rev-parse --show-toplevel >/dev/null 2>&1; then
+      _is_project=1
+    elif [ -f "package.json" ] || [ -f "pyproject.toml" ] || [ -f "Cargo.toml" ] || [ -f "go.mod" ]; then
+      _is_project=1
+    elif [ "$(pwd)" = "$HOME" ]; then
+      _is_project=1
+    fi
+    if [ "$_is_project" = 0 ]; then
+      conflict_desc="--scope project will write $(pwd)/${AIDER_PROJECT_CONFIG_BASENAME}, but $(pwd) doesn't look like a project directory (no .git ancestor, no common project manifests). Most users in this situation want --scope global so 'aider' works from any directory."
+    fi
+  fi
+
+  if [ -n "$conflict_desc" ]; then
+    local _ssc_choice
+    _ssc_choice="$(prompt_scope_switch "$conflict_desc" "$intended" "$other_scope")"
+    case "$_ssc_choice" in
+      keep)
+        log "  Proceeding with ${intended} scope despite the conflict (user's choice)."
+        ;;
+      switch)
+        case "$other_scope" in
+          project)
+            local _proj_root; _proj_root="$(_git_root_or_cwd)"
+            _AIDER_SCOPE_PATH="${_proj_root}/${AIDER_PROJECT_CONFIG_BASENAME}"
+            _AIDER_SCOPE_NAME="project (${_AIDER_SCOPE_PATH})"
+            ;;
+          global)
+            _AIDER_SCOPE_PATH="$AIDER_GLOBAL_CONFIG"
+            _AIDER_SCOPE_NAME="global (${AIDER_GLOBAL_CONFIG})"
+            ;;
+        esac
+        log "  Switched to ${other_scope} scope; will write ${_AIDER_SCOPE_PATH}."
+        ;;
+    esac
+  fi
+}
+
+# write_aider_config <dest>: produce an aider YAML config that points at
+# the local tunnel. We own three keys:
+#   openai-api-base : http://localhost:<PORT>/v1   (OpenAI-Chat surface)
+#   openai-api-key  : <ANL username>               (argo-proxy bearer token)
+#   model           : openai/<default model id>    (routes via the openai provider)
+# Everything else in an existing ~/.aider.conf.yml is preserved.
+#
+# Merge strategy (mirrors write_claudecode_config's fail-loud discipline,
+# adapted for YAML):
+#   * python3 + PyYAML available -> round-trip the existing file,
+#     overwrite only our three keys, preserve all others. Refuse to
+#     merge (exit 2) if the existing file is present but unparseable, so
+#     we never silently destroy a user's broken-but-recoverable config
+#     (D-016 / audit M8 discipline).
+#   * python3 present, PyYAML absent -> the laptop side does NOT ship
+#     PyYAML by default (per PLAN.md scope: PyYAML is a compute-node-only
+#     dep). Fall back to a from-scratch write of just our three keys, but
+#     first back up any existing file so nothing is lost (exit 3 signals
+#     the bash side to emit a warning).
+#   * python3 absent -> from-scratch heredoc write of our three keys
+#     (aider's YAML is simple enough that a hand write is safe); warn.
+#
+# Reads the original file from _AIDER_SCOPE_PATH (handle_config_file
+# passes $dest as a tempfile during the k/b/d/a prompt, so the merge base
+# is the real target, not the tempfile) -- same pattern as
+# write_claudecode_config.
+write_aider_config() {
+  local dest="$1"
+  local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
+  [ -n "$user" ] || die "write_aider_config: no username available (ARGO_ANYWHERE_USER unset)"
+  # L6-class fail-loud: refuse to write a config with an empty port that
+  # would interpolate to 'http://localhost:/v1' and silently not connect.
+  [ -n "${PROXY_PORT:-}" ] || die "write_aider_config: PROXY_PORT is empty (resolve_port not called?). Refusing to write a config with openai-api-base 'http://localhost:/v1' that would silently fail to connect."
+
+  local orig="$_AIDER_SCOPE_PATH"
+  # Default model. aider routes an OpenAI-compatible provider via the
+  # 'openai/<id>' prefix; the <id> must be EXACTLY what argo-proxy's
+  # /v1/models advertises, which is the 'argo:'-prefixed id (e.g.
+  # 'argo:gpt-4o', 'argo:claude-opus-4.8'). A bare 'gpt-4o' (without the
+  # 'argo:' prefix) does NOT resolve at ANL -- Phase 5a live-test finding
+  # (2026-07-08).
+  #
+  # Default is gpt-4o: it is a non-reasoning model that works out of the
+  # box (accepts temperature; no reasoning-effort quirks). The earlier
+  # default gpt-5-nano was WRONG -- it returned empty responses even with
+  # temperature disabled (a gpt-5-*-nano reasoning quirk on the ANL
+  # gateway; the full gpt-5 works, but -nano does not). Override with
+  # AIDER_DEFAULT_MODEL or change 'model:' afterward (e.g.
+  # openai/argo:claude-opus-4.8, which works with the temperature-off
+  # model-settings this writer also emits).
+  local model="${AIDER_DEFAULT_MODEL:-openai/argo:gpt-4o}"
+
+  # The sibling model-settings file. aider needs use_temperature:false
+  # for reasoning / opus-4.7+ / gpt-5 / o-series / gemini-2.5+ models:
+  # they REJECT the 'temperature' param that aider (via LiteLLM) sends by
+  # default, and argo-proxy's upstream returns an EMPTY stream rather than
+  # an error (Phase 5a live-test finding 2026-07-08; this is the aider-
+  # facing surfacing of the audit's UP-10 G3). We disable temperature for
+  # ALL served argo: models -- harmless for models that would accept it
+  # (aider just omits the param), and future-proof. Written next to the
+  # config so it travels with the chosen scope.
+  local settings_dir; settings_dir="$(dirname "$orig")"
+  local settings_file="${settings_dir}/.aider.model.settings.yml"
+
+  if command -v python3 >/dev/null 2>&1; then
+    local _py_rc=0
+    python3 - "$orig" "$dest" "$user" "$PROXY_PORT" "$model" "$settings_file" <<'PYEOF' || _py_rc=$?
+import os, sys
+orig_path, dest_path, user, port, model, settings_file = sys.argv[1:7]
+
+try:
+    import yaml  # PyYAML
+except Exception:
+    # PyYAML not available on this laptop. Signal the bash side to do a
+    # backup + from-scratch write.
+    sys.exit(3)
+
+data = {}
+if os.path.isfile(orig_path):
+    try:
+        with open(orig_path) as f:
+            loaded = yaml.safe_load(f)
+        data = loaded if loaded is not None else {}
+    except Exception:
+        # Present but unparseable -> refuse to merge (preserve user file).
+        sys.exit(2)
+    if not isinstance(data, dict):
+        sys.exit(2)
+
+# Keys we own:
+data["openai-api-base"] = f"http://localhost:{port}/v1"
+data["openai-api-key"] = user
+data["model"] = model
+data["model-settings-file"] = settings_file
+
+with open(dest_path, "w") as f:
+    yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+
+# Write the sibling model-settings file: use_temperature:false for the
+# argo: models that need it. This is our file (we own it entirely), so we
+# rewrite it wholesale each run rather than merging.
+argo_models = [
+    "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+    "gpt-5", "gpt-5-mini", "gpt-5-nano",
+    "gpt-5.1", "gpt-5.2", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5",
+    "gpt-o1", "gpt-o3", "gpt-o3-mini", "gpt-o4-mini",
+    "o1", "o3", "o3-mini", "o4-mini",
+    "claude-opus-4.1", "claude-opus-4.5", "claude-opus-4.6",
+    "claude-opus-4.7", "claude-opus-4.8",
+    "claude-4.1-opus", "claude-4.5-opus", "claude-4.6-opus",
+    "claude-4.7-opus", "claude-4.8-opus",
+    "claude-sonnet-4.5", "claude-sonnet-4.6",
+    "claude-4.5-sonnet", "claude-4.6-sonnet",
+    "claude-haiku-4.5", "claude-4.5-haiku",
+    "gemini-2.5-flash", "gemini-2.5-pro",
+    "gemini-3.1-flash-lite", "gemini-3.5-flash",
+]
+settings = [
+    {"name": f"openai/argo:{m}", "use_temperature": False, "streaming": True}
+    for m in argo_models
+]
+with open(settings_file, "w") as f:
+    f.write("# Written by argo-anywhere. Disables the 'temperature' param for\n")
+    f.write("# argo-served models -- reasoning / opus-4.7+ / gpt-5 / o-series /\n")
+    f.write("# gemini models REJECT it and argo-proxy returns an empty stream.\n")
+    f.write("# Safe for models that accept temperature (the param is just omitted).\n")
+    yaml.safe_dump(settings, f, default_flow_style=False, sort_keys=False)
+PYEOF
+    case "$_py_rc" in
+      0) return 0 ;;
+      2)
+        err "write_aider_config: existing config at ${orig} is present but"
+        err "  cannot be parsed as YAML (or is not a top-level mapping)."
+        err "  Refusing to merge -- doing so would silently destroy your file."
+        err ""
+        err "Recovery options:"
+        err "  1. Fix the YAML manually, then re-run."
+        err "  2. Move the file aside (\`mv ${orig} ${orig}.broken.\$(date +%s)\`)"
+        err "     and re-run; the writer will create a fresh file from scratch."
+        err "  3. Pick [k]eep at the next config-handling prompt to leave the"
+        err "     broken file in place."
+        die "Refusing to overwrite a broken aider config."
+        ;;
+      3)
+        warn "write_aider_config: python3 has no PyYAML; cannot safely merge"
+        warn "  an existing aider config. Falling back to a from-scratch write"
+        warn "  of only the keys we own (openai-api-base / -key / model /"
+        warn "  model-settings-file). Any other keys in an existing ${orig}"
+        warn "  will NOT be carried over."
+        _aider_write_config_scratch "$dest" "$user" "$PROXY_PORT" "$model" "$orig" "$settings_file"
+        return 0
+        ;;
+      *)
+        die "write_aider_config: python3 heredoc exited with rc=${_py_rc} (unexpected)."
+        ;;
+    esac
+  else
+    warn "write_aider_config: python3 not found; writing a from-scratch aider"
+    warn "  config with only the keys we own. Any other keys in an existing"
+    warn "  ${orig} will NOT be carried over."
+    _aider_write_config_scratch "$dest" "$user" "$PROXY_PORT" "$model" "$orig" "$settings_file"
+    return 0
+  fi
+}
+
+# _aider_write_config_scratch <dest> <user> <port> <model> <orig> <settings_file>:
+# from-scratch write of the owned keys + the sibling model-settings file.
+# Backs up an existing original first so a no-PyYAML / no-python3 fallback
+# never destroys a user's file silently.
+_aider_write_config_scratch() {
+  local dest="$1" user="$2" port="$3" model="$4" orig="$5" settings_file="$6"
+  if [ -f "$orig" ] && [ -s "$orig" ]; then
+    local bak="${orig}.bak.$(date +%Y%m%d-%H%M%S).$$"
+    cp -p "$orig" "$bak" && warn "  Backed up existing config to ${bak}."
+  fi
+  cat > "$dest" <<EOF
+# Written by argo-anywhere. Points aider at the local argo-proxy tunnel.
+# Change 'model:' to any model argo-proxy serves (e.g. openai/argo:claude-opus-4.8).
+openai-api-base: http://localhost:${port}/v1
+openai-api-key: ${user}
+model: ${model}
+model-settings-file: ${settings_file}
+EOF
+  # The sibling model-settings file: disable temperature for argo: models
+  # that reject it (reasoning / opus-4.7+ / gpt-5 / o-series / gemini).
+  # We own this file entirely; rewrite wholesale. Keep the list in sync
+  # with the PyYAML path above.
+  local _m
+  {
+    echo "# Written by argo-anywhere. Disables 'temperature' for argo-served"
+    echo "# models that reject it (argo-proxy returns an empty stream otherwise)."
+    for _m in \
+        gpt-4o gpt-4.1 gpt-4.1-mini gpt-4.1-nano \
+        gpt-5 gpt-5-mini gpt-5-nano gpt-5.1 gpt-5.2 gpt-5.4 gpt-5.4-mini gpt-5.4-nano gpt-5.5 \
+        gpt-o1 gpt-o3 gpt-o3-mini gpt-o4-mini o1 o3 o3-mini o4-mini \
+        claude-opus-4.1 claude-opus-4.5 claude-opus-4.6 claude-opus-4.7 claude-opus-4.8 \
+        claude-4.1-opus claude-4.5-opus claude-4.6-opus claude-4.7-opus claude-4.8-opus \
+        claude-sonnet-4.5 claude-sonnet-4.6 claude-4.5-sonnet claude-4.6-sonnet \
+        claude-haiku-4.5 claude-4.5-haiku \
+        gemini-2.5-flash gemini-2.5-pro gemini-3.1-flash-lite gemini-3.5-flash; do
+      echo "- name: openai/argo:${_m}"
+      echo "  use_temperature: false"
+      echo "  streaming: true"
+    done
+  } > "$settings_file"
+}
+
+# _aider_on_path: return 0 if `aider` is runnable, prepending any
+# well-known install location to PATH for the rest of this invocation if
+# the installer's rc-file PATH edit hasn't reached our shell yet. Used to
+# VERIFY each install method actually produced a working binary (Phase 5a
+# live-test finding: a method that fails must fall through to the next,
+# not just warn-and-give-up).
+_aider_on_path() {
+  if command -v aider >/dev/null 2>&1; then
+    return 0
+  fi
+  local _candidate
+  for _candidate in \
+      "${HOME}/.local/bin/aider" \
+      "${HOME}/.local/share/uv/tools/aider-chat/bin/aider" \
+      "${HOME}/.aider/bin/aider"; do
+    if [ -x "$_candidate" ]; then
+      log "  Found aider at ${_candidate}; prepending its dir to PATH for this run."
+      PATH="$(dirname "$_candidate"):${PATH}"
+      export PATH
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ensure_aider_installed: detect or install the `aider` binary. aider is
+# a Python application whose pinned deps (e.g. numpy) frequently have no
+# wheels for the newest CPython, so a bare `pipx install` / `uv tool
+# install` under the user's system Python can fail to BUILD (observed on
+# the Phase 5a live test: Python 3.13/3.14 -> numpy 1.24.3 source build
+# fails). Upstream's #1 recommendation is the standalone installer, which
+# bundles (or fetches) its own Python 3.12; the uv one-liner does the
+# same. So we prefer the SELF-CONTAINED methods first and only fall back
+# to the user's-Python methods, and we VERIFY a working binary after each
+# attempt, falling through to the next method on failure.
+#
+# Method order (most-robust first):
+#   1. Standalone installer (curl | sh) -- bundles/fetches Python 3.12.
+#   2. uv (if present) with explicit --python python3.12 --with pip.
+#   3. pipx (if present) -- last resort; subject to the user's default
+#      Python, which is exactly what breaks on 3.13/3.14.
+ensure_aider_installed() {
+  if _aider_on_path; then
+    ok "aider already installed: $(command -v aider)"
+    return
+  fi
+  log "Installing aider..."
+
+  # Method 1: upstream standalone installer (self-contained Python 3.12).
+  log "  Trying the upstream standalone installer (bundles its own Python 3.12)..."
+  if curl -fsSL https://aider.chat/install.sh | sh; then
+    if _aider_on_path; then
+      ok "aider installed via the standalone installer: $(command -v aider)"
+      manifest_record_binary aider "$(command -v aider)" "standalone"
+      return
+    fi
+    warn "  Standalone installer ran but no aider binary appeared; trying next method."
+  else
+    warn "  Standalone installer failed; trying next method."
+  fi
+
+  # Method 2: uv, pinned to Python 3.12 (matches upstream's uv recipe).
+  if command -v uv >/dev/null 2>&1; then
+    log "  Trying 'uv tool install --force --python python3.12 --with pip aider-chat@latest'..."
+    if uv tool install --force --python python3.12 --with pip aider-chat@latest; then
+      if _aider_on_path; then
+        ok "aider installed via uv: $(command -v aider)"
+        manifest_record_binary aider "$(command -v aider)" "uv"
+        return
+      fi
+      warn "  uv install ran but no aider binary appeared; trying next method."
+    else
+      warn "  uv install failed; trying next method."
+    fi
+  fi
+
+  # Method 3: pipx (last resort; subject to the user's default Python,
+  # which is what breaks on CPython versions lacking numpy wheels).
+  if command -v pipx >/dev/null 2>&1; then
+    log "  Trying 'pipx install aider-chat' (last resort; uses your default Python)..."
+    if pipx install aider-chat; then
+      if _aider_on_path; then
+        ok "aider installed via pipx: $(command -v aider)"
+        manifest_record_binary aider "$(command -v aider)" "pipx"
+        return
+      fi
+      warn "  pipx install ran but no aider binary appeared."
+    else
+      warn "  pipx install failed."
+    fi
+  fi
+
+  err "aider could not be installed by any available method:"
+  err "    1. standalone installer (curl -fsSL https://aider.chat/install.sh | sh)"
+  err "    2. uv tool install --python python3.12 --with pip aider-chat@latest"
+  err "    3. pipx install aider-chat"
+  err "  A common cause is a pinned dependency (e.g. numpy) failing to BUILD"
+  err "  under a very new CPython. The standalone installer normally avoids"
+  err "  this by bundling Python 3.12; if it failed, check network access to"
+  err "  aider.chat, then install aider manually per https://aider.chat/docs/install.html"
+  err "  and re-run. If you already installed it, open a new shell so the"
+  err "  binary is on PATH (or 'source ~/.bashrc' / 'source ~/.zshrc')."
+  die "Cannot continue without a runnable aider binary."
+}
+
+# setup_aider_cli_tool: ensure aider is installed and its config points at
+# the resolved (PROXY_PORT, ANL_USERNAME). Idempotent. Picks scope first
+# (fail fast on scope conflicts before the install), same ordering as the
+# opencode / claudecode setup functions.
+setup_aider_cli_tool() {
+  aider_pick_scope
+  ensure_aider_installed
+  handle_config_file "$_AIDER_SCOPE_PATH" \
+    "aider config (${_AIDER_SCOPE_NAME})" \
+    write_aider_config
 }
 
 # ============================================================================
@@ -4268,6 +5199,7 @@ ensure_or_reuse_tunnel() {
 CLI_TOOLS_AVAILABLE=(
   "opencode|OpenCode (sst/opencode-style)"
   "claudecode|Claude Code (Anthropic CLI; uses ANTHROPIC_BASE_URL env)"
+  "aider|aider (OpenAI-compatible; ~/.aider.conf.yml + openai-api-base)"
 )
 
 # cli_tool_is_known <name>: returns 0 if <name> is in the registry,
@@ -4347,21 +5279,30 @@ interactive_setup_picker() { interactive_cli_tool_picker "$@"; }
 # setup -> summary -> monitor) regardless of how many clients we add.
 # Also makes Phase 4 additions (aider/cursor/generic) one-line additions
 # here rather than scattered if-branches.
+# _post_tunnel_summary: render the full status box UNLESS the caller
+# suppressed it. `client`/`connect` want the box (they just established
+# the channel). `configure` (which loops over tools against an ALREADY-UP
+# channel) sets _SUPPRESS_PER_TOOL_SUMMARY=1 to avoid re-printing the big
+# box once per tool -- it prints a single concise confirmation itself.
+_post_tunnel_summary() {
+  [ "${_SUPPRESS_PER_TOOL_SUMMARY:-0}" = 1 ] && return 0
+  gather_summary
+  render_summary
+}
+
 do_post_tunnel_for_cli_tool() {
   local client="$1"
   case "$client" in
     opencode)
       setup_opencode_cli_tool
-      gather_summary
-      render_summary
+      _post_tunnel_summary
       log "OpenCode is installed and configured for this proxy.  Run: opencode"
       log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
       log "  with Authorization: Bearer ${ANL_USERNAME}"
       ;;
     claudecode)
       setup_claudecode_cli_tool
-      gather_summary
-      render_summary
+      _post_tunnel_summary
       log "Claude Code is installed and configured for this proxy."
       log "  Scope: ${_CLAUDECODE_SCOPE_NAME}"
       if [ "$_CLAUDECODE_SCOPE_PATH" = "$CLAUDECODE_PROJECT_CONFIG" ]; then
@@ -4392,12 +5333,42 @@ do_post_tunnel_for_cli_tool() {
         log "   add .claude/settings.json to that repo's .gitignore.)"
       fi
       ;;
-    # aider|cursor|generic) added in Phase 4
+    aider)
+      setup_aider_cli_tool
+      _post_tunnel_summary
+      log "aider is installed and configured for this proxy."
+      log "  Scope: ${_AIDER_SCOPE_NAME}"
+      if [ "$_AIDER_SCOPE_PATH" != "$AIDER_GLOBAL_CONFIG" ]; then
+        log "  Run from THIS directory ($(pwd)) to pick up the project-scoped config:"
+      else
+        log "  Run from any directory:"
+      fi
+      log "    aider"
+      log "  Default model: openai/argo:gpt-4o. To use another, pass the EXACT"
+      log "  id from /v1/models with the 'openai/' + 'argo:' prefixes, e.g.:"
+      log "    aider --model openai/argo:claude-opus-4.8"
+      log "  See served ids:  $(basename "$0") list-models"
+      log "  A sibling .aider.model.settings.yml (next to the config) disables"
+      log "  the 'temperature' param for reasoning/opus/gpt-5 models -- without"
+      log "  it those models return an empty response through argo-proxy."
+      log "  Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
+      log "    with Authorization: Bearer ${ANL_USERNAME}"
+      # H7-class privacy note: the config stores the ANL username in clear
+      # text as openai-api-key (argo-proxy uses it as the bearer token).
+      warn "Privacy note: ${_AIDER_SCOPE_PATH} now contains your ANL username"
+      warn "  ('${ANL_USERNAME}') in openai-api-key. Don't commit it to a public"
+      warn "  dotfile/repo or share it widely."
+      if [ "$_AIDER_SCOPE_PATH" != "$AIDER_GLOBAL_CONFIG" ]; then
+        log "  (Project scope -- aider auto-adds .aider* patterns to .gitignore"
+        log "   by default, but verify your repo's .gitignore covers"
+        log "   .aider.conf.yml.)"
+      fi
+      ;;
+    # cursor|generic) added in a later phase
     "")
       # No client selected (anywhere mode + user picked empty / aborted).
       # Tunnel is up; user can configure clients manually.
-      gather_summary
-      render_summary
+      _post_tunnel_summary
       log "Tunnel is up; no client configured."
       log "Configure any OpenAI-compatible client to target http://localhost:${PROXY_PORT}/v1"
       log "  with Authorization: Bearer ${ANL_USERNAME}"
@@ -4658,6 +5629,16 @@ mode_list_tools() {
 # enter the foreground monitor loop. No client setup. Useful for power users
 # managing multiple clients themselves, or for keeping a tunnel alive across
 # multiple terminal sessions where each one configures a different client.
+# channel_is_up: return 0 if the shared channel (local tunnel -> remote
+# argo-proxy) is already answering on $PROXY_PORT, 1 otherwise. Probes
+# /health directly rather than trusting the port cache alone, so a stale
+# cache (cache says port N but nothing is listening) reads as "down".
+# Used by the level-2 verbs (configure / run) to DETECT an existing
+# channel established by a separate `connect` window (D-024 / D-e).
+channel_is_up() {
+  curl -fsS --max-time 3 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1
+}
+
 mode_tunnel() {
   # Call directly (NOT via $()): _client_common_setup mutates several
   # script-level globals (ANL_USERNAME, ARGO_ANYWHERE_USER, the auto-defaulted
@@ -4680,7 +5661,7 @@ mode_tunnel() {
   write_node_cache "$node"
   gather_summary
   render_summary
-  log "Tunnel is up; no client configured (this is 'tunnel' mode)."
+  log "Channel is up; no client configured (this is '${_INVOKED_MODE:-tunnel}' mode)."
   log "Point any OpenAI-compatible client at http://localhost:${PROXY_PORT}/v1"
   log "  with Authorization: Bearer ${ANL_USERNAME}"
   if [ "$rc" -eq 2 ]; then
@@ -4692,6 +5673,15 @@ mode_tunnel() {
 }
 
 mode_client() {
+  # First-run bootstrap (per PLAN.md D-023): if the canonical install
+  # at $ARGO_INSTALL_DIR doesn't exist yet, copy ourselves there + write
+  # the env file. Idempotent no-op on subsequent runs. Doesn't fire on
+  # compute nodes (the on-node short-circuit doesn't benefit from a
+  # laptop-side canonical install) or when we're already running from
+  # the canonical install. See maybe_bootstrap_canonical_install for the
+  # full skip-conditions list.
+  maybe_bootstrap_canonical_install
+
   # Determine the CLI tool to set up. As of v2.0 (D1+D2), tool selection
   # is exclusively explicit:
   #   1. CLI_TOOL_OVERRIDE (set by --cli-tool flag in main())
@@ -4743,6 +5733,202 @@ mode_client() {
     return 0
   fi
   monitor_tunnel_loop "$ANL_USERNAME" "$node"
+}
+
+# ============================================================================
+# SECTION: 17b. LIFECYCLE VERBS -- connect / configure / run (D-024)
+# ============================================================================
+# Splits the three levels argo-anywhere manages into explicit verbs so a
+# user can hold the shared channel in one window (connect) and freely
+# configure / run clients in others. `client` / `setup` / `tunnel` remain
+# as fused one-shot fallbacks (backward compat). See PLAN.md D-024 +
+# notes/impl_lifecycle_commands.md.
+#
+#   connect   = Level 1: ensure the channel (tunnel + remote proxy),
+#               then hold the foreground monitor. Same behavior as
+#               `tunnel`; friendlier name. `tunnel` retained as an alias.
+#   configure = Level 2: install + write config for one-or-more tools
+#               against an EXISTING channel. Detects the channel via
+#               /health; fail-loud-with-hint if absent (--ensure brings
+#               it up). Does NOT enter the monitor loop (the channel is
+#               the connect window's).
+#   run       = Level 2+3: configure ONE tool, then exec the client so
+#               the user drops straight into a session. Brings the channel
+#               up if missing (prompt, or --ensure / -y to auto-confirm).
+
+# mode_connect: Level 1. Identical to mode_tunnel (which already does
+# exactly "ensure the channel + monitor"); connect is the primary,
+# user-facing name for that operation. Kept as a one-line delegator so
+# the two names never drift.
+mode_connect() {
+  mode_tunnel
+}
+
+# _configure_ensure_channel_or_die: shared precondition for configure/run.
+# If the channel is up, return 0. Else: with --ensure (or run's implied
+# ensure), bring it up via the full client-common flow + tunnel; without
+# it, die with a hint pointing at `connect`.
+#
+# Args: $1 = "1" to auto-ensure (bring up if missing), "0" to require.
+# On successful ensure, sets _CONFIGURE_ENSURED_NODE (the picked node) so
+# the caller can decide whether to monitor. On detect-only success (channel
+# already up) leaves it empty.
+_CONFIGURE_ENSURED_NODE=""
+_configure_ensure_channel_or_die() {
+  local auto_ensure="$1"
+  _CONFIGURE_ENSURED_NODE=""
+
+  if channel_is_up; then
+    ok "Channel is up on http://localhost:${PROXY_PORT} (reusing it)."
+    return 0
+  fi
+
+  if [ "$auto_ensure" != "1" ]; then
+    err "No argo-anywhere channel is answering on http://localhost:${PROXY_PORT}/health."
+    err ""
+    err "The '${_INVOKED_MODE}' step configures/runs a client against an EXISTING"
+    err "channel; it does not open one itself. To bring the channel up:"
+    err ""
+    err "  In another window:   $(basename "$0") connect"
+    err "  Or one-shot here:    $(basename "$0") ${_INVOKED_MODE} <tool> --ensure"
+    err ""
+    die "Channel not up (run 'connect' first, or pass --ensure)."
+  fi
+
+  # --ensure: bring the channel up in-process using the same path as
+  # mode_tunnel (level 1), then continue. We do NOT monitor here; the
+  # caller (configure) returns after configuring, and run execs the
+  # client. Under --ensure the tunnel is owned by the mux master (which
+  # persists via ControlPersist), so it survives this process exiting.
+  log "Channel not up; --ensure requested -> bringing it up..."
+  _client_common_setup 0
+  [ -z "$_PICKED_NODE" ] && return 0   # on-node short-circuit
+  local node="$_PICKED_NODE"
+  local rc=0
+  ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
+  write_node_cache "$node"
+  _CONFIGURE_ENSURED_NODE="$node"
+  return 0
+}
+
+# mode_configure: Level 2. Install + configure one-or-more tools against
+# the existing channel. Tool names come from CONFIGURE_TOOLS_ARGV
+# (positional args) OR --cli-tool OR the interactive picker (single).
+mode_configure() {
+  maybe_bootstrap_canonical_install
+
+  # Resolve the tool list: positional args win; else --cli-tool; else picker.
+  local tools=""
+  if [ -n "${CONFIGURE_TOOLS_ARGV:-}" ]; then
+    tools="$CONFIGURE_TOOLS_ARGV"
+  elif [ -n "${CLI_TOOL_OVERRIDE:-}" ]; then
+    tools="$CLI_TOOL_OVERRIDE"
+  else
+    local picked; picked="$(interactive_cli_tool_picker)"
+    [ -z "$picked" ] && die "No CLI tool picked; aborting. Pass one or more tool names, --cli-tool <name>, or pick from the menu."
+    tools="$picked"
+  fi
+
+  # Username is needed by the writers; resolve without opening a tunnel.
+  ANL_USERNAME="$(resolve_username)"
+  ARGO_ANYWHERE_USER="$ANL_USERNAME"
+  log "Using ANL username: ${ANL_USERNAME}"
+  log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
+
+  # Precondition: the channel must exist (or --ensure brings it up).
+  _configure_ensure_channel_or_die "${CONFIGURE_ENSURE:-0}"
+
+  # Configure each requested tool. do_post_tunnel_for_cli_tool runs the
+  # tool's setup + tail messages. It does NOT monitor, which is exactly
+  # what configure wants (the channel belongs to the connect window / mux
+  # master). Suppress the per-tool full status box: re-rendering the big
+  # connection/models/paths box once per tool against an already-up
+  # channel is noise (Test 2 finding). configure prints one concise
+  # channel line at the end instead.
+  local t
+  for t in $tools; do
+    if ! cli_tool_is_known "$t"; then
+      die "configure: unknown tool '${t}'. Known tools: $(cli_tool_known_names)."
+    fi
+  done
+  local _SUPPRESS_PER_TOOL_SUMMARY=1
+  for t in $tools; do
+    log ""
+    log "==> configure ${t}"
+    _INVOKED_CLI_TOOL="$t"
+    do_post_tunnel_for_cli_tool "$t"
+  done
+
+  log ""
+  ok "Configured: ${tools}."
+  ok "  Channel: http://localhost:${PROXY_PORT}  (healthy; owned by your 'connect' window / mux master)"
+  log "  Start a client:  $(basename "$0") run <tool>   (or just run the tool directly)"
+}
+
+# mode_run: Level 2+3. Configure exactly one tool, then exec it so the
+# user drops into a session. Brings the channel up if missing (run implies
+# --ensure with a prompt; -y / --ensure auto-confirm).
+mode_run() {
+  maybe_bootstrap_canonical_install
+
+  # Exactly one tool for run (we exec it).
+  local tool=""
+  if [ -n "${CONFIGURE_TOOLS_ARGV:-}" ]; then
+    # take the first; warn if more than one was given
+    tool="${CONFIGURE_TOOLS_ARGV%% *}"
+    if [ "$tool" != "$CONFIGURE_TOOLS_ARGV" ]; then
+      warn "run takes a single tool; using '${tool}' and ignoring the rest."
+    fi
+  elif [ -n "${CLI_TOOL_OVERRIDE:-}" ]; then
+    tool="$CLI_TOOL_OVERRIDE"
+  else
+    tool="$(interactive_cli_tool_picker)"
+    [ -z "$tool" ] && die "No CLI tool picked; aborting. Pass a tool name, --cli-tool <name>, or pick from the menu."
+  fi
+  cli_tool_is_known "$tool" || die "run: unknown tool '${tool}'. Known tools: $(cli_tool_known_names)."
+
+  ANL_USERNAME="$(resolve_username)"
+  ARGO_ANYWHERE_USER="$ANL_USERNAME"
+  log "Using ANL username: ${ANL_USERNAME}"
+  log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
+
+  # run brings the channel up if missing. Default: prompt (unless -y or
+  # --ensure). If the user declines, fall back to the require-existing
+  # path (which dies with the connect hint).
+  local do_ensure="${CONFIGURE_ENSURE:-0}"
+  if [ "$do_ensure" != "1" ] && ! channel_is_up; then
+    if [ "${CLEAN_ASSUME_YES:-0}" = 1 ]; then
+      do_ensure=1
+    else
+      local ans; ans="$(ask "No channel on :${PROXY_PORT}. Bring it up now? [Y/n]:" "Y")"
+      case "$ans" in n|N|no|No) do_ensure=0 ;; *) do_ensure=1 ;; esac
+    fi
+  fi
+  _configure_ensure_channel_or_die "$do_ensure"
+
+  # Suppress the full status box: run is configure + launch, so it should
+  # be at least as quiet as configure -- and we're about to hand off to
+  # the client's own UI, so a big box right before it is noise (Test 5
+  # finding). The concise "Configured" tail + the tool's own launch
+  # message are enough.
+  local _SUPPRESS_PER_TOOL_SUMMARY=1
+  _INVOKED_CLI_TOOL="$tool"
+  do_post_tunnel_for_cli_tool "$tool"
+
+  # Resolve the client binary name (tool token == binary for our set,
+  # except claudecode -> 'claude').
+  local bin="$tool"
+  [ "$tool" = "claudecode" ] && bin="claude"
+
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    warn "run: '${bin}' is not on PATH in this shell (it may need a fresh"
+    warn "  shell to pick up the installer's PATH edit). Configuration is done;"
+    warn "  open a new terminal and run '${bin}'."
+    return 0
+  fi
+  log ""
+  ok "Launching ${bin} ..."
+  exec "$bin"
 }
 
 # ============================================================================
@@ -4958,6 +6144,110 @@ PYEOF
   esac
 }
 
+# ----------------------------------------------------------------------------
+# ensure_argoproxy_installed: idempotent install-or-validate of the
+# server-side Python venv + argo-proxy package. Runs on the compute node
+# (or, via the on-node short-circuit in _client_common_setup, on the
+# local machine if the user happens to be running the script there).
+#
+# Steps:
+#   1. system python3 >= 3.10
+#   2. venv at $VENV_PATH ($HOME/argovenv): create-or-validate; recreate
+#      if missing, broken, or python < 3.10
+#   3. argo-proxy in the venv: install if `--version` or `serve --help`
+#      fails; otherwise leave alone (lossless: pre-existing argo-proxy
+#      keeps its installed version unless the binary itself is broken)
+#
+# Honors ARGO_ANYWHERE_FORCE_REINSTALL=1: wipes the venv first.
+#
+# Returns 0 on success, non-zero on any unrecoverable step. Calls die()
+# on conditions that prevent recovery without user action (missing
+# python3, python too old, argo-proxy still broken after install).
+#
+# CALLERS:
+#   * mode_server (server-side bootstrap; the historical caller)
+#   * update_argoproxy_component (the new `update argoproxy` flow;
+#     calls this when --force-reinstall is set OR when argo-proxy is
+#     entirely missing; otherwise prefers the lossless in-place upgrade
+#     path via `argo-proxy update install` or `pip install --upgrade`)
+#
+# DOES NOT touch:
+#   * ~/.config/argoproxy/config.yaml (that's the config writer's job)
+#   * running argo-proxy processes (caller is responsible for restart
+#     semantics if a binary upgrade requires it; `update argoproxy`
+#     defers to /refresh which is enough to pick up new model entries
+#     in the registry without bouncing the proxy)
+ensure_argoproxy_installed() {
+  # 1) Python 3.10+ on the system path (used to build the venv if missing).
+  command -v python3 >/dev/null 2>&1 || die "python3 not found on $(hostname)."
+  local pyver; pyver="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+  case "$pyver" in
+    3.1[0-9]|3.[2-9][0-9]|[4-9].*) ok "system python3 ${pyver} OK" ;;
+    *) die "argo-proxy needs Python 3.10+; system python3 is ${pyver}." ;;
+  esac
+
+  # 2) venv: optionally wipe, then create or validate.
+  local venv; venv="$(eval echo "$VENV_PATH")"
+  local legacy_venv; legacy_venv="$(eval echo "$LEGACY_VENV_PATH")"
+
+  # Legacy v1.x detection: warn if the pre-rename venv ($HOME/agovenv) is
+  # still on disk. Don't auto-migrate -- the user may have a working
+  # argo-proxy in there serving traffic. We just log and let `clean`
+  # remove it (or the user can rm -rf manually).
+  if [ -d "$legacy_venv" ] && [ "$legacy_venv" != "$venv" ]; then
+    warn "Found legacy v1.x venv at ${legacy_venv} (pre-rename name)."
+    warn "  v2.0 uses ${venv}; the old one is unused but still on disk."
+    warn "  To reclaim disk space:  rm -rf ${legacy_venv}"
+    warn "  ('clean' also handles this; this WARN fires once per server bootstrap.)"
+  fi
+
+  if [ -n "${ARGO_ANYWHERE_FORCE_REINSTALL:-}" ] && [ -d "$venv" ]; then
+    warn "ARGO_ANYWHERE_FORCE_REINSTALL set; removing existing venv at ${venv}..."
+    rm -rf "$venv"
+  fi
+
+  local need_recreate=0
+  if [ ! -x "${venv}/bin/python" ]; then
+    need_recreate=1
+  else
+    # Validate the venv's own python (not the system one) is 3.10+ AND alive.
+    local vpv; vpv="$("${venv}/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
+    if [ -z "$vpv" ]; then
+      warn "venv at ${venv} exists but its python is broken; recreating."
+      need_recreate=1
+    else
+      case "$vpv" in
+        3.1[0-9]|3.[2-9][0-9]|[4-9].*) ok "venv python ${vpv} OK (${venv})" ;;
+        *) warn "venv python is ${vpv} (need >=3.10); recreating ${venv}."; need_recreate=1 ;;
+      esac
+    fi
+  fi
+  if [ "$need_recreate" -eq 1 ]; then
+    if [ -d "$venv" ]; then rm -rf "$venv"; fi
+    log "Creating venv at ${venv}..."
+    python3 -m venv "$venv"
+    "${venv}/bin/pip" install --upgrade pip >/dev/null
+    ok "venv created: ${venv}"
+  fi
+
+  # 3) argo-proxy installed AND has the 'serve' subcommand we need.
+  local need_install=0
+  if ! "${venv}/bin/argo-proxy" --version >/dev/null 2>&1; then
+    need_install=1
+  elif ! "${venv}/bin/argo-proxy" serve --help >/dev/null 2>&1; then
+    warn "argo-proxy installed but 'serve --help' fails (likely too old); upgrading."
+    need_install=1
+  fi
+  if [ "$need_install" -eq 1 ]; then
+    log "Installing/upgrading argo-proxy in ${venv}..."
+    "${venv}/bin/pip" install --upgrade pip >/dev/null
+    "${venv}/bin/pip" install --upgrade argo-proxy
+    "${venv}/bin/argo-proxy" serve --help >/dev/null 2>&1 \
+      || die "argo-proxy 'serve' subcommand still missing after install. Inspect ${venv}/bin/argo-proxy."
+  fi
+  ok "argo-proxy: $("${venv}/bin/argo-proxy" --version 2>&1 | head -n1)"
+}
+
 mode_server() {
   # Resolve identity (username + port) from one of three sources, in order:
   #   1. env / canonical (set by 'client' over SSH; never missing in that
@@ -5109,74 +6399,15 @@ mode_server() {
   # ===========================================================================
   log "[server] starting bootstrap on $(hostname) for user=${ANL_USERNAME} port=${PROXY_PORT}"
 
-  # 1) Python 3.10+ on the system path (used to build the venv if missing).
-  command -v python3 >/dev/null 2>&1 || die "python3 not found on $(hostname)."
-  local pyver; pyver="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
-  case "$pyver" in
-    3.1[0-9]|3.[2-9][0-9]|[4-9].*) ok "system python3 ${pyver} OK" ;;
-    *) die "argo-proxy needs Python 3.10+; system python3 is ${pyver}." ;;
-  esac
-
-  # 2) venv: optionally wipe, then create or validate.
-  local venv; venv="$(eval echo "$VENV_PATH")"
-  local legacy_venv; legacy_venv="$(eval echo "$LEGACY_VENV_PATH")"
-
-  # Legacy v1.x detection: warn if the pre-rename venv ($HOME/agovenv) is
-  # still on disk. Don't auto-migrate -- the user may have a working
-  # argo-proxy in there serving traffic. We just log and let `clean`
-  # remove it (or the user can rm -rf manually).
-  if [ -d "$legacy_venv" ] && [ "$legacy_venv" != "$venv" ]; then
-    warn "Found legacy v1.x venv at ${legacy_venv} (pre-rename name)."
-    warn "  v2.0 uses ${venv}; the old one is unused but still on disk."
-    warn "  To reclaim disk space:  rm -rf ${legacy_venv}"
-    warn "  ('clean' also handles this; this WARN fires once per server bootstrap.)"
-  fi
-
-  if [ -n "${ARGO_ANYWHERE_FORCE_REINSTALL:-}" ] && [ -d "$venv" ]; then
-    warn "ARGO_ANYWHERE_FORCE_REINSTALL set; removing existing venv at ${venv}..."
-    rm -rf "$venv"
-  fi
-
-  local need_recreate=0
-  if [ ! -x "${venv}/bin/python" ]; then
-    need_recreate=1
-  else
-    # Validate the venv's own python (not the system one) is 3.10+ AND alive.
-    local vpv; vpv="$("${venv}/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
-    if [ -z "$vpv" ]; then
-      warn "venv at ${venv} exists but its python is broken; recreating."
-      need_recreate=1
-    else
-      case "$vpv" in
-        3.1[0-9]|3.[2-9][0-9]|[4-9].*) ok "venv python ${vpv} OK (${venv})" ;;
-        *) warn "venv python is ${vpv} (need >=3.10); recreating ${venv}."; need_recreate=1 ;;
-      esac
-    fi
-  fi
-  if [ "$need_recreate" -eq 1 ]; then
-    if [ -d "$venv" ]; then rm -rf "$venv"; fi
-    log "Creating venv at ${venv}..."
-    python3 -m venv "$venv"
-    "${venv}/bin/pip" install --upgrade pip >/dev/null
-    ok "venv created: ${venv}"
-  fi
-
-  # 3) argo-proxy installed AND has the 'serve' subcommand we need.
-  local need_install=0
-  if ! "${venv}/bin/argo-proxy" --version >/dev/null 2>&1; then
-    need_install=1
-  elif ! "${venv}/bin/argo-proxy" serve --help >/dev/null 2>&1; then
-    warn "argo-proxy installed but 'serve --help' fails (likely too old); upgrading."
-    need_install=1
-  fi
-  if [ "$need_install" -eq 1 ]; then
-    log "Installing/upgrading argo-proxy in ${venv}..."
-    "${venv}/bin/pip" install --upgrade pip >/dev/null
-    "${venv}/bin/pip" install --upgrade argo-proxy
-    "${venv}/bin/argo-proxy" serve --help >/dev/null 2>&1 \
-      || die "argo-proxy 'serve' subcommand still missing after install. Inspect ${venv}/bin/argo-proxy."
-  fi
-  ok "argo-proxy: $("${venv}/bin/argo-proxy" --version 2>&1 | head -n1)"
+  # 1+2+3) System python check, venv create-or-validate, argo-proxy install.
+  # Factored out of the inline body (2026-06-24, v2.2.1 prep) so the new
+  # `update argoproxy` subcommand can call the same installer without
+  # restarting argo-proxy. The factoring closes the conceptual-vs-real
+  # naming gap noted in AGENTS.md (the audit docs referred to
+  # `ensure_argoproxy_installed` as if it already existed); behavior is
+  # preserved verbatim -- mode_server's contract for the install step is
+  # unchanged from v2.2.0.
+  ensure_argoproxy_installed || die "ensure_argoproxy_installed failed."
 
   # 4) argo-proxy config file
   handle_config_file "${HOME}/.config/argoproxy/config.yaml" "argo-proxy config" write_argoproxy_config
@@ -5290,6 +6521,17 @@ mode_server() {
   elif command -v tmux >/dev/null 2>&1; then launcher="tmux"
   else launcher="nohup"
   fi
+
+  # Resolve the venv path for the launch commands below. This USED to be
+  # in scope because the install work lived inline in mode_server; when
+  # `ensure_argoproxy_installed` was extracted (D-022, v2.2.1 prep) the
+  # `local venv` moved with it, leaving the launch lines below referencing
+  # an out-of-scope `${venv}`. Under `set -u` that dies with "venv:
+  # unbound variable" right after the "Starting argo-proxy in screen
+  # session" log line -- the D-005 "main-mode function factored out"
+  # regression class. Recompute it here (same expression the installer
+  # uses) so the launch commands see a bound value.
+  local venv; venv="$(eval echo "$VENV_PATH")"
 
   # We reach this point only when nothing is listening on PROXY_PORT (the
   # earlier "is something already serving?" branch returned). If a screen
@@ -5696,11 +6938,16 @@ render_summary() {
   if ! command -v jq >/dev/null 2>&1; then
     cfg_qual="  (counts approximate; install jq for exact)"
   fi
+  # NOTE: the "configured models" concept is OpenCode-specific -- only
+  # OpenCode enumerates per-model entries in its config. Claude Code and
+  # aider choose models at runtime (--model), so there's no "configured
+  # count" to show for them. The rows below are explicitly labelled
+  # "OpenCode" so the box doesn't imply this is a global/all-tools fact.
   if [ "$SUM_CFG_COUNT" -gt 0 ]; then
     if [ "$SUM_MODELS_OK" -eq 1 ]; then
-      lines+=("Configured       : ${SUM_CFG_COUNT} in opencode config (${SUM_CFG_AVAIL_COUNT} reachable)${cfg_qual}")
+      lines+=("OpenCode models  : ${SUM_CFG_COUNT} configured (${SUM_CFG_AVAIL_COUNT} reachable)${cfg_qual}")
     else
-      lines+=("Configured       : ${SUM_CFG_COUNT} in opencode config (reachability unknown)${cfg_qual}")
+      lines+=("OpenCode models  : ${SUM_CFG_COUNT} configured (reachability unknown)${cfg_qual}")
     fi
     if [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ]; then
       lines+=("Orphaned         : ${SUM_CFG_ORPHAN_COUNT} configured but NOT in /v1/models")
@@ -5713,13 +6960,18 @@ render_summary() {
     if [ "$SUM_MODELS_OK" -eq 1 ]; then
       local missing=$((SUM_MODEL_UNIQ_COUNT - SUM_CFG_AVAIL_COUNT))
       if [ "$missing" -gt 0 ]; then
-        lines+=("Unconfigured     : ${missing} reachable chat model(s) not in opencode config")
+        lines+=("Unconfigured     : ${missing} reachable chat model(s) not in OpenCode config")
         lines+=("                   (run '$(basename "$0") update-models' to add them)")
       fi
     fi
   else
-    lines+=("Configured       : 0 in opencode config")
-    lines+=("                   (run '$(basename "$0") update-models' to populate)")
+    # Only nudge about OpenCode's empty model list when OpenCode is
+    # actually the/an installed tool; otherwise the hint is noise for
+    # claudecode/aider-only users.
+    if command -v opencode >/dev/null 2>&1 || [ -f "$OPENCODE_CONFIG" ]; then
+      lines+=("OpenCode models  : 0 configured")
+      lines+=("                   (run '$(basename "$0") update-models' to populate)")
+    fi
   fi
 
   # ---- Section: Configuration ----------------------------------------------
@@ -5738,11 +6990,27 @@ render_summary() {
   fi
 
   # ---- Section: Paths ------------------------------------------------------
-  # Only the OpenCode config is always relevant. The state dir and the
-  # remote log path are only meaningful once 'client' has run, so suppress
-  # them when there is nothing real to point at.
+  # Show whichever CLI-tool configs actually exist on disk (not just
+  # OpenCode -- the box used to be OpenCode-only, which mislead
+  # claudecode/aider users). The state dir and the remote log path are
+  # only meaningful once 'client' has run, so suppress them when there is
+  # nothing real to point at.
   lines+=("__SECTION__:Paths")
-  lines+=("OpenCode config  : ${OPENCODE_CONFIG}")
+  local _shown_cfg=0
+  if [ -f "$OPENCODE_CONFIG" ]; then
+    lines+=("OpenCode config  : ${OPENCODE_CONFIG}"); _shown_cfg=1
+  fi
+  if [ -f "$CLAUDECODE_GLOBAL_CONFIG" ]; then
+    lines+=("Claude Code cfg  : ${CLAUDECODE_GLOBAL_CONFIG}"); _shown_cfg=1
+  fi
+  if [ -f "$AIDER_GLOBAL_CONFIG" ]; then
+    lines+=("aider config     : ${AIDER_GLOBAL_CONFIG}"); _shown_cfg=1
+  fi
+  # If none exist yet, still show the OpenCode path as the canonical
+  # example so the box isn't empty here on a fresh machine.
+  if [ "$_shown_cfg" -eq 0 ]; then
+    lines+=("Client configs   : none yet (e.g. OpenCode -> ${OPENCODE_CONFIG})")
+  fi
   if [ -d "$STATE_DIR" ] || [ "$have_user" -eq 1 ] || [ "$have_node" -eq 1 ]; then
     lines+=("Script state dir : ${STATE_DIR}")
   fi
@@ -6002,11 +7270,46 @@ EOF
 }
 
 # ============================================================================
-# SECTION: 22. UPDATE-MODELS (mode_update_models)
+# SECTION: 22. UPDATE-MODELS + LIST-MODELS (mode_update_models, mode_list_models)
 # ============================================================================
 # Refreshes provider.argo.models in ~/.config/opencode/config.json from the
 # live /v1/models endpoint, preserving everything else in the config.
 mode_update_models() {
+  # Tool-aware (was OpenCode-only). `update-models` refreshes a client's
+  # in-config model list from the live /v1/models -- which is only a
+  # meaningful operation for tools that ENUMERATE models in their config.
+  # OpenCode does (provider.argo.models{}); Claude Code + aider choose the
+  # model at runtime (--model) and have no in-config list to refresh.
+  #
+  # Resolve the target tool: --cli-tool wins; default opencode (the only
+  # tool this supports today) for backward compatibility with the bare
+  # `update-models` invocation. For tools that don't support it, print an
+  # honest "not applicable" message rather than silently editing OpenCode's
+  # config (which the pre-tool-aware version did).
+  local _umt="${CLI_TOOL_OVERRIDE:-opencode}"
+  case "$_umt" in
+    opencode)
+      : ;;  # supported -- fall through to the OpenCode refresh below
+    claudecode)
+      log "update-models: not applicable for Claude Code."
+      log "  Claude Code does not enumerate models in its config; it picks the"
+      log "  model at runtime via 'claude --model <name>' (or env.ANTHROPIC_MODEL)."
+      log "  The proxy already serves the full list -- see:"
+      log "    $(basename "$0") list-models"
+      return 0 ;;
+    aider)
+      log "update-models: not applicable for aider (today)."
+      log "  aider picks the model at runtime via 'aider --model openai/argo:<id>';"
+      log "  its config lists per-model SETTINGS (temperature suppression), not a"
+      log "  refreshable model picker. See served ids with:"
+      log "    $(basename "$0") list-models"
+      log "  (A future per-tool refresh could regenerate aider's model-settings"
+      log "   from the live /v1/models; not implemented yet.)"
+      return 0 ;;
+    *)
+      die "update-models: unknown --cli-tool '${_umt}'. Known: $(cli_tool_known_names). Only 'opencode' supports update-models today." ;;
+  esac
+
   local cfg="${OPENCODE_CONFIG}"
 
   # Hard requirement: jq. Anything less is brittle for in-place JSON surgery.
@@ -6208,6 +7511,1148 @@ EOF
   ok "Done. Restart OpenCode to pick up the new model list."
 }
 
+# ----------------------------------------------------------------------------
+# mode_list_models: tabulate the models the proxy is exposing on /v1/models.
+#
+# Read-only sibling of mode_update_models. Where update-models WRITES the
+# OpenCode config, list-models just SHOWS what is available, optionally
+# cross-referenced against the existing OpenCode config (so the user can
+# see at a glance which models are present, configured, and orphaned --
+# without having to run `update-models` and let it walk the prompt flow).
+#
+# Output destination:
+#   * default: pretty column-aligned table to stdout
+#   * --output FILE: same content, written to FILE (no terminal colors)
+#
+# Output format (--format):
+#   * text  (default): aligned columns, human-readable
+#   * tsv:             tab-separated, one model per line, header row included;
+#                      stable column order matching the text format. Suitable
+#                      for `cut`/`awk` consumption.
+#   * json:            the filtered+annotated model list as a JSON array.
+#                      Each element: {internal_name, id, provider, modalities,
+#                      configured}. The raw /v1/models response is NOT
+#                      reproduced; that's what `curl .../v1/models` is for.
+#
+# Filters:
+#   * embeddings are excluded by default (matches update-models semantics).
+#     Pass --include-embeddings to include them.
+#
+# Cross-reference column ("Configured?"):
+#   * present when ~/.config/opencode/config.json exists.
+#   * three states: 'yes' (present + served), 'no' (served but not in cfg),
+#     'orphan' (in cfg but NOT served -- this would be DROPPED by a
+#     default update-models run).
+#   * the table also includes a trailing row listing orphans that don't
+#     appear elsewhere (since they're not in /v1/models). When --format=tsv
+#     or --format=json, orphans appear as regular rows with id="" + the
+#     'orphan' configured-state.
+#
+# Provider inference (no upstream metadata available on /v1/models for this):
+#   * id starts with 'argo:gpt' or contains 'gpt' / 'o1' / 'o3' / 'o4'  -> openai
+#   * id starts with 'argo:claude' or contains 'claude'                 -> claude
+#   * id starts with 'argo:gemini' or contains 'gemini'                 -> gemini
+#   * id contains 'embedding' / 'embed'                                 -> embedding
+#   * otherwise                                                         -> other
+#   This heuristic matches the names visible at v3.0.4. If upstream adds
+#   a new family, the row's provider column reads 'other'; the row is
+#   still listed.
+#
+# Modalities (no upstream metadata for vision/non-vision; reasonable
+# defaults):
+#   * embedding rows -> 'text->vector'
+#   * other rows     -> 'text+image->text'  (matches update-models's
+#                       write-out: every chat model is configured as
+#                       multimodal text+image input, text output).
+#
+# Globals consumed: PROXY_PORT, OPENCODE_CONFIG.
+# Globals mutated: none.
+# Exit codes: 0 success; 1 unreachable proxy / empty body / write error.
+mode_list_models() {
+  # Hard requirement: jq. Same justification as mode_update_models -- we are
+  # parsing structured JSON from /v1/models. A pure-bash fallback would
+  # silently skew the table.
+  if ! command -v jq >/dev/null 2>&1; then
+    err "'jq' is required for list-models (parses /v1/models JSON)."
+    case "$(detect_os)" in
+      macos) err "  Install with:  brew install jq" ;;
+      linux) err "  Install with:  sudo apt-get install jq   # or your distro's equivalent" ;;
+    esac
+    die "Aborting."
+  fi
+
+  # Need a reachable proxy. Same probe pattern as mode_update_models.
+  if ! curl -fsS --max-time 3 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
+    die "argo-proxy not reachable on http://localhost:${PROXY_PORT}. Start the tunnel first ('$(basename "$0") client')."
+  fi
+
+  local body; body="$(fetch_proxy_models)"
+  [ -n "$body" ] || die "Empty response from /v1/models."
+
+  # Build the filtered+annotated array. We do the filtering + dedup + provider
+  # inference + modalities inference in one jq pipeline so the same array is
+  # the single source of truth for all three output formats.
+  #
+  # The 'configured' field is set per row by a second pass below (after we
+  # load the OpenCode config); set to 'no' here as the default.
+  local include_embed_filter='select(.id | test("embedding") | not)'
+  if [ "${LIST_MODELS_INCLUDE_EMBED:-0}" = 1 ]; then
+    include_embed_filter='.'
+  fi
+
+  local annotated_json
+  annotated_json="$(printf '%s' "$body" | jq --argjson include_embed "${LIST_MODELS_INCLUDE_EMBED:-0}" '
+    def provider_of:
+      if   test("embedding"; "i") then "embedding"
+      elif test("claude"; "i")    then "claude"
+      elif test("gemini"; "i")    then "gemini"
+      elif test("gpt|^o[1-9]|^argo:o[1-9]"; "i") then "openai"
+      else "other"
+      end;
+    def modalities_of(prov):
+      if prov == "embedding" then "text->vector"
+      else "text+image->text"
+      end;
+    [ .data[]
+      | select($include_embed == 1 or (.id | test("embedding") | not))
+    ]
+    | unique_by(.internal_name)
+    | map({
+        internal_name: .internal_name,
+        id: (.id | sub("^argo:"; "")),
+        provider: (.id | provider_of),
+        modalities: ((.id | provider_of) as $p | modalities_of($p)),
+        configured: "no"
+      })
+    | sort_by(.provider, .internal_name)
+  ')" || die "jq failed to build the annotated model list from /v1/models."
+
+  # Cross-reference with OpenCode config (if it exists). We mark each
+  # served model as configured=yes/no and then APPEND orphan rows (in
+  # config but not served) at the end so the user sees them too.
+  local cfg="${OPENCODE_CONFIG}"
+  local have_cfg=0
+  local cfg_keys_json='[]'
+  if [ -f "$cfg" ]; then
+    have_cfg=1
+    cfg_keys_json="$(jq -c '.provider.argo.models // {} | keys' "$cfg" 2>/dev/null || printf '%s' '[]')"
+  fi
+
+  if [ "$have_cfg" = 1 ]; then
+    annotated_json="$(printf '%s' "$annotated_json" | jq --argjson cfg "$cfg_keys_json" '
+      ($cfg | map(. as $k | { ($k): true }) | add // {}) as $cfgset
+      | map(.configured = (if $cfgset[.internal_name] then "yes" else "no" end))
+    ')"
+    # Append orphan rows (in cfg, not served). These get id="", provider
+    # "(orphan)", modalities "?".
+    local served_keys_json
+    served_keys_json="$(printf '%s' "$annotated_json" | jq -c 'map(.internal_name)')"
+    local orphans_json
+    orphans_json="$(jq -cn --argjson cfg "$cfg_keys_json" --argjson srv "$served_keys_json" '
+      ($srv | map(. as $k | { ($k): true }) | add // {}) as $srvset
+      | $cfg | map(select($srvset[.] | not))
+            | map({ internal_name: ., id: "", provider: "(orphan)",
+                    modalities: "?", configured: "orphan" })
+    ')"
+    annotated_json="$(jq -cn --argjson rows "$annotated_json" --argjson orph "$orphans_json" \
+      '$rows + $orph')"
+  fi
+
+  # ---- Emit -------------------------------------------------------------
+  local fmt="${LIST_MODELS_FORMAT:-text}"
+  local out="${LIST_MODELS_OUTPUT:-}"
+  local rendered
+
+  case "$fmt" in
+    json)
+      rendered="$(printf '%s' "$annotated_json" | jq .)"
+      ;;
+    tsv)
+      # Header + rows. The configured column is omitted when no OpenCode
+      # config exists.
+      if [ "$have_cfg" = 1 ]; then
+        rendered="$(
+          printf 'internal_name\tid\tprovider\tmodalities\tconfigured\n'
+          printf '%s' "$annotated_json" | jq -r '.[] |
+            [.internal_name, .id, .provider, .modalities, .configured] | @tsv'
+        )"
+      else
+        rendered="$(
+          printf 'internal_name\tid\tprovider\tmodalities\n'
+          printf '%s' "$annotated_json" | jq -r '.[] |
+            [.internal_name, .id, .provider, .modalities] | @tsv'
+        )"
+      fi
+      ;;
+    text|"")
+      # Column-aligned via printf. Column widths are computed from the
+      # data (with sane minimums) so wide names don't blow the layout.
+      # We push the TSV through awk for the alignment pass; awk is part
+      # of POSIX and we already rely on it elsewhere.
+      local tsv_payload
+      if [ "$have_cfg" = 1 ]; then
+        tsv_payload="$(
+          printf 'INTERNAL_NAME\tID\tPROVIDER\tMODALITIES\tCONFIGURED\n'
+          printf '%s' "$annotated_json" | jq -r '.[] |
+            [.internal_name, .id, .provider, .modalities, .configured] | @tsv'
+        )"
+      else
+        tsv_payload="$(
+          printf 'INTERNAL_NAME\tID\tPROVIDER\tMODALITIES\n'
+          printf '%s' "$annotated_json" | jq -r '.[] |
+            [.internal_name, .id, .provider, .modalities] | @tsv'
+        )"
+      fi
+      rendered="$(printf '%s\n' "$tsv_payload" | awk -F '\t' '
+        { for (i=1;i<=NF;i++) { if (length($i) > w[i]) w[i]=length($i); rows[NR,i]=$i; cols=NF } }
+        END {
+          for (r=1;r<=NR;r++) {
+            line = ""
+            for (i=1;i<=cols;i++) {
+              sep = (i==cols) ? "" : "  "
+              line = line sprintf("%-*s%s", w[i], rows[r,i], sep)
+            }
+            print line
+          }
+        }
+      ')"
+      # Wrap with a count footer for the screen path.
+      local total_count served_count orphan_count
+      total_count="$(printf '%s' "$annotated_json" | jq 'length')"
+      served_count="$(printf '%s' "$annotated_json" | jq '[.[] | select(.configured != "orphan")] | length')"
+      orphan_count="$(printf '%s' "$annotated_json" | jq '[.[] | select(.configured == "orphan")] | length')"
+      local footer=""
+      if [ "$have_cfg" = 1 ]; then
+        footer="$(printf '\n%s\n' "Total: ${total_count} rows  (served: ${served_count}; orphaned-in-config: ${orphan_count})")"
+      else
+        footer="$(printf '\n%s\n' "Total: ${total_count} models  (no OpenCode config found at ${cfg}; 'configured' column omitted)")"
+      fi
+      rendered="${rendered}${footer}"
+      ;;
+    *)
+      die "Unknown --format value '${fmt}'. Use one of: text, tsv, json."
+      ;;
+  esac
+
+  # ---- Write -----------------------------------------------------------
+  if [ -n "$out" ]; then
+    # Refuse to silently overwrite. Same defensive posture as other writers.
+    if [ -e "$out" ] && [ "${CLEAN_ASSUME_YES:-0}" != 1 ]; then
+      local choice; choice="$(ask "  Output file '${out}' exists. Overwrite? [y/N]:" "n")"
+      case "$choice" in
+        y|Y|yes|YES) ;;
+        *) die "Aborted (existing file '${out}' kept)." ;;
+      esac
+    fi
+    printf '%s\n' "$rendered" > "$out" \
+      || die "Failed to write '${out}'."
+    ok "Wrote ${out} (${fmt})."
+  else
+    printf '%s\n' "$rendered"
+  fi
+}
+
+# ============================================================================
+# SECTION: 22b. UPDATE (mode_update -- refresh installed components in place)
+# ============================================================================
+# Added 2026-06-24 (v2.2.1 prep) per PLAN.md D-022. A unified "update what
+# we installed" surface, complementary to `update-models` (which only
+# refreshes config; never installs anything) and `--force-reinstall`
+# (which always wipes + rebuilds the server-side venv).
+#
+# The `update` subcommand:
+#   * defaults to in-place upgrades (no state nuked);
+#   * iterates over a registry of upgradable components
+#     (UPDATE_COMPONENTS_AVAILABLE) and dispatches to per-component
+#     update_<name>_component / update_<name>_cli_tool helpers;
+#   * prompts the user before installing a component that isn't there
+#     yet (--yes auto-confirms);
+#   * follows successful argo-proxy upgrades with an automatic POST to
+#     the proxy's /refresh endpoint (if a tunnel is up), so the model
+#     registry reflects the new version without restarting the proxy or
+#     running `update-models`;
+#   * NEVER touches user-owned config files (those are the job of
+#     `update-models` and the per-tool config writers in client/setup);
+#   * exposes a --check mode that reports installed-vs-latest without
+#     installing anything.
+#
+# Per-component upgrade idiom (the "lossless" path):
+#   * argo-proxy: try `argo-proxy update install` first (upstream's own
+#                 self-updater, available since ~v3.0); fall back to
+#                 `pip install --upgrade argo-proxy`. Both paths preserve
+#                 the venv and the config; pip --upgrade also handles
+#                 dependency upgrades cleanly.
+#   * OpenCode:   `brew upgrade sst/tap/opencode` if the binary came
+#                 from a brew prefix; else re-run the upstream
+#                 `curl -fsSL https://opencode.ai/install | bash` (it's
+#                 idempotent and upgrades in place).
+#   * Claude Code: re-run `curl -fsSL https://claude.ai/install.sh | bash`
+#                 (Anthropic's installer is idempotent and the documented
+#                 upgrade path; the in-tool `/upgrade` exists but isn't
+#                 scriptable).
+#
+# When the in-place upgrade fails, the per-component helper prints a
+# hint pointing at `--force-reinstall` (for argo-proxy) or the
+# component's documented manual recovery; it does NOT auto-escalate.
+#
+# Registry: UPDATE_COMPONENTS_AVAILABLE lists every upgradable component
+# in display order. CLI tools from CLI_TOOLS_AVAILABLE are auto-included
+# (their update_<name>_cli_tool helper, if present, is called); the
+# server-side argo-proxy component is registered explicitly because it's
+# not a per-tool CLI dispatcher.
+
+UPDATE_COMPONENTS_AVAILABLE=(
+  "argo-anywhere|argo_anywhere.sh itself (the script; canonical install at ~/.argo_anywhere/)"
+  "argoproxy|argo-proxy (server-side; on the ANL compute node)"
+  "opencode|OpenCode CLI (laptop-side)"
+  "claudecode|Claude Code CLI (laptop-side)"
+  "aider|aider CLI (laptop-side)"
+)
+
+# update_component_is_known <name>: returns 0 if <name> is registered.
+update_component_is_known() {
+  local want="$1" entry name
+  for entry in "${UPDATE_COMPONENTS_AVAILABLE[@]}"; do
+    name="${entry%%|*}"
+    [ "$name" = "$want" ] && return 0
+  done
+  return 1
+}
+
+# update_component_known_names: comma-separated registry, for errors.
+update_component_known_names() {
+  local entry name out=""
+  for entry in "${UPDATE_COMPONENTS_AVAILABLE[@]}"; do
+    name="${entry%%|*}"
+    out="${out:+${out}, }${name}"
+  done
+  printf '%s' "$out"
+}
+
+# _version_ge <a> <b>: returns 0 iff version a >= version b (semver-ish).
+# Implemented via `sort -V` (GNU + BSD both ship version-sort since macOS
+# 10.13 / Ubuntu 16.04). Used by update_*_component helpers + by the
+# audit UP-02 soft-floor check (queued).
+#
+# Tolerates: "3.0.1", "v3.0.1", "3.0.1.dev0", "3.1.2-rc1". Returns 1 on
+# any unparseable input (treats unknown as "older" to bias toward an
+# upgrade attempt).
+_version_ge() {
+  local a="${1#v}" b="${2#v}"
+  [ -z "$a" ] || [ -z "$b" ] && return 1
+  # `printf %s\n` + `sort -V | tail -n1` is bash-3.2-safe (no mapfile).
+  local _top
+  _top="$( { printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n1; } 2>/dev/null || true )"
+  [ "$_top" = "$a" ]
+}
+
+# _extract_version <text>: extract the first dotted-numeric version
+# token (e.g. "2.1.187", "3.0.0", "1.17.9") from arbitrary text. Used
+# to normalize `--version` output across tools that decorate the
+# version with vendor names or parenthesized labels:
+#   * `argo-proxy --version`  -> "argo-proxy 3.0.0"
+#   * `claude --version`      -> "2.1.187 (Claude Code)"
+#   * `opencode --version`    -> "1.17.9"
+# Returns the empty string when no version-shaped token is present
+# (so callers can fall back to "unknown" rather than print a garbage
+# value).
+_extract_version() {
+  printf '%s' "$1" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([.-][A-Za-z0-9]+)*' | head -n1
+}
+
+# _pypi_latest_version <package>: print the latest stable version of
+# <package> on PyPI, or empty string on failure. Used by `update --check`
+# for argo-proxy. Best-effort: no network failure is fatal (the worst
+# case is we show "(upstream unknown)" instead of "(upstream X.Y.Z)").
+_pypi_latest_version() {
+  local pkg="$1"
+  local latest=""
+  if command -v curl >/dev/null 2>&1; then
+    latest="$( { curl -fsS --max-time 5 "https://pypi.org/pypi/${pkg}/json" \
+                 | { command -v jq >/dev/null 2>&1 && jq -r '.info.version' \
+                     || python3 -c 'import sys,json;print(json.load(sys.stdin)["info"]["version"])' 2>/dev/null; }; } 2>/dev/null || true )"
+  fi
+  [ "$latest" = "null" ] && latest=""
+  printf '%s' "$latest"
+}
+
+# _update_prompt_install <component_label>: ask whether to install a
+# missing component. Honors $UPDATE_ASSUME_YES (--yes/-y) for non-
+# interactive runs. Returns 0 (install) or 1 (skip).
+_update_prompt_install() {
+  local label="$1"
+  if [ "${UPDATE_ASSUME_YES:-0}" = 1 ]; then
+    log "${label} is not installed. --yes was set; installing."
+    return 0
+  fi
+  warn "${label} is not installed on this machine."
+  local reply
+  reply="$(ask "Install it now? [y/N]:" "n")"
+  case "$reply" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# update_argoproxy_component: in-place argo-proxy upgrade on the compute
+# node. Lossless: does NOT touch ~/.config/argoproxy/config.yaml and does
+# NOT recreate $HOME/argovenv (that's `--force-reinstall`'s job).
+#
+# Strategy:
+#   * If we're running ON the target compute node already (the on-node
+#     short-circuit case): invoke ensure_argoproxy_installed() if argo-
+#     proxy is missing; else try `argo-proxy update install` then
+#     `pip install --upgrade argo-proxy` in sequence.
+#   * Else: SSH to the node and run the same logic remotely via a
+#     small inline payload (no scp; the payload is short enough to
+#     embed). Same SSH plumbing as remote_bootstrap.
+#
+# After a successful upgrade (and only when a local tunnel is up and
+# /health answers), POST to /refresh so the running proxy picks up any
+# new model entries in the upstream Argo gateway's registry (the
+# argo-proxy ModelRegistry refreshes from `${argo_base_url}/api/v1/models/`
+# on /refresh).
+#
+# Globals consumed: PROXY_PORT, ARGO_ANYWHERE_USER, ARGO_ANYWHERE_NODE
+# (via cache or --user / --node), UPDATE_CHECK_ONLY, UPDATE_ASSUME_YES.
+# Exit codes: 0 on successful upgrade (or up-to-date); non-zero on
+# unrecoverable failure.
+update_argoproxy_component() {
+  local check_only="${UPDATE_CHECK_ONLY:-0}"
+
+  # Resolve identity (username + node). Same precedence as mode_clean's
+  # remote step: env > cache > die-with-hint.
+  local user node
+  user="$(resolve_username)"
+  ARGO_ANYWHERE_USER="$user"
+
+  if [ -n "${ARGO_ANYWHERE_NODE:-}" ]; then
+    node="$ARGO_ANYWHERE_NODE"
+  elif [ -r "${HOME}/.config/argo_anywhere/node" ]; then
+    node="$(cat "${HOME}/.config/argo_anywhere/node" 2>/dev/null || true)"
+  else
+    node=""
+  fi
+
+  # On-node short-circuit. If we're already on the target compute node
+  # (or the node is empty and we're on SOME compute node), run locally.
+  if [ -z "$node" ] || host_is_target "$node"; then
+    log "Running argo-proxy update locally (this host = ${node:-$(this_host_fqdn)})."
+    _update_argoproxy_inproc "$check_only"
+    local rc=$?
+    [ "$rc" -eq 0 ] && _update_argoproxy_post_refresh
+    return $rc
+  fi
+
+  # Remote path. Build a small bash payload and run via SSH.
+  # First, peek at upstream so the user sees the comparison from this side
+  # (the remote payload only knows about the installed version; it doesn't
+  # have curl-to-PyPI semantics, and even if it did, doing it laptop-side
+  # saves a round trip on --check and surfaces network problems sooner).
+  local latest_pypi; latest_pypi="$(_pypi_latest_version argo-proxy)"
+  if [ -n "$latest_pypi" ]; then
+    log "argo-proxy upstream latest (PyPI): ${latest_pypi}"
+  fi
+
+  log "Updating argo-proxy on ${node} (user=${user})..."
+  ssh_attempt_pre || die "Aborted: argo-proxy update on ${node} (SSH failure lock active)."
+
+  local venv_remote='$HOME/argovenv'
+  local payload
+  payload="$(_update_argoproxy_remote_payload "$check_only")"
+
+  # shellcheck disable=SC2046
+  if ssh -o StrictHostKeyChecking=accept-new \
+         $(ssh_args "$user" "$node") "${user}@${node}" \
+         "bash -s" <<< "$payload"; then
+    ssh_attempt_ok
+  else
+    ssh_attempt_fail
+    err "argo-proxy update on ${node} failed."
+    err "  If the in-place upgrade is broken (dependency conflict, etc.),"
+    err "  fall back to:  bash $(basename "$0") --force-reinstall server"
+    err "  (will wipe ${venv_remote} on the node and rebuild from scratch)"
+    return 1
+  fi
+
+  # Post-upgrade: ask the running proxy to refresh its model registry.
+  # Only meaningful when --check was NOT set.
+  if [ "$check_only" != 1 ]; then
+    _update_argoproxy_post_refresh
+  fi
+  return 0
+}
+
+# _update_argoproxy_inproc <check_only>: the local (or on-node)
+# equivalent of the remote payload. Same upgrade idiom; reused from the
+# on-node short-circuit branch.
+_update_argoproxy_inproc() {
+  local check_only="$1"
+  local venv; venv="$(eval echo "$VENV_PATH")"
+
+  if [ ! -x "${venv}/bin/argo-proxy" ]; then
+    if [ "$check_only" = 1 ]; then
+      warn "argo-proxy is not installed in ${venv}."
+      log "  Upstream latest (PyPI): $(_pypi_latest_version argo-proxy || echo unknown)"
+      return 0
+    fi
+    if _update_prompt_install "argo-proxy (server-side, in ${venv})"; then
+      ensure_argoproxy_installed
+      return $?
+    fi
+    return 1
+  fi
+
+  local installed
+  installed="$(_extract_version "$( { "${venv}/bin/argo-proxy" --version 2>&1; } || true )")"
+  local latest; latest="$(_pypi_latest_version argo-proxy)"
+  log "argo-proxy installed: ${installed:-unknown}; PyPI latest: ${latest:-unknown}"
+
+  if [ "$check_only" = 1 ]; then
+    if [ -n "$installed" ] && [ -n "$latest" ] && _version_ge "$installed" "$latest"; then
+      ok "argo-proxy is up-to-date (${installed})."
+    elif [ -n "$installed" ] && [ -n "$latest" ]; then
+      warn "argo-proxy ${installed} < ${latest}; run 'update argoproxy' to upgrade."
+    else
+      warn "Could not determine installed vs latest; run 'update argoproxy' to attempt an upgrade."
+    fi
+    return 0
+  fi
+
+  if [ -n "$installed" ] && [ -n "$latest" ] && _version_ge "$installed" "$latest"; then
+    ok "argo-proxy is already at the latest version (${installed}); no upgrade needed."
+    return 0
+  fi
+
+  # Prefer the venv-local pip path. Rationale (verified 2026-06-24 live
+  # test): `argo-proxy update install` invokes whatever `pip` it finds
+  # on PATH at run time, which on a typical compute node is the system
+  # / conda pip rather than the venv's pip. The result is that
+  # `update install` "succeeds" but the venv's argo-proxy stays at its
+  # old version (the system pip's package metadata moves, the venv
+  # binary doesn't). Since the running argo-proxy IS the venv's binary
+  # (started by mode_server via `${venv}/bin/argo-proxy serve`),
+  # missing the venv upgrade defeats the purpose of `update argoproxy`.
+  log "Running '${venv}/bin/pip install --upgrade argo-proxy' (venv-targeted)..."
+  if "${venv}/bin/pip" install --upgrade argo-proxy; then
+    ok "argo-proxy upgraded to $(_extract_version "$("${venv}/bin/argo-proxy" --version 2>&1)")."
+    return 0
+  fi
+
+  # Fallback: upstream self-updater. Only fires if the venv pip path
+  # failed entirely (e.g. PyPI unreachable from the venv environment
+  # but reachable via the system pip's network config).
+  if "${venv}/bin/argo-proxy" update --help >/dev/null 2>&1; then
+    warn "venv pip failed; falling back to 'argo-proxy update install'."
+    warn "  (NOTE: this may upgrade the system pip's argo-proxy instead of the venv's;"
+    warn "   verify the new version with: ${venv}/bin/argo-proxy --version)"
+    if "${venv}/bin/argo-proxy" update install; then
+      ok "argo-proxy upgrade complete (verify version with: ${venv}/bin/argo-proxy --version)."
+      return 0
+    fi
+  fi
+
+  err "Both 'argo-proxy update install' and pip upgrade failed."
+  err "  Try: bash $(basename "$0") --force-reinstall server"
+  return 1
+}
+
+# _update_argoproxy_remote_payload <check_only>: emit the bash script
+# that runs on the compute node. Self-contained (does not depend on
+# ARGO_ANYWHERE_* env on the remote side beyond what bash gives by
+# default). Returns the script body on stdout.
+#
+# This stays small enough to embed via `ssh ... bash -s <<< "$payload"`
+# rather than scp'ing a separate file; ~30 lines of bash with no
+# heredocs of its own.
+_update_argoproxy_remote_payload() {
+  local check_only="$1"
+  cat <<REMOTE_PAYLOAD
+set -eu
+venv="\$HOME/argovenv"
+if [ ! -x "\$venv/bin/argo-proxy" ]; then
+  echo "[remote] ERROR: argo-proxy is not installed at \$venv/bin/argo-proxy" >&2
+  echo "[remote]   Run 'bash $(basename "$0") --force-reinstall client' from the laptop" >&2
+  echo "[remote]   to install it cleanly." >&2
+  exit 1
+fi
+# Extract first dotted-numeric token from --version (robust to vendor
+# prefixes like "argo-proxy 3.0.0" and to update-prompt banners that
+# upstream argo-proxy injects on stderr).
+_extract_v() { printf '%s' "\$1" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1; }
+installed=\$(_extract_v "\$("\$venv/bin/argo-proxy" --version 2>&1)")
+echo "[remote] argo-proxy installed (venv): \$installed"
+if [ "$check_only" = 1 ]; then
+  echo "[remote] --check mode: not upgrading."
+  exit 0
+fi
+# Prefer venv-local pip path (see 2026-06-24 live-test note in the
+# laptop-side _update_argoproxy_inproc helper for the rationale:
+# 'argo-proxy update install' upgrades the wrong pip on compute nodes).
+echo "[remote] Running '\$venv/bin/pip install --upgrade argo-proxy' (venv-targeted)..."
+if "\$venv/bin/pip" install --upgrade argo-proxy; then
+  new_installed=\$(_extract_v "\$("\$venv/bin/argo-proxy" --version 2>&1)")
+  echo "[remote] OK: venv argo-proxy now at \$new_installed"
+  exit 0
+fi
+# Fallback to upstream self-updater (will likely hit the system pip
+# rather than the venv pip; surfaced as a WARN above on the laptop side).
+if "\$venv/bin/argo-proxy" update --help >/dev/null 2>&1; then
+  echo "[remote] WARN: venv pip failed; falling back to 'argo-proxy update install'." >&2
+  if "\$venv/bin/argo-proxy" update install; then
+    new_installed=\$(_extract_v "\$("\$venv/bin/argo-proxy" --version 2>&1)")
+    echo "[remote] OK (verify): venv argo-proxy reports \$new_installed"
+    exit 0
+  fi
+fi
+echo "[remote] ERROR: all upgrade paths failed." >&2
+exit 1
+REMOTE_PAYLOAD
+}
+
+# _update_argoproxy_post_refresh: POST /refresh to the local tunnel so
+# the running argo-proxy re-pulls the upstream model list. Silently
+# skips if no tunnel is up (the upgrade still succeeded; the user will
+# pick up new models the next time the proxy is restarted).
+_update_argoproxy_post_refresh() {
+  if ! curl -fsS --max-time 3 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
+    log "No local tunnel to :${PROXY_PORT}; skipping /refresh."
+    log "  (New models will appear on next 'client' / 'tunnel' or proxy restart.)"
+    return 0
+  fi
+  log "POST http://localhost:${PROXY_PORT}/refresh ..."
+  if curl -fsS --max-time 10 -X POST "http://localhost:${PROXY_PORT}/refresh" >/dev/null 2>&1; then
+    ok "argo-proxy model registry refreshed."
+    log "  Run '$(basename "$0") list-models' to see what's now available."
+    log "  Run '$(basename "$0") update-models' to add new models to your OpenCode config."
+  else
+    warn "POST /refresh failed (older argo-proxy versions don't have this endpoint;"
+    warn "  restart the proxy or run 'client' / 'tunnel' again to pick up new models)."
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# update_argo_anywhere_component: in-place upgrade of argo_anywhere.sh
+# itself (the script the user is running).
+#
+# Target path resolution (per PLAN.md D-023):
+#   * default: $ARGO_INSTALL_SCRIPT (~/.argo_anywhere/bin/argo_anywhere.sh).
+#   * if the canonical install is missing, prompt the user to install
+#     it first (one-shot bootstrap; same machinery as
+#     maybe_bootstrap_canonical_install). --yes auto-confirms.
+#
+# Upstream resolution:
+#   * GET ${PROJECT_RELEASES_API} -> tag_name -> raw URL at that tag.
+#   * Fall back to PROJECT_DEFAULT_BRANCH (main) if the API call fails
+#     or no releases exist. WARN the user when falling back so they
+#     know they're getting development-branch code.
+#
+# Atomicity:
+#   * Fetch to a temp file in the SAME directory as the target (so
+#     `mv` is rename(2) atomic on the same filesystem).
+#   * Validate the fetched file before replacing:
+#       1. `bash -n` parses cleanly
+#       2. Contains a `SCRIPT_VERSION=` line (sanity: we got a real
+#          script, not an HTML error page)
+#       3. File size > 50 KB (defensive: the real script is ~370 KB;
+#          a tiny response is suspect)
+#   * Backup the existing target as ${target}.bak.<timestamp> before
+#     overwriting (matches the handle_config_file backup convention
+#     used elsewhere).
+#
+# Refuses to operate on a dirty git working tree (defensive: the user
+# may be running from a git checkout and the script would clobber
+# uncommitted edits).
+#
+# Honors UPDATE_CHECK_ONLY (report-only) and UPDATE_ASSUME_YES (skip
+# install prompts).
+update_argo_anywhere_component() {
+  local check_only="${UPDATE_CHECK_ONLY:-0}"
+
+  log "Current script: argo_anywhere.sh v${SCRIPT_VERSION}"
+
+  # Resolve upstream latest tag. Two-step probe:
+  #   1. /releases/latest  -- the documented API endpoint. This project
+  #      does NOT use GitHub Releases UI today (release process tags
+  #      via `git tag` only; see PLAN.md "Release process"), so this
+  #      typically 404s. Try anyway in case the convention changes.
+  #   2. /tags  -- lists all git tags newest-first. Pick the first one
+  #      that matches a vX.Y.Z (or vX.Y.Z-rcN) shape; skip non-version
+  #      tags if any exist.
+  # Fall back to PROJECT_DEFAULT_BRANCH (main) only if BOTH probes fail.
+  local latest_tag=""
+  if command -v curl >/dev/null 2>&1; then
+    latest_tag="$( { curl -fsS --max-time 5 "$PROJECT_RELEASES_API" 2>/dev/null \
+                     | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+                     | head -n1 | sed -E 's/.*"([^"]+)"$/\1/'; } || true )"
+    if [ -z "$latest_tag" ]; then
+      # Fall back to /tags (the project's actual release convention).
+      latest_tag="$( { curl -fsS --max-time 5 \
+                         "https://api.github.com/repos/${PROJECT_REPO}/tags" 2>/dev/null \
+                       | grep -oE '"name"[[:space:]]*:[[:space:]]*"v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*"' \
+                       | head -n1 | sed -E 's/.*"(v[^"]+)"$/\1/'; } || true )"
+    fi
+  fi
+  local latest_ver="" latest_ref=""
+  if [ -n "$latest_tag" ]; then
+    latest_ver="$(_extract_version "$latest_tag")"
+    latest_ref="$latest_tag"
+    log "Upstream latest tag: ${latest_tag} (version: ${latest_ver:-unknown})"
+  else
+    warn "Could not resolve a release tag from GitHub; will fall back to '${PROJECT_DEFAULT_BRANCH}' branch tip."
+    warn "  (Network problem, or the repo has no version-shaped tags.)"
+    latest_ref="$PROJECT_DEFAULT_BRANCH"
+  fi
+
+  # --check: compare and exit, no installs.
+  if [ "$check_only" = 1 ]; then
+    if [ -n "$latest_ver" ]; then
+      if _version_ge "$SCRIPT_VERSION" "$latest_ver"; then
+        ok "argo_anywhere.sh is up-to-date (${SCRIPT_VERSION} >= ${latest_ver})."
+      else
+        warn "argo_anywhere.sh ${SCRIPT_VERSION} < ${latest_ver}; run 'update argo-anywhere' to upgrade."
+      fi
+    else
+      log "Cannot compare versions (upstream unreachable); run 'update argo-anywhere' to attempt anyway."
+    fi
+    # Also report on the canonical install (separate from $0).
+    if canonical_install_present; then
+      local installed_ver
+      installed_ver="$(_extract_version "$( { grep -m1 -E '^SCRIPT_VERSION=' "$ARGO_INSTALL_SCRIPT" 2>/dev/null; } || true )")"
+      log "Canonical install at ${ARGO_INSTALL_SCRIPT}: v${installed_ver:-unknown}"
+    else
+      warn "Canonical install at ${ARGO_INSTALL_DIR} does NOT exist yet."
+      warn "  Run '$(basename "$0") client' (any subcommand that bootstraps) OR"
+      warn "  re-run '$(basename "$0") update argo-anywhere' (without --check) to install it."
+    fi
+    return 0
+  fi
+
+  # If canonical install is missing, offer to bootstrap.
+  if ! canonical_install_present; then
+    if _update_prompt_install "argo_anywhere.sh canonical install (${ARGO_INSTALL_DIR})"; then
+      # Reuse the bootstrap helper, temporarily clearing the on-node
+      # short-circuit so it always runs (the user explicitly asked).
+      ARGO_ANYWHERE_SKIP_BOOTSTRAP=0 maybe_bootstrap_canonical_install
+      if ! canonical_install_present; then
+        err "Bootstrap did not complete; cannot continue with the upgrade."
+        return 1
+      fi
+    else
+      return 1
+    fi
+  fi
+
+  local target="$ARGO_INSTALL_SCRIPT"
+
+  # Refuse if the target is inside a git working tree with uncommitted
+  # changes. Defensive: if the user is running from a git checkout AND
+  # the target somehow resolves to that checkout, we'd clobber their
+  # uncommitted work. The canonical install path (~/.argo_anywhere/) is
+  # not typically a git tree, but check anyway.
+  if command -v git >/dev/null 2>&1; then
+    local target_dir; target_dir="$(dirname "$target")"
+    if ( cd "$target_dir" 2>/dev/null && git rev-parse --show-toplevel >/dev/null 2>&1 ); then
+      local _root; _root="$( cd "$target_dir" && git rev-parse --show-toplevel )"
+      if [ -n "$( cd "$_root" && git status --porcelain 2>/dev/null )" ]; then
+        err "Refusing to overwrite ${target}: the directory is inside a git working tree (${_root})"
+        err "  with uncommitted changes. This is almost certainly your development checkout."
+        err "  If you really want to overwrite, commit/stash first, or run 'git pull' instead."
+        return 1
+      fi
+    fi
+  fi
+
+  # Build the fetch URL.
+  local fetch_url="${PROJECT_RAW_URL_PREFIX}/${latest_ref}/argo_anywhere.sh"
+  if [ "$latest_ref" = "$PROJECT_DEFAULT_BRANCH" ]; then
+    warn "Falling back to branch '${PROJECT_DEFAULT_BRANCH}' (no release tag resolved)."
+    warn "  Fetched code may include unreleased development changes."
+  fi
+
+  log "Fetching ${fetch_url} ..."
+  # Fetch to a temp file in the SAME directory as the target so the
+  # final mv is rename(2) atomic on the same filesystem.
+  local target_dir; target_dir="$(dirname "$target")"
+  local tmp; tmp="$(mktemp "${target_dir}/argo_anywhere.sh.new.XXXXXX")" \
+    || { err "Could not create temp file in ${target_dir}."; return 1; }
+
+  # Make sure the tmp file gets removed on any error path (validation
+  # failure, mv failure, etc.). Use a local RETURN trap via a single
+  # wrapper to avoid stomping on other traps.
+  local _cleanup_tmp
+  _cleanup_tmp() { [ -n "${tmp:-}" ] && [ -f "$tmp" ] && rm -f "$tmp"; }
+
+  if ! curl -fsSL --max-time 60 -o "$tmp" "$fetch_url"; then
+    _cleanup_tmp
+    err "Failed to fetch ${fetch_url}."
+    err "  Check network connectivity and the GitHub repo URL (${PROJECT_REPO})."
+    return 1
+  fi
+
+  # Sanity-validate the fetched file.
+  local fetched_size
+  fetched_size="$(wc -c < "$tmp" 2>/dev/null | tr -d ' ')"
+  if [ -z "$fetched_size" ] || [ "$fetched_size" -lt 50000 ]; then
+    _cleanup_tmp
+    err "Fetched file is suspiciously small (${fetched_size:-0} bytes; expected >50KB)."
+    err "  GitHub may have returned an error page instead of the script. Aborting."
+    return 1
+  fi
+  if ! bash -n "$tmp" 2>/dev/null; then
+    _cleanup_tmp
+    err "Fetched file does not parse as bash (syntax error)."
+    err "  Aborting to avoid replacing a working script with a broken one."
+    return 1
+  fi
+  # Two acceptable sentinels (any one suffices):
+  #   * a `SCRIPT_VERSION=` line       (v2.2.1+ convention)
+  #   * the canonical header comment   (v2.2.0 and earlier;
+  #                                     keeps self-update working across the
+  #                                     v2.2.0 -> v2.2.1 boundary)
+  # Both have been stable in this project since the v2.0 rename.
+  if ! grep -q '^SCRIPT_VERSION=' "$tmp" \
+     && ! grep -q '^# argo_anywhere.sh --' "$tmp"; then
+    _cleanup_tmp
+    err "Fetched file does not look like argo_anywhere.sh (no SCRIPT_VERSION="
+    err "  line and no '# argo_anywhere.sh --' header). Aborting."
+    return 1
+  fi
+
+  local fetched_ver
+  fetched_ver="$(_extract_version "$( { grep -m1 -E '^SCRIPT_VERSION=' "$tmp" 2>/dev/null; } || true )")"
+  # Fall back to inferring from the script header line if SCRIPT_VERSION
+  # is absent (pre-v2.2.1 case). The header doesn't carry a version, so
+  # the best we can do is the latest_ver we resolved from the upstream
+  # tag. Better than printing "unknown" in the success message.
+  if [ -z "$fetched_ver" ] && [ -n "${latest_ver:-}" ]; then
+    fetched_ver="$latest_ver"
+  fi
+  log "Fetched argo_anywhere.sh version: ${fetched_ver:-unknown}"
+
+  # No-op if we already have this version installed at the target.
+  if [ -n "$fetched_ver" ]; then
+    local installed_ver
+    installed_ver="$(_extract_version "$( { grep -m1 -E '^SCRIPT_VERSION=' "$target" 2>/dev/null; } || true )")"
+    if [ -n "$installed_ver" ] && _version_ge "$installed_ver" "$fetched_ver"; then
+      _cleanup_tmp
+      ok "${target} is already at v${installed_ver} (>= fetched v${fetched_ver}); no replacement needed."
+      return 0
+    fi
+  fi
+
+  # Backup the existing target before overwriting (matches the
+  # handle_config_file .bak.<timestamp> convention).
+  if [ -f "$target" ]; then
+    local backup; backup="${target}.bak.$(date +%Y%m%d-%H%M%S).$$"
+    if cp "$target" "$backup" 2>/dev/null; then
+      log "Backup written: ${backup}"
+    else
+      warn "Could not write backup of existing ${target}; proceeding anyway."
+    fi
+  fi
+
+  # Atomic replace.
+  if ! mv "$tmp" "$target"; then
+    _cleanup_tmp
+    err "Failed to mv ${tmp} -> ${target}."
+    return 1
+  fi
+  # mktemp creates files with restrictive permissions (typically 0600).
+  # Force 0755 so the new script is readable + executable for everyone
+  # (matches the convention of a shell script in a PATH directory).
+  chmod 0755 "$target" 2>/dev/null || true
+
+  # Refresh the env file too (cheap; ensures any field-improvements to
+  # the env helper land alongside script upgrades).
+  if [ -f "$ARGO_INSTALL_ENV" ]; then
+    _write_argo_env_file "$ARGO_INSTALL_ENV" || true
+    chmod +x "$ARGO_INSTALL_ENV" 2>/dev/null || true
+  fi
+
+  ok "argo_anywhere.sh upgraded to v${fetched_ver:-unknown} at ${target}"
+
+  # Self-replacement caveat: if the running script ($0) IS the target
+  # we just replaced, the running process is still executing the OLD
+  # in-memory copy. Tell the user.
+  local self_abs; self_abs="$(_resolve_self_path)"
+  if [ "$self_abs" = "$target" ]; then
+    log ""
+    log "  NOTE: you upgraded the script you are currently running."
+    log "  The new version takes effect on the NEXT invocation; this"
+    log "  process keeps running the old code until it exits."
+  fi
+  return 0
+}
+
+# ----------------------------------------------------------------------------
+# update_opencode_cli_tool: in-place OpenCode upgrade on the laptop.
+# Detects whether the installed binary came from Homebrew (path under
+# /opt/homebrew/bin or /usr/local/bin) or from the curl|bash installer
+# (~/.opencode/bin/opencode); picks the matching upgrade command.
+#
+# Honors --check (UPDATE_CHECK_ONLY=1): reports installed path + version
+# without upgrading. Asks-then-installs if the binary is missing
+# (--yes auto-confirms).
+update_opencode_cli_tool() {
+  local check_only="${UPDATE_CHECK_ONLY:-0}"
+
+  if ! command -v opencode >/dev/null 2>&1; then
+    if [ "$check_only" = 1 ]; then
+      warn "OpenCode is not installed."
+      return 0
+    fi
+    if _update_prompt_install "OpenCode"; then
+      ensure_opencode_installed
+      return $?
+    fi
+    return 1
+  fi
+
+  local bin; bin="$(command -v opencode)"
+  local installed
+  installed="$(_extract_version "$( { opencode --version 2>/dev/null; } || true )")"
+  log "OpenCode installed: ${bin} (version ${installed:-unknown})"
+
+  if [ "$check_only" = 1 ]; then
+    log "  (run 'update opencode' to attempt an in-place upgrade)"
+    return 0
+  fi
+
+  case "$bin" in
+    /opt/homebrew/bin/opencode|/usr/local/bin/opencode|/home/linuxbrew/*/bin/opencode)
+      if command -v brew >/dev/null 2>&1; then
+        log "Brew-managed install detected; running 'brew upgrade sst/tap/opencode'..."
+        if brew upgrade sst/tap/opencode; then
+          ok "OpenCode upgraded: $(_extract_version "$(opencode --version 2>/dev/null)")."
+          return 0
+        fi
+        err "brew upgrade failed."
+        return 1
+      fi
+      warn "Binary lives in a brew prefix but 'brew' is not on PATH; falling back to curl installer."
+      ;;
+  esac
+
+  log "Re-running upstream installer: curl -fsSL https://opencode.ai/install | bash ..."
+  if curl -fsSL https://opencode.ai/install | bash; then
+    local _v; _v="$(_extract_version "$(opencode --version 2>/dev/null || true)")"
+    ok "OpenCode upgraded: ${_v:-unknown}."
+    return 0
+  fi
+  err "OpenCode upgrade failed (upstream installer returned non-zero)."
+  return 1
+}
+
+# ----------------------------------------------------------------------------
+# update_claudecode_cli_tool: in-place Claude Code upgrade on the laptop.
+# Anthropic ships only the curl|bash installer (idempotent and the
+# documented upgrade path); no brew formula today. Same --check + prompt-
+# to-install discipline as the other update_*_cli_tool helpers.
+update_claudecode_cli_tool() {
+  local check_only="${UPDATE_CHECK_ONLY:-0}"
+
+  if ! command -v claude >/dev/null 2>&1; then
+    if [ "$check_only" = 1 ]; then
+      warn "Claude Code is not installed."
+      return 0
+    fi
+    if _update_prompt_install "Claude Code"; then
+      ensure_claudecode_installed
+      return $?
+    fi
+    return 1
+  fi
+
+  local bin; bin="$(command -v claude)"
+  local installed
+  installed="$(_extract_version "$( { claude --version 2>/dev/null; } || true )")"
+  log "Claude Code installed: ${bin} (version ${installed:-unknown})"
+
+  if [ "$check_only" = 1 ]; then
+    log "  (run 'update claudecode' to attempt an in-place upgrade)"
+    return 0
+  fi
+
+  log "Re-running upstream installer: curl -fsSL https://claude.ai/install.sh | bash ..."
+  if curl -fsSL https://claude.ai/install.sh | bash; then
+    local _v; _v="$(_extract_version "$(claude --version 2>/dev/null || true)")"
+    ok "Claude Code upgraded: ${_v:-unknown}."
+    return 0
+  fi
+  err "Claude Code upgrade failed (upstream installer returned non-zero)."
+  return 1
+}
+
+# ----------------------------------------------------------------------------
+# update_aider_cli_tool: in-place aider upgrade on the laptop. aider ships
+# via uv / pipx / the standalone installer; pick the matching upgrade
+# path based on where the binary lives. Same --check + prompt-to-install
+# discipline (D-022 contract) as the other update_<name>_cli_tool helpers.
+update_aider_cli_tool() {
+  local check_only="${UPDATE_CHECK_ONLY:-0}"
+
+  if ! command -v aider >/dev/null 2>&1; then
+    if [ "$check_only" = 1 ]; then
+      warn "aider is not installed."
+      return 0
+    fi
+    if _update_prompt_install "aider"; then
+      ensure_aider_installed
+      return $?
+    fi
+    return 1
+  fi
+
+  local bin; bin="$(command -v aider)"
+  local installed
+  installed="$(_extract_version "$( { aider --version 2>/dev/null; } || true )")"
+  log "aider installed: ${bin} (version ${installed:-unknown})"
+
+  if [ "$check_only" = 1 ]; then
+    log "  (run 'update aider' to attempt an in-place upgrade)"
+    return 0
+  fi
+
+  # Pick the upgrade path by install method (in preference order).
+  case "$bin" in
+    *"/uv/tools/"*|*"/.local/share/uv/"*)
+      if command -v uv >/dev/null 2>&1; then
+        log "uv-managed install detected; running 'uv tool upgrade aider-chat'..."
+        if uv tool upgrade aider-chat; then
+          ok "aider upgraded: $(_extract_version "$(aider --version 2>/dev/null || true)")."
+          return 0
+        fi
+        err "uv tool upgrade failed."
+        return 1
+      fi
+      ;;
+  esac
+  if command -v pipx >/dev/null 2>&1 && pipx list 2>/dev/null | grep -q "aider-chat"; then
+    log "pipx-managed install detected; running 'pipx upgrade aider-chat'..."
+    if pipx upgrade aider-chat; then
+      ok "aider upgraded: $(_extract_version "$(aider --version 2>/dev/null || true)")."
+      return 0
+    fi
+    err "pipx upgrade failed."
+    return 1
+  fi
+
+  log "Re-running upstream standalone installer: curl -fsSL https://aider.chat/install.sh | sh ..."
+  if curl -fsSL https://aider.chat/install.sh | sh; then
+    local _v; _v="$(_extract_version "$(aider --version 2>/dev/null || true)")"
+    ok "aider upgraded: ${_v:-unknown}."
+    return 0
+  fi
+  err "aider upgrade failed (upstream installer returned non-zero)."
+  return 1
+}
+
+# ----------------------------------------------------------------------------
+# mode_update: dispatcher for the `update` subcommand. Per PLAN.md D-022:
+# in-place upgrades of installed components; never nukes state on its
+# own; prompts to install missing components (--yes auto-confirms).
+#
+# Argument shapes (mode-level globals set by main()'s parser):
+#   * UPDATE_ALL=1               -> update every component in the registry
+#   * UPDATE_COMPONENTS_ARGV=...  -> space-separated list of explicit
+#                                   component names; iterate over them
+#   * neither set                -> interactive picker (multi-select TBD;
+#                                   today: tells the user to pass --all
+#                                   or a component list, then exits 0
+#                                   without doing anything)
+#   * UPDATE_CHECK_ONLY=1         -> report-only mode (no installs, no
+#                                   upgrades); honored per-component
+#                                   by the helpers
+#   * UPDATE_ASSUME_YES=1         -> non-interactive (skip install
+#                                   prompts; just install missing
+#                                   components)
+#
+# Components are processed in the order they appear in
+# UPDATE_COMPONENTS_AVAILABLE so the user always sees argo-proxy first
+# (the most impactful component for "I want the new claudeopus48
+# model").
+mode_update() {
+  local check_only="${UPDATE_CHECK_ONLY:-0}"
+
+  # Decide which components to update.
+  local components=()
+  if [ -n "${UPDATE_COMPONENTS_ARGV:-}" ]; then
+    # Validate each name against the registry; die loud on typos.
+    local _c
+    for _c in $UPDATE_COMPONENTS_ARGV; do
+      update_component_is_known "$_c" \
+        || die "update: unknown component '${_c}'. Known: $(update_component_known_names)."
+      components+=("$_c")
+    done
+  elif [ "${UPDATE_ALL:-0}" = 1 ]; then
+    local _entry
+    for _entry in "${UPDATE_COMPONENTS_AVAILABLE[@]}"; do
+      components+=("${_entry%%|*}")
+    done
+  else
+    # No --all, no explicit list: show the registry and explain the
+    # available choices. Interactive multi-select picker is a future
+    # enhancement; for now keep the surface narrow.
+    log "Available components for 'update' (pass --all or a list):"
+    local _entry _name _label
+    for _entry in "${UPDATE_COMPONENTS_AVAILABLE[@]}"; do
+      _name="${_entry%%|*}"; _label="${_entry#*|}"
+      printf '  %-12s  %s\n' "$_name" "$_label" >&2
+    done
+    log ""
+    log "Examples:"
+    log "  $(basename "$0") update --all                     # update everything"
+    log "  $(basename "$0") update argo-anywhere             # self-update the script"
+    log "  $(basename "$0") update argoproxy                 # just argo-proxy"
+    log "  $(basename "$0") update opencode claudecode       # explicit list"
+    log "  $(basename "$0") update --check --all             # report-only"
+    return 0
+  fi
+
+  if [ "$check_only" = 1 ]; then
+    log "update --check: report-only; no upgrades will be performed."
+  fi
+
+  # Dispatch. Track per-component success/failure for a summary at the end.
+  local _comp
+  local _failed=()
+  local _ok=()
+  local _skipped=()
+  for _comp in "${components[@]}"; do
+    log ""
+    log "==> update ${_comp}"
+    local _rc=0
+    case "$_comp" in
+      argo-anywhere) update_argo_anywhere_component || _rc=$? ;;
+      argoproxy)     update_argoproxy_component     || _rc=$? ;;
+      opencode)      update_opencode_cli_tool       || _rc=$? ;;
+      claudecode)    update_claudecode_cli_tool     || _rc=$? ;;
+      aider)         update_aider_cli_tool          || _rc=$? ;;
+      *) err "update: no handler for '${_comp}' (registry mismatch -- script bug)."; _rc=2 ;;
+    esac
+    if [ "$_rc" -eq 0 ]; then
+      _ok+=("$_comp")
+    elif [ "$_rc" -eq 1 ]; then
+      # Convention: rc=1 = user-declined-install or recoverable failure;
+      # don't treat as hard failure of the run.
+      _skipped+=("$_comp")
+    else
+      _failed+=("$_comp")
+    fi
+  done
+
+  log ""
+  log "Update summary:"
+  [ "${#_ok[@]}" -gt 0 ]      && ok   "  OK:      ${_ok[*]}"
+  [ "${#_skipped[@]}" -gt 0 ] && warn "  Skipped: ${_skipped[*]}  (declined install or partial)"
+  [ "${#_failed[@]}" -gt 0 ]  && err  "  Failed:  ${_failed[*]}"
+
+  # Non-zero exit only on hard failures.
+  [ "${#_failed[@]}" -eq 0 ]
+}
+
 # ============================================================================
 # SECTION: 23. CLEAN HELPERS (_clean_rm, _clean_risky_file)
 # ============================================================================
@@ -6350,6 +8795,266 @@ EOF
       ;;
     *) warn "  unknown choice; keeping ${path}" ;;
   esac
+}
+
+# ============================================================================
+# SECTION: 23b. INSTALL / UNINSTALL (D-025 / Lifecycle Phase C)
+# ============================================================================
+# `install`   -- explicit form of the canonical bin/ install (the
+#                bootstrap-on-first-client path calls the same _install_core).
+# `uninstall` -- symmetric, TIERED teardown that reads the install manifest
+#                to restore client configs correctly. Dry-run-able.
+
+# mode_install: materialize the canonical bin/ install explicitly.
+# Honors --dry-run (preview only). Beautified, scicomp-research-skills
+# style: show the plan, then act.
+mode_install() {
+  local self_abs; self_abs="$(_resolve_self_path)"
+  if [ -z "$self_abs" ] || [ ! -f "$self_abs" ]; then
+    die "install: could not resolve the running script's path ($0)."
+  fi
+
+  print_summary_box "argo_anywhere  --  install plan" "$C_GRN" \
+    "Canonical install dir : ${ARGO_INSTALL_DIR}" \
+    "Script                : ${ARGO_INSTALL_SCRIPT}" \
+    "Wrappers              : bin/install, bin/uninstall" \
+    "PATH helper           : ${ARGO_INSTALL_ENV}" \
+    "Manifest              : ${ARGO_MANIFEST}" \
+    "Source (running from) : ${self_abs}" \
+    "Mode                  : $( [ "${CLEAN_DRY_RUN:-0}" = 1 ] && echo 'DRY RUN (no changes)' || echo 'LIVE' )" \
+    "$( [ -f "$ARGO_INSTALL_SCRIPT_FLAT" ] && echo 'Migration            : flat-layout script -> bin/ (detected)' || echo 'Migration            : none needed' )"
+
+  if [ "${CLEAN_DRY_RUN:-0}" = 1 ]; then
+    log "[dry-run] would create ${ARGO_INSTALL_BIN_DIR}, copy the script, write"
+    log "  the install/uninstall wrappers + env helper, and stamp the manifest."
+    [ -f "$ARGO_INSTALL_SCRIPT_FLAT" ] && log "[dry-run] would migrate ${ARGO_INSTALL_SCRIPT_FLAT} -> ${ARGO_INSTALL_SCRIPT}"
+    return 0
+  fi
+
+  if [ "$self_abs" = "$ARGO_INSTALL_SCRIPT" ]; then
+    log "Running from the canonical install already; refreshing wrappers + env."
+  fi
+  if _install_core "$self_abs"; then
+    ok "Installed argo_anywhere.sh v${SCRIPT_VERSION} at ${ARGO_INSTALL_SCRIPT}"
+    ok "  Wrappers: ${ARGO_INSTALL_WRAP_INSTALL}, ${ARGO_INSTALL_WRAP_UNINSTALL}"
+    ok "  PATH helper: ${ARGO_INSTALL_ENV}"
+    _print_path_setup_hint
+  else
+    die "install: canonical install failed (see warnings above)."
+  fi
+}
+
+# _manifest_configs_to_restore: print, one per line, TAB-separated
+# "<action>\t<path>\t<backup-or-empty>" rows describing how to restore
+# each config the manifest recorded:
+#   action=delete   -> we created it; restore = remove the file.
+#   action=restore  -> it pre-existed; restore = copy the original backup back.
+#                      (backup column = the newest .bak.* for the path, which
+#                      is our best available "pre-argo" snapshot.)
+#   action=none     -> pre-existed but no backup found; leave it (report).
+# Emits nothing if no manifest / no python3.
+_manifest_configs_to_restore() {
+  _manifest_available || return 0
+  [ -f "$ARGO_MANIFEST" ] || return 0
+  python3 - "$ARGO_MANIFEST" <<'PYEOF' 2>/dev/null || true
+import json, os, sys, glob
+manifest = sys.argv[1]
+try:
+    with open(manifest) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+for path, meta in (data.get("configs") or {}).items():
+    if meta.get("created_by_us"):
+        print(f"delete\t{path}\t")
+    else:
+        # pre-existing: restore the newest backup if any exist.
+        baks = sorted(glob.glob(path + ".bak.*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+        if baks:
+            print(f"restore\t{path}\t{baks[0]}")
+        else:
+            print(f"none\t{path}\t")
+PYEOF
+}
+
+# _manifest_binaries_we_installed: print "<tool>\t<path>" for each binary
+# the manifest says we installed. Emits nothing if no manifest / python3.
+_manifest_binaries_we_installed() {
+  _manifest_available || return 0
+  [ -f "$ARGO_MANIFEST" ] || return 0
+  python3 - "$ARGO_MANIFEST" <<'PYEOF' 2>/dev/null || true
+import json, sys
+manifest = sys.argv[1]
+try:
+    with open(manifest) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+for tool, meta in (data.get("binaries") or {}).items():
+    if meta.get("installed_by_us"):
+        print(f"{tool}\t{meta.get('path','')}")
+PYEOF
+}
+
+# _uninstall_rm <path>: dry-run-aware remove (honors CLEAN_DRY_RUN like
+# _clean_rm, which it delegates to for the actual removal).
+_uninstall_rm() { _clean_rm "$@"; }
+
+# mode_uninstall: tiered, manifest-driven teardown (D-025 D-b/D-c/D-d).
+# Flags:
+#   --dry-run          preview only
+#   --restore-configs  restore client configs to pre-argo state (Tier 2)
+#   --remove-binaries  remove tool binaries we installed (Tier 3, gated)
+#   --remote           also tear down the compute-node venv (Tier 4)
+#   -y                 assume-yes for the top-level confirmation
+mode_uninstall() {
+  local dry="${CLEAN_DRY_RUN:-0}"
+  local do_restore="${UNINSTALL_RESTORE_CONFIGS:-0}"
+  local do_binaries="${UNINSTALL_REMOVE_BINARIES:-0}"
+  local do_remote="${CLEAN_REMOTE:-0}"
+
+  # ---- Plan box ----------------------------------------------------------
+  print_summary_box "argo_anywhere  --  uninstall plan" "$C_YLW" \
+    "Mode              : $( [ "$dry" = 1 ] && echo 'DRY RUN (no changes)' || echo 'LIVE' )" \
+    "Tier 1 (always)   : canonical install (${ARGO_INSTALL_DIR}), state dir, tunnels/sockets" \
+    "Tier 2 configs    : $( [ "$do_restore" = 1 ] && echo 'RESTORE to pre-argo state (--restore-configs)' || echo 'left as-is (pass --restore-configs)' )" \
+    "Tier 3 binaries   : $( [ "$do_binaries" = 1 ] && echo 'REMOVE ones we installed (--remove-binaries)' || echo 'left installed (pass --remove-binaries)' )" \
+    "Tier 4 remote     : $( [ "$do_remote" = 1 ] && echo 'tear down compute-node venv (--remote)' || echo 'skipped (pass --remote)' )" \
+    "Manifest          : ${ARGO_MANIFEST}$( [ -f "$ARGO_MANIFEST" ] && echo '' || echo '  (none; config-restore + binary-removal limited)' )"
+
+  # ---- Top-level confirmation -------------------------------------------
+  if [ "$dry" != 1 ] && [ "${CLEAN_ASSUME_YES:-0}" != 1 ]; then
+    local ans; ans="$(ask "Proceed with uninstall? [y/N]:" "N")"
+    case "$ans" in y|Y|yes|Yes) ;; *) die "Uninstall aborted." ;; esac
+  fi
+
+  # ---- Tier 2: config restore (BEFORE removing the manifest) -------------
+  if [ "$do_restore" = 1 ]; then
+    log ""
+    log "Tier 2: restoring client configs to their pre-argo-anywhere state..."
+    if [ ! -f "$ARGO_MANIFEST" ]; then
+      warn "  No manifest at ${ARGO_MANIFEST}; cannot restore configs precisely. Skipping Tier 2."
+    else
+      local line action path bak
+      while IFS=$'\t' read -r action path bak; do
+        [ -n "$action" ] || continue
+        case "$action" in
+          delete)
+            log "  config we created -> remove: ${path}"
+            _uninstall_rm "$path"
+            ;;
+          restore)
+            if [ "$dry" = 1 ]; then
+              log "  [dry-run] would restore ${bak} -> ${path}"
+            else
+              if cp -p "$bak" "$path" 2>/dev/null; then
+                ok "  restored original: ${path}  (from ${bak})"
+              else
+                warn "  could not restore ${path} from ${bak} (left current file in place)"
+              fi
+            fi
+            ;;
+          none)
+            warn "  ${path}: pre-existed but no backup found; leaving it in place."
+            ;;
+        esac
+      done <<EOF
+$(_manifest_configs_to_restore)
+EOF
+    fi
+  fi
+
+  # ---- Tier 3: binaries we installed (opt-in, manifest-gated) -----------
+  if [ "$do_binaries" = 1 ]; then
+    log ""
+    log "Tier 3: removing tool binaries argo-anywhere installed..."
+    if [ ! -f "$ARGO_MANIFEST" ]; then
+      warn "  No manifest; cannot tell which binaries we installed. Skipping Tier 3."
+    else
+      local btool bpath
+      while IFS=$'\t' read -r btool bpath; do
+        [ -n "$btool" ] || continue
+        log "  ${btool}: installed by us -> remove ${bpath}"
+        if [ -n "$bpath" ] && [ -e "$bpath" ]; then
+          _uninstall_rm "$bpath"
+        else
+          warn "    ${bpath:-<unknown path>} not present; skipping."
+        fi
+      done <<EOF
+$(_manifest_binaries_we_installed)
+EOF
+      warn "  Note: tool binaries may have other files (venvs, caches). This"
+      warn "  removes the launcher we recorded; use the tool's own uninstaller"
+      warn "  for a full removal if desired."
+    fi
+  fi
+
+  # ---- Tier 4: remote venv (opt-in) -------------------------------------
+  if [ "$do_remote" = 1 ]; then
+    log ""
+    log "Tier 4: remote compute-node teardown requested (--remote)."
+    log "  Reuse 'clean' for the remote venv + server log:"
+    log "    $(basename "$0") clean --purge$( [ "$dry" = 1 ] && echo ' --dry-run' )"
+    warn "  (mode_uninstall does not duplicate clean's remote SSH path; run the"
+    warn "   command above to tear down the compute-node venv.)"
+  fi
+
+  # ---- Tier 1: local tunnels/sockets + state + canonical install --------
+  log ""
+  log "Tier 1: removing local channel + state + canonical install..."
+
+  # Local listener on the resolved port. Ownership-aware: only kill a
+  # tunnel WE own. An external / shared channel (e.g. argo-proxy on a
+  # compute node, or another user's / session's listener) must NOT be
+  # killed by uninstall -- doing so would break every client pointed at
+  # it. Reuse local_tunnel_status's classification (same guard mode_stop
+  # uses). [Hardening added 2026-07-09 after a sandboxed uninstall test
+  # killed a live shared listener because the port probe is machine-global
+  # even when HOME is sandboxed.]
+  local listener_pids=""
+  listener_pids="$( { lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null || true; } )"
+  if [ -n "$listener_pids" ]; then
+    local _lstatus; _lstatus="$(local_tunnel_status "$PROXY_PORT")"
+    case "$_lstatus" in
+      ours-healthy-fg|ours-unhealthy-fg|ours-healthy-mux|ours-unhealthy-mux)
+        if [ "$dry" = 1 ]; then
+          log "  [dry-run] would kill our SSH tunnel on :${PROXY_PORT} (pids: ${listener_pids//$'\n'/ })"
+        else
+          echo "$listener_pids" | xargs -n1 kill 2>/dev/null || true
+          ok "  killed our SSH tunnel on :${PROXY_PORT} (pids: ${listener_pids//$'\n'/ })"
+        fi
+        ;;
+      *)
+        warn "  Port ${PROXY_PORT} is held by a listener we do NOT own"
+        warn "    (status: ${_lstatus}; pids: ${listener_pids//$'\n'/ })."
+        warn "    Leaving it running -- uninstall never kills an external or"
+        warn "    shared channel. Use 'stop' / 'clean' if you intend to."
+        ;;
+    esac
+  fi
+  # SSH mux sockets.
+  if [ -d "$SSH_MUX_DIR" ]; then
+    _uninstall_rm "$SSH_MUX_DIR"
+  fi
+  # State dir (user/node/port cache + ssh-fail-lock).
+  if [ -d "$STATE_DIR" ]; then
+    _uninstall_rm "$STATE_DIR"
+  fi
+
+  # Canonical install LAST (self-removal). We may be running from inside
+  # it; remove the flat script + wrappers + env + manifest first, then the
+  # dir. Since rm -rf on the dir containing the running script is safe on
+  # POSIX (the inode persists until the process exits), a plain removal is
+  # fine here -- but we order it last so earlier tiers can still read the
+  # manifest.
+  _uninstall_rm "$ARGO_INSTALL_DIR"
+
+  log ""
+  ok "Uninstall complete$( [ "$dry" = 1 ] && echo ' (dry-run; nothing changed)' )."
+  if [ "$dry" != 1 ]; then
+    log "  Remove the '. \"\$HOME/.argo_anywhere/env\"' line from your shell rc"
+    log "  if you added one. Open a new shell to drop the stale PATH entry."
+  fi
 }
 
 # ============================================================================
@@ -6535,6 +9240,16 @@ EOF
     "OpenCode config" \
     "We wrote/edited the 'argo' provider block. The rest of the file may be your own (other providers, OpenCode preferences). Recommended: [r]estore from backup if you have one, otherwise [k]eep."
 
+  # aider global config + its sibling model-settings file (Phase 5a).
+  # Only the global scope is swept here; project-scoped aider configs live
+  # inside the user's repos and are not tracked by this script.
+  _clean_risky_file "${AIDER_GLOBAL_CONFIG}" \
+    "aider config (global)" \
+    "We wrote openai-api-base / openai-api-key / model / model-settings-file. The rest may be your own aider preferences. Recommended: [r]estore from backup if you have one, otherwise [k]eep."
+  _clean_risky_file "${HOME}/.aider.model.settings.yml" \
+    "aider model-settings (global)" \
+    "This file is written entirely by argo-anywhere (per-model use_temperature:false for argo models). Safe to delete if you no longer use aider with this proxy."
+
   # Remote
   if [ "${CLEAN_LOCAL_ONLY:-0}" != 1 ] && [ -n "$cached_user" ] && [ -n "$cached_node" ]; then
     export ARGO_ANYWHERE_USER="$cached_user"
@@ -6713,6 +9428,9 @@ Usage: $(basename "$0") [SUBCOMMAND] [--cli-tool NAME]
                           [--verbose-server]
                           [--force-reinstall]
                           [--keep-orphans | --drop-orphans]
+                          [--output FILE] [--format text|tsv|json]
+                          [--include-embeddings]
+                          [--all] [--check]
                           [--dry-run] [--local-only] [-y]
                           [--purge | --purge-backups]
 
@@ -6737,6 +9455,19 @@ Subcommands:
                   compute node) and blocks. Useful for power users who
                   manage their own client configs, or for keeping a tunnel
                   alive while configuring multiple clients in other terms.
+  connect         Bring up the shared channel (tunnel + remote argo-proxy)
+                  and hold it in the foreground monitor. The friendlier
+                  name for 'tunnel'. Run this in one window, then use
+                  'configure' / 'run' in other windows against it.
+  configure TOOL... Install + write config for one or more clients against
+                  an EXISTING channel (e.g. 'configure opencode aider').
+                  Detects the channel via /health and fails with a hint if
+                  none is up; pass --ensure to bring it up. Does NOT block.
+  run TOOL        Configure ONE client then launch it (e.g. 'run aider').
+                  Brings the channel up if missing (prompts; --ensure / -y
+                  auto-confirm). The channel-establishing verbs are the
+                  three-level split of 'client'; 'client'/'setup' remain
+                  as one-shot fallbacks.
   server          Run argo-proxy here. Auto-invoked by 'client' over SSH on
                   the picked compute node, but can also be run standalone
                   from a logged-in shell on a node ('I want to leave a
@@ -6748,13 +9479,44 @@ Subcommands:
                   available/configured/orphaned model counts.
                   Set ARGO_ANYWHERE_SHOW_MODELS=1 to also dump the full
                   /v1/models response.
-  update-models   Refresh ~/.config/opencode/config.json's model list from the
-                  live /v1/models endpoint. Preserves everything else in the
-                  config; uses the same [k]/[b]/[d]/[m]/[a] confirmation flow
-                  as other config writes. Requires jq.
-                  Models present in the config but absent from /v1/models
-                  ('orphans') prompt per-model unless --keep-orphans /
-                  --drop-orphans is passed.
+  update          In-place upgrade of installed components without nuking
+                  state (the lossless cousin of --force-reinstall). Pass
+                  --all to update everything in the registry, or a list of
+                  component names (argo-anywhere, argoproxy, opencode,
+                  claudecode) for selective updates. Prompts before
+                  installing a missing component (--yes auto-confirms).
+                  Use --check for a report-only run (no installs, no
+                  upgrades).
+                    * 'update argo-anywhere' self-updates the script:
+                      resolves the latest GitHub release tag, validates
+                      the fetched script, and atomically replaces the
+                      canonical install at ~/.argo_anywhere/bin/argo_anywhere.sh.
+                    * 'update argoproxy' upgrades argo-proxy on the
+                      compute node and automatically POSTs /refresh so
+                      the running proxy picks up new upstream models
+                      without a restart.
+                  Run '$(basename "$0") update' with no args to see the
+                  available component list.
+  update-models   Refresh a client's in-config model list from the live
+                  /v1/models endpoint. Tool-aware via --cli-tool (default
+                  opencode). Only OpenCode enumerates models in its config,
+                  so only '--cli-tool opencode' does real work; for
+                  claudecode / aider (which pick the model at runtime via
+                  --model) it prints an honest "not applicable" note and
+                  points at 'list-models'. For OpenCode: preserves
+                  everything else in the config; uses the same
+                  [k]/[b]/[d]/[m]/[a] confirmation flow as other config
+                  writes; requires jq. Models present in the config but
+                  absent from /v1/models ('orphans') prompt per-model
+                  unless --keep-orphans / --drop-orphans is passed.
+  list-models     Tabulate the models the proxy serves on /v1/models (read-only;
+                  the sibling of update-models). Columns: internal_name, id,
+                  provider, modalities, configured. Cross-references the
+                  OpenCode config when present so each row carries a
+                  yes/no/orphan tag. Embeddings are excluded by default
+                  (--include-embeddings to include). Format defaults to
+                  pretty text; --format tsv or --format json for scripting.
+                  Writes to stdout unless --output FILE is given. Requires jq.
   stop            Kill the local SSH tunnel listening on the resolved port.
                   Does NOT touch the remote argo-proxy session.
   clean           Remove every artifact this script created (local + remote).
@@ -6765,8 +9527,23 @@ Subcommands:
                   -y / --yes for non-interactive runs (keeps risky files by
                   default; add --purge to delete them too, or --purge-backups
                   to keep the file but drop only its .bak.* siblings).
-                  --user / --node override the cached identity for the
-                  remote step when no client run has been cached yet.
+                   --user / --node override the cached identity for the
+                   remote step when no client run has been cached yet.
+  install         Materialize the canonical install at ~/.argo_anywhere/bin/
+                  (script + install/uninstall wrappers + PATH env helper)
+                  and stamp the install manifest. Normally auto-runs on the
+                  first 'client' use; run explicitly to (re)install or to
+                  preview with --dry-run.
+  uninstall       Symmetric teardown. Tier 1 (always): canonical install +
+                  state dir + local tunnel/sockets. Tier 2 (--restore-configs):
+                  restore client configs to their pre-argo-anywhere state via
+                  the install manifest (delete files we created; restore the
+                  original backup for files we modified). Tier 3
+                  (--remove-binaries): remove tool binaries WE installed
+                  (manifest-gated; never touches ones you already had).
+                  Tier 4 (--remote): points you at 'clean --purge' for the
+                  compute-node venv. --dry-run previews; -y skips the
+                  top-level confirm.
   list-tools      Print the registry of supported AI CLI tools (the values
                   --cli-tool accepts). Output is one line per tool; safe to
                   grep / parse from scripts.
@@ -6858,6 +9635,18 @@ Options:
                        behavior; remember to remove it for routine use.
                        Canonical env: ARGO_ANYWHERE_VERBOSE_SERVER=1.
 
+  Flags below apply to 'update':
+  --all                Update every component in the registry (argoproxy,
+                       opencode, claudecode). Without --all and without an
+                       explicit component list, 'update' prints the registry
+                       and exits 0 without changing anything.
+  --check              Report-only mode: print installed vs upstream versions
+                       per component; do NOT install, upgrade, or POST
+                       /refresh. Combine with --all to scan everything.
+  -y, --yes            Non-interactive: auto-confirm install prompts for
+                       missing components (otherwise 'update' asks before
+                       installing each one). Shared with 'clean'.
+
   Flags below apply to 'update-models':
   --keep-orphans       Skip the per-orphan prompt; keep ALL models in the
                        config that are no longer in /v1/models.
@@ -6866,6 +9655,18 @@ Options:
                        config that are no longer in /v1/models.
                        Canonical env: ARGO_ANYWHERE_DROP_ORPHANS=1.
                        (Mutually exclusive with --keep-orphans.)
+
+  Flags below apply to 'list-models':
+  --output FILE        Write the tabulated output to FILE instead of stdout.
+                       Refuses to overwrite an existing file without -y.
+  --format FMT         One of: text (default; column-aligned), tsv (header
+                       row + tab-separated; one model per line), json (the
+                       filtered+annotated model list as a JSON array, each
+                       element including internal_name, id, provider,
+                       modalities, configured).
+  --include-embeddings Include embedding models in the table. Default is
+                       to filter them out (matches update-models semantics,
+                       so counts agree across the two subcommands).
 
   Flags below apply to 'clean':
   --dry-run            Print what would be deleted; change nothing.
@@ -7143,7 +9944,11 @@ Check what's happening locally and remotely (via the tunnel):
   bash ${script_name} status
 
 List models the proxy is exposing:
-  ARGO_ANYWHERE_SHOW_MODELS=1 bash ${script_name} status   # gated dump
+  bash ${script_name} list-models                     # pretty table
+  bash ${script_name} list-models --include-embeddings
+  bash ${script_name} list-models --format tsv --output models.tsv
+  bash ${script_name} list-models --format json | jq '.[] | select(.provider=="claude")'
+  ARGO_ANYWHERE_SHOW_MODELS=1 bash ${script_name} status   # gated raw dump
   curl -s http://localhost:<port>/v1/models | jq .   # raw  (<port> = your tunnel port)
 
 Refresh the model list in your OpenCode config from the live proxy:
@@ -7182,7 +9987,23 @@ Force a different ANL username for one run:
 Reset the cached username / node:
   rm -f ${HOME}/.config/argo_anywhere/{user,node}
 
-Update argo-proxy on the node (script reinstalls only on first install):
+Update installed components in place (lossless; preserves configs + venv):
+  bash ${script_name} update --all                          # update everything
+  bash ${script_name} update argo-anywhere                  # self-update the script
+  bash ${script_name} update argoproxy                      # just the proxy on the node
+  bash ${script_name} update opencode claudecode            # explicit list
+  bash ${script_name} update --check --all                  # report-only; no installs
+  bash ${script_name} update --all -y                       # non-interactive (CI / cron)
+  # After a successful argo-proxy upgrade, 'update' POSTs /refresh to the
+  # local tunnel (if up) so the running proxy picks up new upstream models
+  # without a restart. Use 'list-models' / 'update-models' to consume them.
+  # 'update argo-anywhere' resolves the latest GitHub release tag, validates
+  # the fetched script (bash -n + size check + SCRIPT_VERSION sentinel),
+  # backs up the existing copy, and atomically replaces ~/.argo_anywhere/
+  # argo_anywhere.sh (the canonical install). If no install exists yet,
+  # it prompts to bootstrap one first. Refuses to clobber a dirty git tree.
+
+Manual fallback if 'update argoproxy' can't reach the node (use directly):
   ssh -J <user>@${ANL_JUMP} <user>@<node> '~/argovenv/bin/argo-proxy update install'
 
 TROUBLESHOOTING
@@ -7266,7 +10087,7 @@ main() {
   # non-flag, non-known-subcommand token is an error.
   while [ $# -gt 0 ]; do
     case "$1" in
-      client|tunnel|setup|server|status|stop|update-models|clean|help|list-tools)
+      client|tunnel|connect|configure|run|setup|server|status|stop|update|update-models|list-models|clean|install|uninstall|help|list-tools)
         if [ -n "$mode" ] && [ "$mode" != "$1" ]; then
           die "Conflicting subcommands: '${mode}' and '$1'."
         fi
@@ -7313,6 +10134,10 @@ main() {
         ARGO_ANYWHERE_VERBOSE_SERVER=1; export ARGO_ANYWHERE_VERBOSE_SERVER; shift ;;
       --auto-port)
         AUTO_PORT=1; shift ;;
+      --ensure)
+        # configure/run: bring the channel up if it isn't already, rather
+        # than failing with the 'run connect first' hint (D-024 / D-e).
+        CONFIGURE_ENSURE=1; shift ;;
       --port-range)
         [ -n "${2:-}" ] || die "--port-range expects a value of the form LO-HI."
         case "$2" in
@@ -7351,14 +10176,66 @@ main() {
         KEEP_ORPHANS=1; shift ;;
       --drop-orphans)
         DROP_ORPHANS=1; shift ;;
+      --output)
+        # list-models: write the tabulated output to FILE instead of stdout.
+        # Ignored (with a warning later) for subcommands that don't write
+        # a single artefact.
+        [ -n "${2:-}" ] || die "--output expects a file path."
+        LIST_MODELS_OUTPUT="$2"; shift 2 ;;
+      --format)
+        # list-models: text (default; column-aligned), tsv, or json.
+        [ -n "${2:-}" ] || die "--format expects one of: text, tsv, json."
+        case "$2" in
+          text|tsv|json) LIST_MODELS_FORMAT="$2"; shift 2 ;;
+          *) die "--format: unknown value '$2'. Use one of: text, tsv, json." ;;
+        esac ;;
+      --include-embeddings)
+        # list-models: include embedding models in the table. Default is
+        # to filter them out (matches update-models semantics).
+        LIST_MODELS_INCLUDE_EMBED=1; shift ;;
       --dry-run)        CLEAN_DRY_RUN=1; shift ;;
       --local-only)     CLEAN_LOCAL_ONLY=1; shift ;;
-      --yes|-y)         CLEAN_ASSUME_YES=1; shift ;;
+      --restore-configs) UNINSTALL_RESTORE_CONFIGS=1; shift ;;
+      --remove-binaries) UNINSTALL_REMOVE_BINARIES=1; shift ;;
+      --remote)          CLEAN_REMOTE=1; shift ;;
+      --yes|-y)         CLEAN_ASSUME_YES=1; UPDATE_ASSUME_YES=1; shift ;;
       --purge)          CLEAN_PURGE=1; CLEAN_PURGE_BACKUPS=1; shift ;;
       --purge-backups)  CLEAN_PURGE_BACKUPS=1; shift ;;
+      --all)
+        # 'update' flag: update every component in the registry.
+        # Ignored (with a warn later) for subcommands that don't
+        # consume it. Same pattern as --keep-orphans / --output / etc.
+        UPDATE_ALL=1; shift ;;
+      --check)
+        # 'update' flag: report-only mode (no installs, no upgrades).
+        # Same scoping as --all.
+        UPDATE_CHECK_ONLY=1; shift ;;
       -h|--help) usage; exit 0 ;;
       --) shift; break ;;
-      *) err "Unknown argument: $1"; usage; exit 2 ;;
+      *)
+        # Positional arguments are accepted by a few subcommands:
+        #   * 'update' takes component names (e.g. `update argoproxy opencode`).
+        #   * 'configure' / 'run' take CLI-tool names
+        #     (e.g. `configure opencode aider`, `run aider`).
+        # Anywhere else, an unknown token is a parse error.
+        if [ "$mode" = "update" ]; then
+          if update_component_is_known "$1"; then
+            UPDATE_COMPONENTS_ARGV="${UPDATE_COMPONENTS_ARGV:+${UPDATE_COMPONENTS_ARGV} }$1"
+            shift
+          else
+            die "update: unknown component '$1'. Known components: $(update_component_known_names)."
+          fi
+        elif [ "$mode" = "configure" ] || [ "$mode" = "run" ]; then
+          if cli_tool_is_known "$1"; then
+            CONFIGURE_TOOLS_ARGV="${CONFIGURE_TOOLS_ARGV:+${CONFIGURE_TOOLS_ARGV} }$1"
+            shift
+          else
+            die "${mode}: unknown tool '$1'. Known tools: $(cli_tool_known_names)."
+          fi
+        else
+          err "Unknown argument: $1"; usage; exit 2
+        fi
+        ;;
     esac
   done
   [ -n "$mode" ] || mode="client"
@@ -7376,7 +10253,7 @@ main() {
   # status without prior cache) so users can see help even with stale
   # state. clean is allowed because cleanup is its purpose.
   case "$mode" in
-    help|list-tools) ;;
+    help|list-tools|list-models|uninstall) ;;
     *)
       if ! detect_legacy_state_and_block; then
         die "Refusing to run with v1.x state present. Clean up per UPGRADING.md, then re-run."
@@ -7393,7 +10270,7 @@ main() {
   # when the config says 64742 will silently report FAIL because nothing is
   # listening on 1234). Skip in client (handled there) and in server/help.
   case "$mode" in
-    client|tunnel|server|help) ;;
+    client|tunnel|connect|server|help) ;;
     *)
       if [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
         warn "Port override (${PROXY_PORT}, source: ${PORT_SOURCE}) differs from"
@@ -7409,8 +10286,8 @@ main() {
   # only; the per-tool dispatch lands later when the registry expands).
   if [ -n "${CLI_TOOL_OVERRIDE:-}" ]; then
     case "$mode" in
-      client|setup|update-models) ;;  # consumes --cli-tool
-      *) warn "--cli-tool ignored for subcommand '${mode}' (only used by client/setup/update-models)." ;;
+      client|setup|configure|run|update-models) ;;  # consumes --cli-tool
+      *) warn "--cli-tool ignored for subcommand '${mode}' (only used by client/setup/configure/run/update-models)." ;;
     esac
   fi
 
@@ -7448,9 +10325,30 @@ main() {
     # (no per-tool config write happens). Matches the --cli-tool
     # ignored-warn pattern above for consistency.
     case "$mode" in
-      client|setup) ;;  # consumes --scope via <name>_pick_scope
-      *) warn "--scope ignored for subcommand '${mode}' (only used by client/setup)." ;;
+      client|setup|configure|run) ;;  # consumes --scope via <name>_pick_scope
+      *) warn "--scope ignored for subcommand '${mode}' (only used by client/setup/configure/run)." ;;
     esac
+  fi
+
+  # list-models flags: warn if passed to a subcommand that doesn't consume
+  # them. Mirrors the --cli-tool / --scope ignored-warn pattern above.
+  if [ -n "${LIST_MODELS_OUTPUT:-}${LIST_MODELS_FORMAT:-}${LIST_MODELS_INCLUDE_EMBED:-}" ]; then
+    case "$mode" in
+      list-models) ;;  # consumes these
+      *) warn "--output / --format / --include-embeddings ignored for subcommand '${mode}' (only used by list-models)." ;;
+    esac
+  fi
+
+  # update flags: warn if passed to a subcommand that doesn't consume them.
+  # Same ignored-warn discipline (D-016).
+  if [ "${UPDATE_ALL:-0}" = 1 ] || [ "${UPDATE_CHECK_ONLY:-0}" = 1 ]; then
+    case "$mode" in
+      update) ;;  # consumes both
+      *) warn "--all / --check ignored for subcommand '${mode}' (only used by update)." ;;
+    esac
+  fi
+  if [ -n "${UPDATE_COMPONENTS_ARGV:-}" ] && [ "$mode" != "update" ]; then
+    warn "Positional component args (${UPDATE_COMPONENTS_ARGV}) ignored for subcommand '${mode}' (only used by update)."
   fi
 
   # Expose the invoked subcommand to cleanup_local (audit finding N1)
@@ -7461,6 +10359,9 @@ main() {
   case "$mode" in
     client)        mode_client ;;
     tunnel)        mode_tunnel ;;
+    connect)       mode_connect ;;
+    configure)     mode_configure ;;
+    run)           mode_run ;;
     # 'setup' is a thin alias for 'client' that ALWAYS shows the
     # interactive picker, even if --cli-tool was passed. Useful for
     # one-off installations of a tool different from the user's usual.
@@ -7468,8 +10369,12 @@ main() {
     server)        mode_server ;;
     status)        mode_status ;;
     stop)          mode_stop ;;
+    update)        mode_update ;;
     update-models) mode_update_models ;;
+    list-models)   mode_list_models ;;
     clean)         mode_clean ;;
+    install)       mode_install ;;
+    uninstall)     mode_uninstall ;;
     help)          long_help ;;
     list-tools)    mode_list_tools ;;
   esac

@@ -572,11 +572,182 @@ curl -sS -H "Authorization: Bearer aattia" -H "Content-Type: application/json" \
 #        to control thinking behavior.'}, ...}}"}}
 ```
 
-**Status**: open (queued for upstream roll-up). Discipline rule
-candidate: when an upstream-stack finding surfaces, document it
-in BOTH the per-project LIMITATIONS doc (full diagnosis) AND the
-top-of-README quick-orient callout (workaround only). Auto-default
-fix queued separately for v2.3.
+**Status**: open (queued for upstream roll-up).
+
+**Resolution note (2026-06-17, morning)**: the underlying upstream-stack
+bug **for `opus-4-7`** is **fixed in `argo-proxy v3.1.0`** (PyPI
+2026-06-11). The fix is at the right layer (llm-rosetta
+`argo--anthropic` shim `model_overrides`: per-model
+`thinking_type: adaptive` for `claudeopus47`, `enabled` for all other
+models). v3.0.3 had a partial workaround in the conversion paths;
+v3.1.0 fixes the root cause declaratively. Full re-walk in
+[`../docs/AUDIT_2026-06-17_argo-proxy-upstream.md`](../docs/AUDIT_2026-06-17_argo-proxy-upstream.md)
+§3 UP-08. The v2.3 auto-default fix
+(`env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `write_claudecode_config`)
+was initially flagged as removable; v2.2.1 bumps the install floor to
+`argo-proxy >= 3.1.0` (UP-02) to ensure users land on a fix-bearing
+install.
+
+**Reissue note (2026-06-17, evening)**: the same upstream-stack bug
+**re-emerges for `opus-4-8`** (Anthropic GA 2026-06-09; also
+adaptive-thinking-only). Verified by source inspection at both
+`argo-proxy v3.1.1` (`src/argoproxy/models.py:60-64`
+`_DEFAULT_CHAT_MODELS` stops at `claudeopus47`;
+`endpoints/dispatch.py:386` `_NO_TEMPERATURE_MODELS = {"claudeopus47"}`)
+and `llm-rosetta v0.6.9`
+(`src/llm_rosetta/shims/providers/argo/anthropic/provider.yaml:18-20`
+`model_overrides` table contains only `claudeopus47`;
+`transforms.py:41-48` `_ADAPTIVE_THINKING_MODELS = frozenset({"claudeopus47"})`).
+Full diagnosis in
+[`../docs/AUDIT_2026-06-17_argo-proxy-upstream.md`](../docs/AUDIT_2026-06-17_argo-proxy-upstream.md)
+§3-bis UP-10 (three gap citations + three live-probe commands).
+**The v2.3 auto-default fix is therefore re-instated** but
+**re-scoped** to a dynamic detection rule: at config-write time,
+introspect `${VENV_PATH}/lib/python*/site-packages/llm_rosetta/shims/providers/argo/anthropic/provider.yaml`
+`model_overrides` and pre-populate `env.ANTHROPIC_MODEL` if any of
+Anthropic's two most-recent flagship Opus releases (per the
+Anthropic docs at <https://docs.anthropic.com/en/docs/about-claude/models/overview>)
+is absent.
+
+The find-it-here trail (LIMITATIONS + agent_feedback + the audit
+docs) made the re-walk's UP-08 → UP-10 reissue trivial to detect —
+the agent went straight to "is the same shim mechanism still in
+place?" rather than re-deriving the original diagnosis. **This is
+the discipline-rule the entry below proposes, now demonstrated
+twice**: (a) fix surfaced upstream at v3.1.0, (b) reissue for new
+model surfaced same day. Worth rolling up for
+`human-facing-doc-authoring` as "limitations docs should be
+re-walkable on every upstream release AND on every upstream-of-the-
+upstream release of the model provider whose limitation we
+documented."
+
+The discipline-rule candidate above (document upstream-stack
+findings in BOTH per-project LIMITATIONS and top-of-README callout)
+**stands and is reinforced** by this resolution: the find-it-here
+trail (LIMITATIONS + agent_feedback) made the v3.1.0 re-walk
+straightforward — the agent could check "is the limitation we
+documented still applicable?" against a known answer rather than
+re-deriving the diagnosis. Worth rolling up as a feedback entry for
+`human-facing-doc-authoring` ("findings docs should be re-walkable
+on upstream release").
+
+Resolution status above is the project-side disposition; the
+upstream-skill-side disposition (whether the discipline rule lands
+in `human-facing-doc-authoring`) remains open until the agent rolls
+the rule up to scicomp-research-skills.
+
+---
+
+## 2026-07-08 — re-walkable upstream audits paid off again; new-tool config-research belongs in the same trail
+
+**Project context**: dependency re-walk (argo-proxy v3.1.2 + v3.2.0a0;
+llm-rosetta v0.6.10-v0.6.12 + v0.7.0a*) + codex/aider design scoping.
+The re-walk fired on the 2026-06-17 audit's stated trigger ("next
+release of either package"). Authored `docs/AUDIT_2026-07-08_argo-proxy-upstream.md`
+(delta re-walk) + `notes/impl_codex_aider.md` (design note).
+
+**Trigger**: pattern-discovered + external-state-changed (new upstream
+releases).
+
+**Skill(s) involved**: `agent-resource-discipline` (first-action
+protocol: survey the latest audit doc BEFORE re-deriving; the
+persistent-memory trail made the delta walk ~20 min instead of a
+full re-audit); `human-facing-doc-authoring` (both new docs).
+
+**Observation 1 — the re-walkable-audit discipline compounds.** For the
+THIRD consecutive upstream re-walk, reading the prior audit's watch-list
++ finding dispositions first let me check "is the thing we documented
+still true?" against a known baseline rather than re-deriving. Bisecting
+`claudeopus48` into llm-rosetta v0.6.10 took one targeted command
+because the 2026-06-17 audit had already pinpointed the exact file
+(`provider.yaml` `model_overrides`) and the exact gap (G2). This is the
+"findings docs should be re-walkable on every upstream release"
+discipline (proposed in the 2026-06-17 entry) demonstrated a third time.
+
+**Observation 2 — new-tool config-research is the same kind of durable
+finding and belongs in the same trail.** Scoping codex surfaced a
+load-bearing, drift-prone fact: codex's `wire_api` accepts ONLY
+`responses`, so codex support depends on argo-proxy's `/v1/responses`
+surface (present since v3.1.2, maturing in v3.2.x). That is exactly the
+class of "our integration depends on an upstream surface at version X"
+fact the upstream-audit watch-list exists for. I cross-linked it (audit
+WATCH-17 + the impl note), so the next re-walk will re-check whether the
+Responses surface still supports codex. **Proposed action**: when
+scoping a new downstream tool whose viability depends on an upstream
+protocol/endpoint, record the dependency as a watch-list row in the
+upstream audit, not only in the tool's impl note — so it gets re-walked
+on the upstream cadence rather than being rediscovered when someone
+finally implements the tool.
+
+**Evidence / minimal repro**: `docs/AUDIT_2026-07-08_argo-proxy-upstream.md`
+§4 (WATCH-16 socket, WATCH-17 pipeline-migration) + `notes/impl_codex_aider.md`
+trade-off #2 (codex Responses-API gating).
+
+**Status**: open (queued for upstream roll-up; composes with the
+2026-06-17 "re-walkable findings docs" entry into a coherent
+"upstream-dependency-audit as living document" reference for
+`human-facing-doc-authoring` or `research-software-engineering`).
+
+---
+
+## 2026-07-09 — live-test gate keeps catching real defects; sandbox tests must guard the isolation variable
+
+**Project context**: the aider (Phase 5a) + lifecycle-commands (D-024
+connect/configure/run + D-025 install/uninstall + manifest) live-test
+gate (`notes/test_plan_lifecycle.md`, 10 tests). All passed, with SEVEN
+amendments landed mid-test.
+
+**Trigger**: pattern-discovered (release-gate cadence) + external-failure
+(a test-plan defect nearly wrote to `/`).
+
+**Skill(s) involved**: `research-software-engineering` (testing-strategy /
+release-gate discipline); `agent-resource-discipline` (sandbox +
+never-touch-the-live-channel discipline); `human-facing-doc-authoring`
+(test-plan authoring).
+
+**Observation 1 — the live-test-gate cadence is now proven across many
+phases** (Phase 2a/2b/2c+3/2d/4 + this lifecycle gate). This gate
+produced 7 amendments, ALL real, none caught by smoke tests or code
+review: install-method ordering (pipx-first failed to build numpy on
+Python 3.13/3.14), model-id needing the `argo:` prefix, `temperature`
+sent to reasoning models yielding an EMPTY stream (aider-facing surfacing
+of the audit's UP-10 G3), misleading scope-conflict prompt text,
+full-status-box noise during configure/run, an OpenCode-centric summary
+box, and update-models silently OpenCode-only. The recurring shape: these
+live only on the actual flag-parser -> dispatcher -> per-tool setup ->
+config-writer -> real-client chain, which smoke tests don't walk. Rule
+worth rolling up: **a new downstream tool + a new command surface always
+earns a full end-to-end live gate, and "zero amendments" is the
+exception, not the rule.**
+
+**Observation 2 — sandbox tests must guard the isolation VARIABLE, not
+just sandbox files.** Test 8 ran in a shell where `$SB` (the throwaway
+HOME) was empty, so `"$SB/created.yml"` expanded to `/created.yml` and
+targeted the filesystem ROOT. It failed safely (root read-only), but
+this is the SAME class as an earlier finding this cycle where a
+sandboxed `uninstall` killed the live shared channel because the port
+probe (`lsof`) is machine-global even when HOME is sandboxed. **Two
+generalizable rules for agent-authored sandbox/test procedures: (a)
+sandboxing files is not enough when the code reaches the network/process
+layer (ports, pids) — isolate the port too; (b) every block that uses an
+isolation variable must GUARD it (`: "${SB:?}"` + a path-prefix check)
+so an unset/typo'd value fails loudly before any destructive op, never
+silently hitting `/` or a real resource.** Both were fixed in
+`notes/test_plan_lifecycle.md`; the code fix (ownership-aware Tier-1
+listener-kill in `mode_uninstall`) is the durable half.
+
+**Proposed action**: roll both into `research-software-engineering` (or
+`agent-resource-discipline`): a "release-gate live test for new
+tool/command surfaces" rule + a "sandbox the isolation variable, guard
+it, and isolate machine-global resources (ports/pids), not just files"
+rule.
+
+**Evidence / minimal repro**: `notes/impl_lifecycle_commands.md`
+"Live-test amendments" (7 items) + "Test-plan defect ... unset `$SB`
+targets `/`"; `notes/test_plan_lifecycle.md` SAFETY RULES + the guarded
+sandbox blocks.
+
+**Status**: open (queued for upstream roll-up).
 
 ---
 
