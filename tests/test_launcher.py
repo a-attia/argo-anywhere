@@ -22,11 +22,14 @@ def test_macos_creates_command_and_app(tmp_path: Path) -> None:
     assert sys.executable in body                    # interpreter baked in
     assert "-m argo_anywhere app" in body
     assert cmd.stat().st_mode & 0o100                # executable bit
-    # The .app bundle is real: runner + Info.plist.
+    # The .app bundle is real: runner + Info.plist + the bundled icon.
     app = next(p for p in created if p.suffix == ".app")
     assert (app / "Contents" / "MacOS" / "argo-anywhere").is_file()
     plist = (app / "Contents" / "Info.plist").read_text()
     assert "CFBundleExecutable" in plist and "argo-anywhere" in plist
+    # The packaged icon is bundled and referenced (assets/icon.icns ships).
+    assert (app / "Contents" / "Resources" / "argo-anywhere.icns").is_file()
+    assert "CFBundleIconFile" in plist
 
 
 def test_linux_creates_desktop_and_sh(tmp_path: Path) -> None:

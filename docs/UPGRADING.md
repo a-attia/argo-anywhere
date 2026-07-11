@@ -829,8 +829,13 @@ pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@
 - **`argo-anywhere app`** opens that same UI in a native desktop window
   (pywebview); it falls back to your default browser if the `[app]` extra isn't
   installed. Needs the `[app]` extra for the native window.
+- **`argo-anywhere install-launcher`** drops a persistent, double-clickable
+  launcher so you can start the UI without a terminal: on macOS a Desktop
+  `.command` + a real `argo-anywhere.app` bundle (with an app icon); on Linux a
+  `.desktop` menu entry + a Desktop `.sh`. It's registered in the footprint, so
+  `argo-anywhere uninstall` removes it.
 
-Both are optional — the CLI is fully usable without them.
+All three are optional — the CLI is fully usable without them.
 
 ### Why the clean break
 

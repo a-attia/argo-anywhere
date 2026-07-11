@@ -22,6 +22,7 @@ session**.
 - [What this is](#what-this-is)
 - [Status](#status)
 - [Quick start](#quick-start)
+- [Web UI & desktop app](#web-ui--desktop-app)
 - [Currently supported `--cli-tool` values](#currently-supported---cli-tool-values)
 - [Prerequisites](#prerequisites)
 - [Known limitations (please read)](#known-limitations-please-read)
@@ -95,6 +96,12 @@ architectural temptation we've evaluated against this rule
 rejected for breaking it — see
 [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
 Section 4 for the canonical Phase-C-rejection rationale.
+
+> **On the `feat/python-package-webui` branch this is being revisited (D-026..D-030):**
+> argo-anywhere is becoming a `pipx`-installable Python package that *wraps* the
+> unchanged single-file engine and adds a loopback-only web UI + native app. The
+> engine stays one self-contained `.sh` (vendored verbatim); the package is the
+> new distribution around it. See [Web UI & desktop app](#web-ui--desktop-app).
 
 ## Status
 
@@ -187,6 +194,50 @@ curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo-any
 The first run prompts for your ANL (Argonne) username and asks you
 to pick a compute node. Subsequent runs reuse the cached values from
 `~/.config/argo_anywhere/`.
+
+## Web UI & desktop app
+
+<img src="src/argo_anywhere/assets/icon.svg" alt="argo-anywhere app icon" width="104" align="right" />
+
+On the `feat/python-package-webui` branch, argo-anywhere is also a
+`pipx`-installable Python package that owns the runtime, wraps the **unchanged**
+bash engine, and adds a loopback-only web UI you can drive from a browser or a
+native window — Duo, the live monitor, and the interactive prompts all work
+without a terminal. (Full design: [`notes/impl_python_webui.md`](notes/impl_python_webui.md),
+decisions D-026..D-030.)
+
+```sh
+# Install the package (pre-release, from the branch):
+pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'
+
+argo-anywhere app                 # open the web UI in a native desktop window
+argo-anywhere web                 # ...or serve it to your browser
+argo-anywhere install-launcher    # drop a double-clickable launcher (no terminal needed)
+```
+
+`install-launcher` writes a **persistent, double-clickable launcher** so you can
+start the UI without opening a terminal: on macOS a
+`~/Desktop/argo-anywhere.command` plus a real `~/Applications/argo-anywhere.app`
+(the constellation icon on the right); on Linux a `.desktop` menu entry plus a
+`~/Desktop/argo-anywhere.sh`. Each bakes the absolute interpreter path (GUI
+launches run with a minimal `PATH`) and opens the native window, falling back to
+your browser if the `[app]` extra isn't installed.
+
+Package-level commands (everything else passes straight through to the engine
+verbs documented below):
+
+| Command | Does |
+|:--|:--|
+| `argo-anywhere app` | Open the web UI in a native desktop window (needs the `[app]` extra; browser fallback). |
+| `argo-anywhere web` | Serve the web UI to your browser (loopback-only). |
+| `argo-anywhere install-launcher` | Install a double-clickable launcher (`--desktop` / `--app-bundle` / `--dest` narrow it). |
+| `argo-anywhere info [--json]` | Local status: package + engine versions, loopback listeners, and argo-anywhere's on-disk footprint (no ANL contact). |
+| `argo-anywhere uninstall` | Remove argo-anywhere's footprint (manifest-driven config restore + the launchers), then print the `pipx`/`pip` command to remove the package itself. |
+| `argo-anywhere --print-script` | Emit the raw bash engine to stdout (inspect-and-fork). |
+
+Everything the package puts on disk is listed by `argo-anywhere info` and removed
+by `argo-anywhere uninstall`; your AI-tool configs are only ever read and
+restored, never argo-anywhere's to delete.
 
 ## Currently supported `--cli-tool` values
 

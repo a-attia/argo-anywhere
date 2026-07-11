@@ -499,6 +499,13 @@ pywebview window, browser fallback). `--desktop` / `--app-bundle` select a
 subset; `--dest` overrides the location. New module `launcher.py`; CLI verb
 intercepted before passthrough (distinct from the engine's `install`).
 
+**App icon** (`assets/icon.icns` + `icon.svg` source, shipped as package-data):
+a constellation **A** (Argo / Anywhere) with an amber guide-star crowning the
+apex against a deep night-sky squircle — the celestial-navigation motif (the ship
+*Argo* is a real constellation; the connecting lines are the routes). Built from
+the SVG via `rsvg-convert` → `iconutil`; the `.app` bundles it and references it
+via `CFBundleIconFile` (skipped cleanly if the asset is ever absent).
+
 It closes the loop with the D-030 lifecycle: the launcher artifacts are listed by
 `footprint.py` (→ `argo-anywhere info`, `artifact` tier) and swept by the package
 `uninstall` verb (the "package-only residue" D-030c removes on top of the engine

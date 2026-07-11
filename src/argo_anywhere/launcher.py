@@ -166,7 +166,7 @@ def _build_macos_app(dest: Path | None, home: Path) -> Path:
     # Optional bundled icon (skipped cleanly if the package ships none).
     icon_line = ""
     try:
-        icns = resources.files("argo_anywhere.assets").joinpath("icon.icns").read_bytes()
+        icns = resources.files("argo_anywhere").joinpath("assets/icon.icns").read_bytes()
         res_dir = app / "Contents" / "Resources"
         res_dir.mkdir(parents=True, exist_ok=True)
         (res_dir / f"{_APP_NAME}.icns").write_bytes(icns)

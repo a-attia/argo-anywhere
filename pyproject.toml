@@ -68,5 +68,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # The bash engine is vendored VERBATIM as package-data (D-026); the web UI
-# ships its vendored static assets (xterm.js etc.) the same way.
-argo_anywhere = ["engine/*.sh", "web/static/*", "web/static/**/*"]
+# ships its vendored static assets (xterm.js etc.) the same way; assets/ holds
+# the app icon used by `install-launcher` for the macOS .app bundle.
+argo_anywhere = ["engine/*.sh", "web/static/*", "web/static/**/*", "assets/*"]
