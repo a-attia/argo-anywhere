@@ -20,11 +20,23 @@ the at-the-keyboard gate. **Owner**: Ahmed Attia (with Claude).
 
 ## Preconditions
 
-Install the branch so the console script has all four commits:
+Install the branch so the console script has all the commits.
+
+**Pre-merge (branch not yet pushed): install from the local working tree** — no
+GitHub round-trip, tests the exact local state:
+
+```sh
+cd <repo>                          # the argo-anywhere checkout
+pipx install --force '.[app]'
+argo-anywhere --version            # 3.0.0.dev0
+```
+
+**Post-push / post-publish:** the git-URL / PyPI forms work once the branch is on
+GitHub (or v3 ships):
 
 ```sh
 pipx install --force 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'
-argo-anywhere --version          # 3.0.0.dev0
+# or, after release:  pipx install 'argo-anywhere[app]'
 ```
 
 ## Pre-flight status (2026-07-11)
