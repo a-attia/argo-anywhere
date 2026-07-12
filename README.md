@@ -105,6 +105,14 @@ argo-anywhere --cli-tool aider client          # aider
 opencode    # or `claude`, or `aider` — whichever you configured
 ```
 
+When the channel is up, the client prints an **ALL GREEN** status box — tunnel
+up, proxy healthy, models available:
+
+![The argo-anywhere client status box reading ALL GREEN: tunnel up, proxy
+healthy, models available, with connection / models / paths sections.](https://raw.githubusercontent.com/a-attia/argo-anywhere/main/assets/screenshots/client.png)
+
+*(Scrubbed demo data — no real username or node.)*
+
 If you configured Claude Code, remember the opus-4-7 workaround from
 [Heads up](#heads-up-before-you-start): `claude --model claude-sonnet-4-6`.
 
@@ -199,21 +207,17 @@ interactive prompts all work without a terminal. It binds `127.0.0.1` only and
 runs only allowlisted engine verbs; see
 [`docs/SECURITY.md`](docs/SECURITY.md) "Local web UI" for the threat model.
 
+![The argo-anywhere web UI: the channel signal-path (laptop → node → argo-proxy)
+showing ALL GREEN, the tunnels/sessions cards, and an embedded terminal.](https://raw.githubusercontent.com/a-attia/argo-anywhere/main/assets/screenshots/web.png)
+
+*(The screenshot uses scrubbed demo data — no real username or credentials.)*
+
 ```sh
 pipx install 'argo-anywhere[app]'    # the [app] extra adds the native window
 
 argo-anywhere app                 # open the web UI in a native desktop window
 argo-anywhere web                 # ...or serve it to your browser
-argo-anywhere install-launcher    # drop a double-clickable launcher (no terminal)
 ```
-
-`install-launcher` writes a **persistent, double-clickable launcher** so you can
-start the UI without a terminal: on macOS a `~/Desktop/argo-anywhere.command`
-plus a real `~/Applications/argo-anywhere.app` (with the constellation icon
-shown here); on Linux a `.desktop` menu entry plus a `~/Desktop/argo-anywhere.sh`.
-Each bakes the absolute interpreter path (GUI launches run with a minimal
-`PATH`) and opens the native window, falling back to your browser if the `[app]`
-extra isn't installed.
 
 These verbs are handled by the **package**; everything else passes straight
 through to the engine (see [Subcommands](#subcommands)):
@@ -222,7 +226,7 @@ through to the engine (see [Subcommands](#subcommands)):
 |:--|:--|
 | `argo-anywhere app` | Open the web UI in a native desktop window (needs `[app]`; browser fallback). |
 | `argo-anywhere web` | Serve the web UI to your browser (loopback-only). |
-| `argo-anywhere install-launcher` | Install a double-clickable launcher (`--desktop` / `--app-bundle` / `--dest` narrow it). |
+| `argo-anywhere install-launcher` | Install a double-clickable launcher (see below). |
 | `argo-anywhere info [--json]` | Local status: package + engine versions, loopback listeners, and argo-anywhere's on-disk footprint (no ANL contact). |
 | `argo-anywhere uninstall [...]` | Remove argo-anywhere's footprint (manifest-driven config restore + the launchers), then print the `pipx`/`pip` command to remove the package itself. |
 | `argo-anywhere --print-script` | Emit the raw bash engine to stdout (inspect-and-fork). |
@@ -231,6 +235,37 @@ through to the engine (see [Subcommands](#subcommands)):
 Everything the package puts on disk is listed by `argo-anywhere info` and
 removed by `argo-anywhere uninstall`. Your AI-tool configs are only ever read
 and restored — never argo-anywhere's to delete.
+
+### A double-clickable launcher (no terminal needed)
+
+You don't have to type a command every time. After `pipx install
+'argo-anywhere[app]'`, one command installs a **persistent, double-clickable
+launcher** that opens the web UI:
+
+```sh
+argo-anywhere install-launcher               # everything for your OS (default)
+argo-anywhere install-launcher --desktop     # only the Desktop launcher
+argo-anywhere install-launcher --app-bundle  # only the macOS ~/Applications/.app
+```
+
+With no flags it installs everything for your platform; the two flags let you
+pick just one, and `--dest <dir>` places the artifacts elsewhere. What gets
+created:
+
+| Platform | Artifacts |
+|:--|:--|
+| **macOS** | `~/Desktop/argo-anywhere.command` and a real `~/Applications/argo-anywhere.app` bundle (with the constellation icon and a populated "About argo-anywhere" panel). |
+| **Linux** | An application-menu entry (`~/.local/share/applications/argo-anywhere.desktop`) plus `~/Desktop/argo-anywhere.sh`. |
+
+(argo-anywhere targets macOS + Linux — its transport is SSH + Duo to ANL — so
+there is no Windows launcher.)
+
+Each launcher **bakes the absolute path of the Python interpreter that installed
+argo-anywhere**, because GUI/Finder launches run with a minimal `PATH` that
+would not find the console script. Double-clicking runs `argo-anywhere app` — a
+native window via pywebview when it's available, falling back to your browser
+otherwise. The launchers are part of argo-anywhere's footprint: they show up in
+`argo-anywhere info` and are removed by `argo-anywhere uninstall`.
 
 ## Supported AI CLI tools
 
