@@ -263,24 +263,92 @@ def _brand_macos_app() -> None:
         pass
 
 
-def _apply_macos_dock_icon() -> None:
-    """Set the Dock + standard-About-panel icon to our constellation ``.icns``.
+# Keep a reference so the Obj-C About handler isn't garbage-collected while the
+# menu item points at it.
+_about_handler = None
 
-    Must run AFTER pywebview has launched the Cocoa app (passed to
-    ``webview.start(func=…)``): setting it before launch gets overridden while
-    pywebview initialises its ``NSApplication``. No-op off macOS / without pyobjc.
+
+def _install_macos_app_chrome() -> None:
+    """After the Cocoa app is up: set the Dock icon and give the standard
+    "About argo-anywhere" panel our icon + a clickable repo link.
+
+    Runs via ``webview.start(func=…)`` (after launch, so it isn't overridden by
+    pywebview's init). For an UNBUNDLED process the About panel keeps the
+    executable's icon (Python) unless we pass an explicit ``ApplicationIcon`` in
+    the panel options — so we rewire the standard About menu item to a handler
+    that opens the panel with our icon. No-op off macOS / without pyobjc;
+    best-effort (try/except) so it never crashes the window. Modeled on
+    scrollback's ``_install_macos_about_link``.
     """
+    global _about_handler
     if sys.platform != "darwin":
         return
     try:
         from importlib.resources import as_file, files
 
-        from AppKit import NSApplication, NSImage  # type: ignore
+        from AppKit import (  # type: ignore
+            NSApplication,
+            NSAttributedString,
+            NSFont,
+            NSFontAttributeName,
+            NSImage,
+        )
+        from Foundation import NSObject, NSURL  # type: ignore
 
-        with as_file(files("argo_anywhere").joinpath("assets/icon.icns")) as icon:
-            img = NSImage.alloc().initWithContentsOfFile_(str(icon))
+        from . import __version__
+
+        img = None
+        try:
+            with as_file(files("argo_anywhere").joinpath("assets/icon.icns")) as icon:
+                img = NSImage.alloc().initWithContentsOfFile_(str(icon))
+        except Exception:
+            img = None
+
+        app = NSApplication.sharedApplication()
         if img is not None:
-            NSApplication.sharedApplication().setApplicationIconImage_(img)
+            app.setApplicationIconImage_(img)  # Dock icon
+
+        repo = "https://github.com/a-attia/argo-anywhere"
+        credits = NSAttributedString.alloc().initWithString_attributes_(
+            "Run AI coding CLIs against the ANL Argo gateway from anywhere.\n\n"
+            "Repository:  ",
+            {NSFontAttributeName: NSFont.systemFontOfSize_(11)},
+        )
+        link = NSAttributedString.alloc().initWithString_attributes_(
+            "github.com/a-attia/argo-anywhere",
+            {"NSLink": NSURL.URLWithString_(repo),
+             NSFontAttributeName: NSFont.systemFontOfSize_(11)},
+        )
+        full = credits.mutableCopy()
+        full.appendAttributedString_(link)
+
+        class _AboutHandler(NSObject):
+            def showAbout_(self, _sender):
+                opts = {
+                    "Credits": full,
+                    "ApplicationName": "argo-anywhere",
+                    "Version": __version__,
+                    "ApplicationVersion": __version__,
+                }
+                if img is not None:
+                    opts["ApplicationIcon"] = img  # override the Python icon
+                NSApplication.sharedApplication().orderFrontStandardAboutPanelWithOptions_(opts)
+
+        _about_handler = _AboutHandler.alloc().init()
+
+        main_menu = app.mainMenu()
+        if main_menu is None or main_menu.numberOfItems() == 0:
+            return
+        app_menu = main_menu.itemAtIndex_(0).submenu()
+        for i in range(app_menu.numberOfItems()):
+            item = app_menu.itemAtIndex_(i)
+            action = item.action()
+            title = str(item.title() or "")
+            if (action is not None and str(action) == "orderFrontStandardAboutPanel:") \
+                    or title.startswith("About"):
+                item.setTarget_(_about_handler)
+                item.setAction_(b"showAbout:")
+                break
     except Exception:
         pass
 
@@ -359,8 +427,8 @@ def _cmd_app(args: Sequence[str]) -> int:
                 width=1200, height=820, min_size=(900, 600),
             )
             print(f"argo-anywhere: native window on {url}")
-            # func runs after the Cocoa app is up -> the Dock/About icon sticks.
-            webview.start(_apply_macos_dock_icon)  # blocks until the window closes
+            # func runs after the Cocoa app is up -> Dock icon + About panel stick.
+            webview.start(_install_macos_app_chrome)  # blocks until window closes
             server.should_exit = True
             return 0
         except ModuleNotFoundError:
