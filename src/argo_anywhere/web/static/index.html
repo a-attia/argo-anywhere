@@ -69,6 +69,8 @@
                background: color-mix(in srgb, var(--down) 12%, transparent); color: var(--ink);
                border-radius: 8px; padding: 10px 12px; font-size: 12.5px; margin: 4px 0 14px; }
     .warnbox b { color: var(--down); }
+    .about-head { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+    .about-icon { border-radius: 13px; flex: none; box-shadow: 0 2px 10px rgba(0,0,0,.35); }
     .tdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); display: inline-block; }
     .tdot.on { background: var(--up); }
 
@@ -296,8 +298,13 @@
 
   <div class="backdrop" id="aboutBackdrop" hidden>
     <div class="popover" role="dialog" aria-modal="true" aria-label="About argo-anywhere">
-      <h2>argo-anywhere</h2>
-      <div class="lede">Run AI coding CLIs against the ANL Argo gateway from anywhere.</div>
+      <div class="about-head">
+        <img src="/icon.svg" alt="" class="about-icon" width="60" height="60" />
+        <div>
+          <h2 style="margin:0 0 2px">argo-anywhere</h2>
+          <div class="lede" style="margin:0">Run AI coding CLIs against the ANL Argo gateway from anywhere.</div>
+        </div>
+      </div>
       <dl class="kv" id="aboutKv"><dt>loading…</dt><dd></dd></dl>
       <div class="pop-actions">
         <button id="closeAbout" class="btn btn-primary">Close</button>

@@ -144,6 +144,12 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
     async def favicon() -> Response:
         return Response(status_code=204)
 
+    @app.get("/icon.svg")
+    async def icon_svg() -> Response:
+        # The app icon (constellation) from package-data, for the in-app About.
+        data = files("argo_anywhere").joinpath("assets/icon.svg").read_bytes()
+        return Response(data, media_type="image/svg+xml")
+
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})

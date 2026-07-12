@@ -228,14 +228,14 @@ def _cmd_web(args: Sequence[str]) -> int:
 
 
 def _brand_macos_app() -> None:
-    """Brand the macOS app for ``argo-anywhere app`` when run unbundled.
+    """Brand the macOS app menu + About panel for ``argo-anywhere app`` unbundled.
 
-    Cocoa reads the menu-bar name, the standard "About" panel, and the Dock icon
-    from the running process's bundle info dict — which for an unbundled Python
-    process is "Python", an empty About, and the generic icon. We patch the main
-    bundle's info dict (via pyobjc, a pywebview dep on macOS) so pywebview's
-    default app menu gets the right name + a populated About, and set the Dock
-    icon from our packaged ``.icns``. No-op off macOS and if pyobjc isn't
+    Cocoa reads the menu-bar name and the standard "About" panel text from the
+    running process's bundle info dict — "Python" / empty for an unbundled Python
+    process. We patch the main bundle's info dict (via pyobjc, a pywebview dep on
+    macOS) BEFORE the menu is built, so pywebview's default app menu gets the
+    right name + a populated About. (The icon is set separately, after launch, by
+    :func:`_apply_macos_dock_icon`.) No-op off macOS and if pyobjc isn't
     importable; best-effort, never blocks the window. When launched from the
     install-launcher ``.app`` bundle these come from Info.plist instead. Modeled
     on scrollback's ``_brand_macos_app``.
@@ -261,7 +261,17 @@ def _brand_macos_app() -> None:
                 )
     except Exception:
         pass
-    # Dock icon (the constellation .icns), independent of the menu name.
+
+
+def _apply_macos_dock_icon() -> None:
+    """Set the Dock + standard-About-panel icon to our constellation ``.icns``.
+
+    Must run AFTER pywebview has launched the Cocoa app (passed to
+    ``webview.start(func=…)``): setting it before launch gets overridden while
+    pywebview initialises its ``NSApplication``. No-op off macOS / without pyobjc.
+    """
+    if sys.platform != "darwin":
+        return
     try:
         from importlib.resources import as_file, files
 
@@ -349,7 +359,8 @@ def _cmd_app(args: Sequence[str]) -> int:
                 width=1200, height=820, min_size=(900, 600),
             )
             print(f"argo-anywhere: native window on {url}")
-            webview.start()  # blocks on the main thread until the window closes
+            # func runs after the Cocoa app is up -> the Dock/About icon sticks.
+            webview.start(_apply_macos_dock_icon)  # blocks until the window closes
             server.should_exit = True
             return 0
         except ModuleNotFoundError:
