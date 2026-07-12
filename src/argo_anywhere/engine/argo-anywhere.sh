@@ -1691,8 +1691,15 @@ resolve_port() {
   #   * First-run migration cases (Case 1 and Case 2 above)
   # Skip the cache write if PROXY_PORT already equals PORT_FROM_CACHE
   # (no actual change; avoids unnecessary disk writes).
-  if [ -z "$PORT_FROM_CACHE" ] || [ "$PROXY_PORT" != "$PORT_FROM_CACHE" ]; then
-    write_port_cache "$PROXY_PORT"
+  #
+  # Gated on PORT_PERSIST_OK (set by the dispatcher from the mode): only
+  # channel/port-owning modes persist; read/teardown modes never rewrite the
+  # cache from a one-shot --port. Also never write during a dry-run. Default 1
+  # so any direct caller (tests) keeps the historical write-through.
+  if [ "${PORT_PERSIST_OK:-1}" = 1 ] && [ "${CLEAN_DRY_RUN:-0}" != 1 ]; then
+    if [ -z "$PORT_FROM_CACHE" ] || [ "$PROXY_PORT" != "$PORT_FROM_CACHE" ]; then
+      write_port_cache "$PROXY_PORT"
+    fi
   fi
 }
 
@@ -9114,9 +9121,16 @@ EOF
         ;;
     esac
   fi
-  # SSH mux sockets.
+  # SSH mux sockets -- ONLY the ones WE created (argo-anywhere-* and legacy
+  # argo-opencode-*), never the whole ~/.ssh/sockets directory, which is shared
+  # with other SSH connections / tools. [Fix 2026-07-11: uninstall previously
+  # removed the entire dir, which could delete unrelated sockets.]
   if [ -d "$SSH_MUX_DIR" ]; then
-    _uninstall_rm "$SSH_MUX_DIR"
+    local _sock
+    for _sock in "$SSH_MUX_DIR"/argo-anywhere-* "$SSH_MUX_DIR"/argo-opencode-*; do
+      [ -e "$_sock" ] || continue
+      _uninstall_rm "$_sock"
+    done
   fi
   # State dir (user/node/port cache + ssh-fail-lock + the install manifest,
   # which lives here since D-030). Removed AFTER Tiers 2/3 read the manifest.
@@ -10358,6 +10372,17 @@ main() {
         die "Refusing to run with v1.x state present. Clean up per UPGRADING.md, then re-run."
       fi
       ;;
+  esac
+
+  # Only the channel / port-owning modes may PERSIST the resolved port to the
+  # cache. Read/teardown modes must not: a one-shot `--port` on `status` / `stop`
+  # / `clean` / `uninstall` (e.g. pointing at a dead port for a safe dry-run)
+  # must never rewrite the user's channel port. [Fix 2026-07-11: a `--port` on a
+  # non-channel command silently corrupted the port cache via resolve_port's
+  # write-through.]
+  case "$mode" in
+    client|setup|connect|tunnel|configure|run|server) PORT_PERSIST_OK=1 ;;
+    *)                                                 PORT_PERSIST_OK=0 ;;
   esac
 
   # Resolve the port once, here, before any mode runs.
