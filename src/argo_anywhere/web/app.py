@@ -3,8 +3,10 @@
 The server binds ``127.0.0.1`` and enforces a DNS-rebinding guard (the Host
 header must name loopback), mirroring the P1 spike. It is otherwise
 unauthenticated: it shares the user's shell trust boundary -- anyone who can
-already reach ``127.0.0.1:<port>`` has the user's shell (PLAN.md §11 Q11, to be
-ratified in docs/SECURITY.md).
+already reach ``127.0.0.1:<port>`` has the user's shell. This posture is
+ratified for v3.0.0 (PLAN.md §11 Q11; see docs/SECURITY.md "Local web UI");
+a loopback token / Origin check is queued as post-3.0 hardening against the
+local-process / browser-CSRF residual.
 
 Each ``/ws`` connection spawns one :class:`~argo_anywhere.driver.PtySession`
 running the configured engine invocation (default ``connect``) and streams it to
@@ -16,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import re
 import subprocess
-import sys
 from contextlib import ExitStack, asynccontextmanager
 from importlib.resources import as_file, files
 from typing import Sequence
