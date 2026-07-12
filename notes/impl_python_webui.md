@@ -629,6 +629,70 @@ test-first → merge → polish order). None touch the engine/connect path.
   the node heads-up was the gap. Pre-existing behavior; not introduced by the v3
   branch. Ties into D-020/D-021 port coherence.
 
+## "Advanced" panel — plan (future versions; design locked 2026-07-12)
+
+**Goal.** Surface the remaining `argo-anywhere` client actions (update-models,
+clean, reporting, configs, component updates, …) in the web UI behind an
+**Advanced** affordance — without ever letting a dangerous or ANL-reaching action
+be a stray click.
+
+**Organizing principle (load-bearing): group by REACH, not by verb.** This
+mirrors the project's CSPO discipline and the existing UI gates (`/api/health`
+and "Load (ANL)" are already reach-gated). Every action carries a small **reach
+badge** and the panel is sectioned by it:
+
+| Reach badge | Meaning | Gate | Example verbs |
+|:--|:--|:--|:--|
+| `local` | No network at all | run freely | `status` (local), `info`/footprint, `list-tools`, view configs, versions |
+| `tunnel` | Reaches argo-proxy through the EXISTING tunnel — **no new SSH, no Duo** | explicit click (never auto), channel-up | `list-models`, `update-models`, cross-client coherence report, `/health` detail |
+| `ssh` | Opens/uses SSH to the node — **Duo / CSPO risk** | channel-required + `BatchMode` (like `prune`), or run in the terminal; never auto | `update argoproxy`, `clean --remote`, `connect` |
+| `destructive` | Deletes/rewrites local (or remote) state | **dry-run first** + the in-app confirm sheet | `clean`, `prune`, `uninstall`, config overwrite |
+
+**Surfacing model (reuses what's built):**
+- An **Advanced** button (header, near Actions/ⓘ) opens a panel sectioned by the
+  reach badges above.
+- **Returning verbs** (`update-models`, `clean --dry-run`, `status`,
+  `list-models`, `update --check`) run via **Lane 1** captured
+  (`POST /api/run/<verb>`, extend `INFO_VERBS` + `build_launch_argv`) and show
+  output in a results pane. No PTY needed.
+- **Interactive / long verbs** (`clean` for real, `update argoproxy`) run via
+  **Lane 2** — the embedded terminal or a new native window (reuse the Actions
+  launch path), because they prompt and/or stream.
+- **Config view**: a read-only local endpoint renders the resolved configs
+  (argo-proxy `config.yaml`, per-tool client configs) + the resolved scope/port
+  policy state. Editing is out of scope initially (offer "reveal in Finder"/path).
+
+**Per-action notes / gotchas:**
+- `update-models` — `tunnel`; `--cli-tool`-aware (opencode only enumerates in
+  config; claudecode/aider say "n/a"); show what changed.
+- `update` — split by component: `argoproxy` is `ssh` (node venv-pip → terminal,
+  channel-required); `opencode`/`claudecode` are laptop installers (network, not
+  ANL); `argo-anywhere` itself is **not** in-UI (pipx owns it, D-030a). `update
+  --check` is report-only and near-`local`.
+- `clean` — surface `--dry-run` (preview) first; real clean behind the confirm
+  sheet with **tier selection** (safe / risky-configs / `--purge`); default
+  `--local-only` in the UI so it never silently SSHes; `--remote` is an explicit
+  opt-in (`ssh` badge). Reuse the engine's existing risk tiers, don't reinvent.
+- `prune` (once built) — `ssh`/`tunnel`; channel-required by construction.
+- `uninstall` — likely **not** a UI button (it removes the runtime hosting the
+  UI); at most surface `uninstall --dry-run` output + a "run in a terminal" hint.
+- Reporting — cross-client **port coherence** (D-021), model list, footprint
+  (`info`), health latency; all `local`/`tunnel`.
+
+**Safety rails (all already exist — reuse, don't rebuild):** the never-auto-run
+rule + reach gating (as `/api/health`), the in-app **confirm sheet** for
+destructive actions, **dry-run** defaults, **channel-required + BatchMode** for
+SSH-reaching (the `prune` contract), and the **two-lane driver** (returning →
+Lane 1 captured; interactive → Lane 2 PTY).
+
+**Phasing (fine-tuning across versions):**
+- **v3.1** — Advanced scaffold + the `local` + `tunnel` groups: full status/report
+  view, footprint, view-configs, `update-models`, `update --check`. All safe,
+  high-value, **no new Duo surface**.
+- **v3.2** — the `ssh` + `destructive` groups: `clean` (dry-run → tiered),
+  `update argoproxy`, `prune`, behind heavy confirmation + channel-required.
+- **Deferred** — in-UI config editing; `uninstall` from the UI.
+
 ## Remaining work (P4–P5)
 
 P4–P5 are conventional engineering on top of a proven base; see the phase table
