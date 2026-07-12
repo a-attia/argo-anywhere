@@ -612,6 +612,27 @@ test-first → merge → polish order). None touch the engine/connect path.
   `open_external` (native download / print) — we have no download/print surface
   yet. Revisit those if/when the web UI grows file export or print.
 
+## Web-session hardening backlog
+
+- **Embedded terminal kills the channel master on ws-close → repeated Duo
+  (surfaced 2026-07-12).** argo-anywhere multiplexes with its own
+  `ControlMaster` + `ControlPersist=3600`, but the master's lifetime is coupled
+  to the `connect` process, and `pty_bridge.py` force-terminates the PtySession
+  whenever its WebSocket closes (`session.terminate(force=True)`). Running
+  anything else in the single-session embedded terminal closes the current ws
+  (`openTerminal` → `ws.close()`), which kills `connect` → tears down the master
+  → the next SSH re-authenticates (new Duo). In an independent terminal the user
+  leaves `connect` running, so the master persists and everything reuses it (one
+  Duo). Fix (ties into Q12 concurrency + the Operational Lesson): when a
+  **channel-owning** session's ws closes, **do not force-kill it** — detach it
+  (leave it running headless; the registry already tracks it + the Stop/Disconnect
+  buttons explicitly end it), so the master survives ws-close / embedded reuse /
+  browser navigation. Consider also `setsid`-ing / properly daemonizing the
+  master so `terminate` can't reach it even when a non-owning session ends.
+  Workaround until then: hold `connect` in the embedded terminal and run tools /
+  SSH-actions in new windows (tools need no SSH; SSH-actions reuse the live
+  master).
+
 ## Engine hardening backlog
 
 - **Port-change-aware config prompt — DONE (2026-07-12).** In the auto-port /
