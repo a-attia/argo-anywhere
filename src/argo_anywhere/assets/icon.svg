@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#1b2668"/>
+      <stop offset="0.55" stop-color="#0e1740"/>
+      <stop offset="1" stop-color="#080c24"/>
+    </linearGradient>
+    <radialGradient id="guideGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffd257" stop-opacity="0.95"/>
+      <stop offset="0.35" stop-color="#fbb01f" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#fbb01f" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="starGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#dcecff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#5b8bff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="topSheen" cx="0.5" cy="0.16" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="line" gradientUnits="userSpaceOnUse" x1="512" y1="300" x2="512" y2="710">
+      <stop offset="0" stop-color="#93b2ff"/>
+      <stop offset="1" stop-color="#3a5fd9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS squircle field -->
+  <rect x="92" y="92" width="840" height="840" rx="196" fill="url(#sky)"/>
+  <rect x="92" y="92" width="840" height="840" rx="196" fill="url(#topSheen)"/>
+
+  <!-- faint background stars (depth) -->
+  <g fill="#a9c2ff">
+    <circle cx="250" cy="300" r="4" opacity="0.55"/>
+    <circle cx="760" cy="270" r="5" opacity="0.5"/>
+    <circle cx="720" cy="600" r="3.5" opacity="0.5"/>
+    <circle cx="300" cy="690" r="4.5" opacity="0.45"/>
+    <circle cx="815" cy="470" r="3" opacity="0.4"/>
+    <circle cx="205" cy="520" r="3" opacity="0.4"/>
+    <circle cx="540" cy="815" r="3.5" opacity="0.4"/>
+  </g>
+
+  <!-- constellation "A" (Argo / Anywhere): routes as lines, stars as ports -->
+  <g stroke="url(#line)" stroke-width="11" stroke-linecap="round" fill="none" opacity="0.92">
+    <path d="M512 300 L410 512"/>
+    <path d="M512 300 L614 512"/>
+    <path d="M410 512 L360 700"/>
+    <path d="M614 512 L664 700"/>
+    <path d="M410 512 L614 512"/>
+  </g>
+
+  <!-- node stars -->
+  <g>
+    <circle cx="360" cy="700" r="30" fill="url(#starGlow)"/>
+    <circle cx="360" cy="700" r="15" fill="#eaf2ff"/>
+    <circle cx="664" cy="700" r="30" fill="url(#starGlow)"/>
+    <circle cx="664" cy="700" r="15" fill="#eaf2ff"/>
+    <circle cx="410" cy="512" r="26" fill="url(#starGlow)"/>
+    <circle cx="410" cy="512" r="13" fill="#dcecff"/>
+    <circle cx="614" cy="512" r="26" fill="url(#starGlow)"/>
+    <circle cx="614" cy="512" r="13" fill="#dcecff"/>
+  </g>
+
+  <!-- apex guide star (the signature: warm against cool) -->
+  <circle cx="512" cy="300" r="118" fill="url(#guideGlow)"/>
+  <g transform="translate(512 300)">
+    <path d="M0 -46 L11 -11 L46 0 L11 11 L0 46 L-11 11 L-46 0 L-11 -11 Z"
+          fill="#ffe08a"/>
+    <circle r="19" fill="#fff7e0"/>
+  </g>
+</svg>

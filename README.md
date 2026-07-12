@@ -11,10 +11,10 @@ coding CLI tools — [OpenCode](https://opencode.ai/),
 node, **from any laptop on any network**, with **one Duo prompt per
 session**.
 
-> Upgrading from `argo_opencode.sh` (pre-v2.0) or an earlier v2.x?
-> See [`docs/UPGRADING.md`](docs/UPGRADING.md) for the v1.x → v2.0 +
-> v2.0 → v2.1 + v2.1 → v2.2 deltas. The script also auto-detects
-> v1.x state on first run and prints exact cleanup commands.
+> **New here, or upgrading from a previous version?** Start with the
+> **[install & migrate guide](docs/UPGRADING.md#start-here-install-and-migrate)** —
+> one short path each for new users, v2.x upgraders, and v1.x upgraders.
+> (Full per-version deltas follow in the same doc.)
 
 ## Contents
 
@@ -22,10 +22,11 @@ session**.
 - [What this is](#what-this-is)
 - [Status](#status)
 - [Quick start](#quick-start)
+- [Web UI & desktop app](#web-ui--desktop-app)
 - [Currently supported `--cli-tool` values](#currently-supported---cli-tool-values)
 - [Prerequisites](#prerequisites)
 - [Known limitations (please read)](#known-limitations-please-read)
-- [How `argo_anywhere.sh` is organised (subcommands)](#how-argo_anywheresh-is-organised-subcommands)
+- [How `argo-anywhere.sh` is organised (subcommands)](#how-argo_anywheresh-is-organised-subcommands)
 - [What it writes where](#what-it-writes-where)
 - [MFA / Duo handling](#mfa--duo-handling)
 - [Running on a compute node](#running-on-a-compute-node)
@@ -69,7 +70,7 @@ The rest of this document assumes neither of these surprised you.
 
 ## What this is
 
-One bash script (`argo_anywhere.sh`) that orchestrates two roles:
+One bash script (`argo-anywhere.sh`) that orchestrates two roles:
 
 - **Client mode (laptop)**: install the chosen AI CLI tool if needed,
   write its config, push this script to a chosen ANL compute node,
@@ -95,6 +96,12 @@ architectural temptation we've evaluated against this rule
 rejected for breaking it — see
 [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
 Section 4 for the canonical Phase-C-rejection rationale.
+
+> **On the `feat/python-package-webui` branch this is being revisited (D-026..D-030):**
+> argo-anywhere is becoming a `pipx`-installable Python package that *wraps* the
+> unchanged single-file engine and adds a loopback-only web UI + native app. The
+> engine stays one self-contained `.sh` (vendored verbatim); the package is the
+> new distribution around it. See [Web UI & desktop app](#web-ui--desktop-app).
 
 ## Status
 
@@ -135,13 +142,13 @@ behavior changes across all three v2.x releases.
 
 ```sh
 # 1. Download (pin to a release; tags are immutable):
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.2.0/argo_anywhere.sh \
-     -o argo_anywhere.sh && chmod +x argo_anywhere.sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.2.0/argo-anywhere.sh \
+     -o argo-anywhere.sh && chmod +x argo-anywhere.sh
 
 # 2. Run with explicit tool selection (one-shot: channel + tool + monitor):
-bash argo_anywhere.sh --cli-tool opencode client       # OpenCode
-bash argo_anywhere.sh --cli-tool claudecode client     # Claude Code
-bash argo_anywhere.sh --cli-tool aider client          # aider
+bash argo-anywhere.sh --cli-tool opencode client       # OpenCode
+bash argo-anywhere.sh --cli-tool claudecode client     # Claude Code
+bash argo-anywhere.sh --cli-tool aider client          # aider
 
 # 3. In another terminal once the script reports ALL GREEN:
 opencode    # (or `claude`, or `aider`, depending on which tool you picked)
@@ -153,11 +160,11 @@ one window and configure/run tools in others:
 
 ```sh
 # Window 1 — bring up the shared channel and keep it alive:
-bash argo_anywhere.sh connect
+bash argo-anywhere.sh connect
 
 # Window 2+ — point tools at the existing channel (no new tunnel/Duo):
-bash argo_anywhere.sh configure opencode aider   # configure several at once
-bash argo_anywhere.sh run aider                  # configure one + launch it
+bash argo-anywhere.sh configure opencode aider   # configure several at once
+bash argo-anywhere.sh run aider                  # configure one + launch it
 ```
 
 If you ran the Claude Code flow, **don't forget the opus-4-7
@@ -167,26 +174,70 @@ workaround** (see [Heads up](#heads-up-before-you-start)):
 claude --model claude-sonnet-4-6
 ```
 
-Or invoke `argo_anywhere.sh` without `--cli-tool` to be prompted
+Or invoke `argo-anywhere.sh` without `--cli-tool` to be prompted
 interactively:
 
 ```sh
-bash argo_anywhere.sh client          # picker fires
-bash argo_anywhere.sh setup           # always shows picker
-bash argo_anywhere.sh list-tools      # see what `--cli-tool` accepts
+bash argo-anywhere.sh client          # picker fires
+bash argo-anywhere.sh setup           # always shows picker
+bash argo-anywhere.sh list-tools      # see what `--cli-tool` accepts
 ```
 
 To track `main` instead of a pinned release (gets the latest fixes,
 but may move under your feet):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo_anywhere.sh \
-     -o argo_anywhere.sh
+curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo-anywhere.sh \
+     -o argo-anywhere.sh
 ```
 
 The first run prompts for your ANL (Argonne) username and asks you
 to pick a compute node. Subsequent runs reuse the cached values from
 `~/.config/argo_anywhere/`.
+
+## Web UI & desktop app
+
+<img src="src/argo_anywhere/assets/icon.svg" alt="argo-anywhere app icon" width="104" align="right" />
+
+On the `feat/python-package-webui` branch, argo-anywhere is also a
+`pipx`-installable Python package that owns the runtime, wraps the **unchanged**
+bash engine, and adds a loopback-only web UI you can drive from a browser or a
+native window — Duo, the live monitor, and the interactive prompts all work
+without a terminal. (Full design: [`notes/impl_python_webui.md`](notes/impl_python_webui.md),
+decisions D-026..D-030.)
+
+```sh
+# Install the package (pre-release, from the branch):
+pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'
+
+argo-anywhere app                 # open the web UI in a native desktop window
+argo-anywhere web                 # ...or serve it to your browser
+argo-anywhere install-launcher    # drop a double-clickable launcher (no terminal needed)
+```
+
+`install-launcher` writes a **persistent, double-clickable launcher** so you can
+start the UI without opening a terminal: on macOS a
+`~/Desktop/argo-anywhere.command` plus a real `~/Applications/argo-anywhere.app`
+(the constellation icon on the right); on Linux a `.desktop` menu entry plus a
+`~/Desktop/argo-anywhere.sh`. Each bakes the absolute interpreter path (GUI
+launches run with a minimal `PATH`) and opens the native window, falling back to
+your browser if the `[app]` extra isn't installed.
+
+Package-level commands (everything else passes straight through to the engine
+verbs documented below):
+
+| Command | Does |
+|:--|:--|
+| `argo-anywhere app` | Open the web UI in a native desktop window (needs the `[app]` extra; browser fallback). |
+| `argo-anywhere web` | Serve the web UI to your browser (loopback-only). |
+| `argo-anywhere install-launcher` | Install a double-clickable launcher (`--desktop` / `--app-bundle` / `--dest` narrow it). |
+| `argo-anywhere info [--json]` | Local status: package + engine versions, loopback listeners, and argo-anywhere's on-disk footprint (no ANL contact). |
+| `argo-anywhere uninstall` | Remove argo-anywhere's footprint (manifest-driven config restore + the launchers), then print the `pipx`/`pip` command to remove the package itself. |
+| `argo-anywhere --print-script` | Emit the raw bash engine to stdout (inspect-and-fork). |
+
+Everything the package puts on disk is listed by `argo-anywhere info` and removed
+by `argo-anywhere uninstall`; your AI-tool configs are only ever read and
+restored, never argo-anywhere's to delete.
 
 ## Currently supported `--cli-tool` values
 
@@ -209,7 +260,7 @@ scheduled trigger; the v2.2 scope framework + per-tool API contract
 make it a clean ~5-function addition when a user requests it).
 Cursor is **not planned as an integrated tool** (upstream guidance
 discourages routing through LLM gateways for cursor specifically);
-the workaround is `bash argo_anywhere.sh tunnel` and point cursor's
+the workaround is `bash argo-anywhere.sh tunnel` and point cursor's
 OpenAI-compatible endpoint at `http://localhost:<port>/v1` manually.
 A `generic` OpenAI-compatible `--cli-tool` is under consideration
 for later releases.
@@ -261,7 +312,7 @@ this one" summary.
 - **Vertex HTTP 500 on large non-streaming requests** — already
   mitigated upstream by `argo-proxy` v3.x's
   `anthropic_stream_mode: force` default. Just keep your on-node
-  `argo-proxy` up-to-date: `bash argo_anywhere.sh update argoproxy`
+  `argo-proxy` up-to-date: `bash argo-anywhere.sh update argoproxy`
   (lossless in-place upgrade since v2.2.1 per PLAN.md D-022; the
   legacy `ssh -J ... 'argo-proxy update install'` recipe is still
   documented in `help` as a manual fallback). No action needed in
@@ -298,7 +349,7 @@ argo-proxy + AI CLI tools".
   no `declare -A`, no `${var,,}`. Python heredocs absorb the
   language gap when we need structured-data work.
 
-## How `argo_anywhere.sh` is organised (subcommands)
+## How `argo-anywhere.sh` is organised (subcommands)
 
 | Subcommand | What it does |
 |:---|:---|
@@ -310,7 +361,7 @@ argo-proxy + AI CLI tools".
 | `run TOOL` | Configure **one** CLI tool then launch it, e.g. `run aider`. Brings the channel up if missing (prompts; `--ensure` / `-y` auto-confirm). Equivalent to `configure TOOL` + running the tool. |
 | `server` | Auto-invoked on the ANL compute node by `client`. Also a documented standalone workflow ("leave a proxy on this node for any client to reach"). |
 | `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL). Surfaces cross-client port-coherence disagreements (D-021) as warnings without flipping the exit code. |
-| `update` | Lossless in-place upgrade of installed components (`argo-anywhere`, `argoproxy`, `opencode`, `claudecode`). `update argo-anywhere` self-updates the script itself (resolves the latest GitHub release tag and atomically replaces the canonical install at `~/.argo_anywhere/bin/argo_anywhere.sh`); other components hit their respective upstreams in place. `--all` updates everything; a positional component list (`update argoproxy opencode`) restricts the run; bare `update` lists the registry without acting. `--check` is report-only; `--yes` auto-confirms install prompts for missing components. After a successful `update argoproxy` the script auto-POSTs `/refresh` so the running proxy pulls fresh upstream models without a restart. The lossless complement to `--force-reinstall` (which wipes the venv). |
+| `update` | Lossless in-place upgrade of installed components (`argo-anywhere`, `argoproxy`, `opencode`, `claudecode`). `update argo-anywhere` self-updates the script itself (resolves the latest GitHub release tag and atomically replaces the canonical install at `~/.argo_anywhere/bin/argo-anywhere.sh`); other components hit their respective upstreams in place. `--all` updates everything; a positional component list (`update argoproxy opencode`) restricts the run; bare `update` lists the registry without acting. `--check` is report-only; `--yes` auto-confirms install prompts for missing components. After a successful `update argoproxy` the script auto-POSTs `/refresh` so the running proxy pulls fresh upstream models without a restart. The lossless complement to `--force-reinstall` (which wipes the venv). |
 | `update-models` | Refresh a client's in-config model list from the live `/v1/models`. Tool-aware via `--cli-tool` (default `opencode`). Only OpenCode enumerates models in config, so only `--cli-tool opencode` does real work; `--cli-tool claudecode`/`aider` print a "not applicable" note (those tools pick the model at runtime via `--model`) and point at `list-models`. |
 | `list-models` | Tabulate the models the proxy serves on `/v1/models` (read-only sibling of `update-models`). Columns: `internal_name`, `id`, `provider`, `modalities`, `configured`. Filters embeddings by default; cross-references the OpenCode config when present (`yes`/`no`/`orphan` per row). Pretty text by default; `--format tsv|json` and `--output FILE` for scripting. |
 | `stop` | Kill the local SSH tunnel. Does NOT touch the remote argo-proxy (see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Single-instance constraint" for why). |
@@ -323,7 +374,7 @@ argo-proxy + AI CLI tools".
 Long help:
 
 ```sh
-bash argo_anywhere.sh help | less
+bash argo-anywhere.sh help | less
 ```
 
 ## What it writes where
@@ -332,9 +383,9 @@ bash argo_anywhere.sh help | less
 
 | Path | Purpose |
 |:---|:---|
-| `~/.argo_anywhere/bin/argo_anywhere.sh` | **Canonical install** of the script itself (PATH-discoverable; created on first `client` / `setup` run; managed by `update argo-anywhere`). Moved under `bin/` in the lifecycle-commands work (was `~/.argo_anywhere/argo_anywhere.sh` per D-023; auto-migrated). |
-| `~/.argo_anywhere/bin/install`, `~/.argo_anywhere/bin/uninstall` | Thin wrappers -> `argo_anywhere.sh install` / `uninstall` (discoverability shims; single-file logic stays in the script). |
-| `~/.argo_anywhere/env` | Sourceable PATH helper (rustup/cargo style). Add `. "$HOME/.argo_anywhere/env"` to your shell rc to make `argo_anywhere.sh` (+ `install`/`uninstall`) callable as bare commands. |
+| `~/.argo_anywhere/bin/argo-anywhere.sh` | **Canonical install** of the script itself (PATH-discoverable; created on first `client` / `setup` run; managed by `update argo-anywhere`). Moved under `bin/` in the lifecycle-commands work (was `~/.argo_anywhere/argo-anywhere.sh` per D-023; auto-migrated). |
+| `~/.argo_anywhere/bin/install`, `~/.argo_anywhere/bin/uninstall` | Thin wrappers -> `argo-anywhere.sh install` / `uninstall` (discoverability shims; single-file logic stays in the script). |
+| `~/.argo_anywhere/env` | Sourceable PATH helper (rustup/cargo style). Add `. "$HOME/.argo_anywhere/env"` to your shell rc to make `argo-anywhere.sh` (+ `install`/`uninstall`) callable as bare commands. |
 | `~/.argo_anywhere/manifest.json` | **Install manifest** (per D-025): records, at first touch, whether each client config pre-existed (so `uninstall --restore-configs` can restore originals) and which tool binaries this script installed (so `uninstall --remove-binaries` only removes ours). |
 | `~/.config/opencode/config.json` | OpenCode global config (only when running `--cli-tool opencode --scope global`, or the default global scope) |
 | `<git-root>/opencode.json` or `<cwd>/opencode.json` | OpenCode project-scope config (when running `--cli-tool opencode --scope project`) |
@@ -350,7 +401,7 @@ bash argo_anywhere.sh help | less
 > `setup`, the script auto-creates `~/.argo_anywhere/` and copies
 > itself there as the canonical install (rustup/cargo style PATH
 > directory). It then prints one-shot instructions for adding the
-> `env` file to your shell rc. After that, `argo_anywhere.sh` is
+> `env` file to your shell rc. After that, `argo-anywhere.sh` is
 > callable as a bare command from any directory, and
 > `update argo-anywhere` keeps it fresh. Opt out with
 > `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`. See PLAN.md D-023 for the
@@ -360,7 +411,7 @@ bash argo_anywhere.sh help | less
 
 | Path | Purpose |
 |:---|:---|
-| `~/.argo_anywhere.sh` | Pushed copy of this script |
+| `~/.argo-anywhere.sh` | Pushed copy of this script |
 | `~/.argo_anywhere.server.log` | Server-mode bootstrap log |
 | `~/argovenv/` | Python venv with argo-proxy installed |
 | `~/.config/argoproxy/config.yaml` | argo-proxy config (port + user; preserves any other keys you've added like `argo_base_url`, `anthropic_stream_mode`) |
@@ -413,12 +464,12 @@ install, no tunnel), use `server` directly:
 
 ```sh
 ssh <user>@compute-XX.cels.anl.gov
-bash argo_anywhere.sh server   # starts argo-proxy under screen, returns
+bash argo-anywhere.sh server   # starts argo-proxy under screen, returns
 ```
 
 Other clients on other machines can then point at this proxy via
 their own SSH `-L` forward, or via
-`bash argo_anywhere.sh --cli-tool <name> client --node compute-XX`
+`bash argo-anywhere.sh --cli-tool <name> client --node compute-XX`
 from those machines.
 
 ## Sharing a compute node with other users
@@ -492,7 +543,7 @@ knowing:
   ssh <user>@<physical-host> 'pkill -u <user> -f "argo-proxy serve"'
   ```
 
-  Or simply `bash argo_anywhere.sh clean` whenever you've
+  Or simply `bash argo-anywhere.sh clean` whenever you've
   definitively finished with a node — that handles the current
   physical host's argo-proxy via the screen session. Orphans on
   other physical hosts remain.
@@ -556,8 +607,8 @@ all of v2.0's safety guarantees for users with OAuth state.
 To force one or the other:
 
 ```sh
-bash argo_anywhere.sh --cli-tool claudecode client --scope global
-bash argo_anywhere.sh --cli-tool claudecode client --scope project
+bash argo-anywhere.sh --cli-tool claudecode client --scope global
+bash argo-anywhere.sh --cli-tool claudecode client --scope project
 ```
 
 When the script writes the project scope, **you must run `claude`
@@ -618,7 +669,7 @@ disagreement at startup. Default port is **64742**.
 To override for one run:
 
 ```sh
-bash argo_anywhere.sh --port 64999 --cli-tool opencode client
+bash argo-anywhere.sh --port 64999 --cli-tool opencode client
 # Prompts whether to:
 #   [m] migrate config to port 64999 (writes config file),
 #   [u] use 64999 for THIS run only (config keeps current port),
@@ -627,7 +678,7 @@ bash argo_anywhere.sh --port 64999 --cli-tool opencode client
 ```
 
 For non-`client` subcommands, a port mismatch prints a warning but
-doesn't prompt (e.g. `bash argo_anywhere.sh --port 1234 status`
+doesn't prompt (e.g. `bash argo-anywhere.sh --port 1234 status`
 warns and runs against `:1234` instead of the resolved port).
 
 `status` will also surface multi-config disagreement non-fatally:
@@ -637,7 +688,7 @@ warns and runs against `:1234` instead of the resolved port).
 [warn]   Resolved port (cache / CLI / env / default): 64742
 [warn]   Disagreeing client config(s):
 [warn]     claudecode global 64999 /Users/.../.claude/settings.json
-[warn]   Run 'argo_anywhere.sh client' to canonicalize via the [m/u/k/a] prompt.
+[warn]   Run 'argo-anywhere.sh client' to canonicalize via the [m/u/k/a] prompt.
 ```
 
 (The exit code is unchanged by this — `status` is a pure health
@@ -742,39 +793,39 @@ right model.
 
 ```sh
 # Check what's happening (includes D-021 cross-client coherence report)
-bash argo_anywhere.sh status
+bash argo-anywhere.sh status
 
 # See the full /v1/models list (raw JSON dump)
-ARGO_ANYWHERE_SHOW_MODELS=1 bash argo_anywhere.sh status
+ARGO_ANYWHERE_SHOW_MODELS=1 bash argo-anywhere.sh status
 
 # Tabulate served models (read-only; cross-references the OpenCode config)
-bash argo_anywhere.sh list-models                              # pretty text table
-bash argo_anywhere.sh list-models --include-embeddings         # include embedding rows
-bash argo_anywhere.sh list-models --format tsv > models.tsv    # script-friendly
-bash argo_anywhere.sh list-models --format json | jq '.[] | select(.provider=="claude")'
+bash argo-anywhere.sh list-models                              # pretty text table
+bash argo-anywhere.sh list-models --include-embeddings         # include embedding rows
+bash argo-anywhere.sh list-models --format tsv > models.tsv    # script-friendly
+bash argo-anywhere.sh list-models --format json | jq '.[] | select(.provider=="claude")'
 
 # Refresh the OpenCode model list from the live proxy
-bash argo_anywhere.sh update-models                  # interactive: prompts per-orphan
-bash argo_anywhere.sh update-models --keep-orphans   # add new; keep all stale entries
-bash argo_anywhere.sh update-models --drop-orphans   # add new; drop all stale entries
+bash argo-anywhere.sh update-models                  # interactive: prompts per-orphan
+bash argo-anywhere.sh update-models --keep-orphans   # add new; keep all stale entries
+bash argo-anywhere.sh update-models --drop-orphans   # add new; drop all stale entries
 
 # Upgrade installed components in place (lossless; preserves configs + venv)
-bash argo_anywhere.sh update --all                   # update argo-anywhere + argoproxy + opencode + claudecode
-bash argo_anywhere.sh update argo-anywhere           # self-update the script (canonical install at ~/.argo_anywhere/)
-bash argo_anywhere.sh update argoproxy               # just the on-node argo-proxy (+ auto /refresh)
-bash argo_anywhere.sh update opencode claudecode     # explicit list
-bash argo_anywhere.sh update --check --all           # report-only: show installed vs latest
-bash argo_anywhere.sh update                         # no args: list registry without acting
+bash argo-anywhere.sh update --all                   # update argo-anywhere + argoproxy + opencode + claudecode
+bash argo-anywhere.sh update argo-anywhere           # self-update the script (canonical install at ~/.argo_anywhere/)
+bash argo-anywhere.sh update argoproxy               # just the on-node argo-proxy (+ auto /refresh)
+bash argo-anywhere.sh update opencode claudecode     # explicit list
+bash argo-anywhere.sh update --check --all           # report-only: show installed vs latest
+bash argo-anywhere.sh update                         # no args: list registry without acting
 
 # Tear down only the local tunnel (remote argo-proxy survives)
-bash argo_anywhere.sh stop
+bash argo-anywhere.sh stop
 
 # Remove everything this script created (preview first)
-bash argo_anywhere.sh clean --dry-run                # safe enumeration; no changes
-bash argo_anywhere.sh clean                          # interactive (per-file prompts for risky items)
-bash argo_anywhere.sh clean -y                       # non-interactive; deletes safe items, KEEPS risky configs
-bash argo_anywhere.sh clean -y --purge-backups       # also drop accumulated .bak.* files
-bash argo_anywhere.sh clean -y --purge               # delete EVERYTHING, including configs
+bash argo-anywhere.sh clean --dry-run                # safe enumeration; no changes
+bash argo-anywhere.sh clean                          # interactive (per-file prompts for risky items)
+bash argo-anywhere.sh clean -y                       # non-interactive; deletes safe items, KEEPS risky configs
+bash argo-anywhere.sh clean -y --purge-backups       # also drop accumulated .bak.* files
+bash argo-anywhere.sh clean -y --purge               # delete EVERYTHING, including configs
 ```
 
 `clean` separates artifacts into three risk tiers:
@@ -790,7 +841,7 @@ bash argo_anywhere.sh clean -y --purge               # delete EVERYTHING, includ
   system tools.
 
 For the full troubleshooting guide (env vars, security notes,
-escape hatches), run `bash argo_anywhere.sh help`.
+escape hatches), run `bash argo-anywhere.sh help`.
 
 ## Where to read more
 
@@ -844,10 +895,10 @@ one Duo prompt).
 For lighter smoke tests after edits:
 
 ```sh
-bash -n argo_anywhere.sh                              # syntax
-bash argo_anywhere.sh -h                              # short usage
-bash argo_anywhere.sh status                          # exit 1 if no tunnel
-bash argo_anywhere.sh clean --dry-run -y --local-only # safe enumeration
+bash -n argo-anywhere.sh                              # syntax
+bash argo-anywhere.sh -h                              # short usage
+bash argo-anywhere.sh status                          # exit 1 if no tunnel
+bash argo-anywhere.sh clean --dry-run -y --local-only # safe enumeration
 ```
 
 Per-phase test plans (used during the v2.0 → v2.2 development

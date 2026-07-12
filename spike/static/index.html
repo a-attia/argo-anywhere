@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>argo-anywhere PTY spike (P1a)</title>
+  <link rel="stylesheet" href="/static/xterm.css" />
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #1e1e1e; color: #ddd;
+                 font-family: system-ui, sans-serif; }
+    #bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+           background: #252526; border-bottom: 1px solid #333; font-size: 13px; }
+    #bar .dot { width: 10px; height: 10px; border-radius: 50%; background: #888; }
+    #bar .dot.up { background: #2ea043; }
+    #bar .dot.down { background: #d1242f; }
+    #bar code { background: #333; padding: 2px 6px; border-radius: 4px; }
+    #status { margin-left: auto; color: #aaa; }
+    #term { position: absolute; top: 41px; bottom: 0; left: 0; right: 0;
+            padding: 6px; box-sizing: border-box; }
+    button { background: #333; color: #ddd; border: 1px solid #555;
+             border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 12px; }
+    button:hover { background: #3a3a3a; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <span id="conn" class="dot"></span>
+    <span>PTY spike</span>
+    <button id="sigint" title="Send Ctrl-C to the child">Ctrl-C</button>
+    <span id="status">connecting…</span>
+  </div>
+  <div id="term"></div>
+
+  <script src="/static/xterm.js"></script>
+  <script src="/static/xterm-addon-fit.js"></script>
+  <script>
+    const term = new Terminal({
+      cursorBlink: true,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: 13,
+      theme: { background: '#1e1e1e' },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('term'));
+    fit.fit();
+
+    const conn = document.getElementById('conn');
+    const status = document.getElementById('status');
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.binaryType = 'arraybuffer';
+
+    const CTRL = '\x00CTRL';
+    const EXIT = '\x00EXIT';
+    const dec = new TextDecoder();
+
+    function sendResize() {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(CTRL + JSON.stringify({ op: 'resize', rows: term.rows, cols: term.cols }));
+    }
+
+    ws.onopen = () => {
+      conn.classList.add('up');
+      status.textContent = 'connected';
+      // Fit AFTER a layout tick so xterm has measured the real container size,
+      // then push the true dimensions to the PTY. Doing this in onopen without
+      // the rAF races the first layout and leaves the PTY at 24x80 while the
+      // browser renders much larger -> full-screen programs (vi, less) misdraw.
+      requestAnimationFrame(() => {
+        fit.fit();
+        sendResize();
+        term.focus();
+      });
+    };
+
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        if (ev.data.startsWith(EXIT)) {
+          let info = {};
+          try { info = JSON.parse(ev.data.slice(EXIT.length)); } catch (e) {}
+          term.write(`\r\n\x1b[33m[process exited: status=${info.exitstatus}]\x1b[0m\r\n`);
+          status.textContent = `exited (status=${info.exitstatus})`;
+          return;
+        }
+        term.write(ev.data);
+      } else {
+        term.write(dec.decode(new Uint8Array(ev.data)));
+      }
+    };
+
+    ws.onclose = () => {
+      conn.classList.remove('up'); conn.classList.add('down');
+      status.textContent = 'disconnected';
+    };
+    ws.onerror = () => { status.textContent = 'ws error'; };
+
+    // Keystrokes -> PTY.
+    term.onData((data) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    });
+
+    // Resize -> PTY.
+    window.addEventListener('resize', () => { fit.fit(); sendResize(); });
+    term.onResize(() => sendResize());
+
+    document.getElementById('sigint').addEventListener('click', () => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' }));
+      }
+      term.focus();
+    });
+  </script>
+</body>
+</html>
