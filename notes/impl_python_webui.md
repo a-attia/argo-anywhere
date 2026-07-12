@@ -556,6 +556,36 @@ It closes the loop with the D-030 lifecycle: the launcher artifacts are listed b
 tiers). 9 tests (`tests/test_launcher.py`), platform-parameterized (macOS +
 Linux), no GUI/ANL.
 
+## UI / app polish backlog (post-merge)
+
+Captured 2026-07-11 during the Part-B live test; build after merge (per the
+test-first → merge → polish order). None touch the engine/connect path.
+
+1. **"Disconnect" button (replaces the broken "Ctrl+C").** The embedded terminal
+   *owns the channel* (connect runs there), so interrupting it tears down the SSH
+   master → reconnecting needs a fresh Duo. So the button is really a **channel
+   teardown**, not a terminal nicety. Plan: rename `Ctrl+C` → **`Disconnect`**;
+   clicking opens a **confirmation sheet** (never an instant action) that lists
+   the current connection(s) — channel (node / port / health) + managed sessions
+   from `/api/status` + `/api/sessions` — and warns *"this ends the channel;
+   reconnecting needs a new Duo."* Confirm → send `\x03` to the PTY over the WS
+   (graceful interrupt) and/or the stop path, reusing the P2 kill-guard (409 →
+   force). Turns a broken, mislabeled, dangerous button into a safe explicit
+   action.
+2. **Native app menu + About + in-app info button (scrollback-style).**
+   - *Native menu / About*: enrich the `.app` `Info.plist` (in `launcher.py`) —
+     it already has `CFBundleName` / version / identifier, which gives macOS a
+     standard "About argo-anywhere"; add `CFBundleGetInfoString` +
+     `NSHumanReadableCopyright` so the About is populated. For the non-bundle
+     `argo-anywhere app` path, set the pywebview app name so the menu isn't
+     "Python".
+   - *In-app info button*: an ⓘ in the web-UI header opens an About modal with
+     product name, **package version + engine version + sha** (from
+     `/api/status` `package_info`), the repo URL
+     (`https://github.com/a-attia/argo-anywhere`), and a one-line description.
+     External links open in the real browser via the existing `_AppBridge`
+     bridge (scrollback's pattern — don't trap `target=_blank` in the webview).
+
 ## Remaining work (P4–P5)
 
 P4–P5 are conventional engineering on top of a proven base; see the phase table
