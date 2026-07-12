@@ -6479,7 +6479,25 @@ mode_server() {
   # unchanged from v2.2.0.
   ensure_argoproxy_installed || die "ensure_argoproxy_installed failed."
 
-  # 4) argo-proxy config file
+  # 4) argo-proxy config file.
+  #    Port-change-aware heads-up (hardening 2026-07-12): if an existing
+  #    config.yaml already declares a DIFFERENT port than the one we're about to
+  #    serve (e.g. the client auto-picked a new port on collision), warn BEFORE
+  #    the [k/b/d/m/a] prompt so the user doesn't pick [k]eep -- which keeps the
+  #    stale port and trips the readback refusal in step 4b. Steer to [b]/[m].
+  local _pc_cfg="${HOME}/.config/argoproxy/config.yaml"
+  if [ -f "$_pc_cfg" ]; then
+    local _pc_existing
+    _pc_existing="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+/{print $2; exit}' "$_pc_cfg" 2>/dev/null)"
+    if [ -n "$_pc_existing" ] && [ "$_pc_existing" != "$PROXY_PORT" ]; then
+      warn "Port is changing: this run serves on ${PROXY_PORT}, but the existing config"
+      warn "  (${_pc_cfg}) declares ${_pc_existing}."
+      warn "  -> At the next prompt pick [b]ackup+overwrite or [m]erge to serve on"
+      warn "     ${PROXY_PORT}. Choosing [k]eep keeps ${_pc_existing} and this run will be refused"
+      warn "     (argo-proxy would bind the wrong port)."
+    fi
+  fi
+
   handle_config_file "${HOME}/.config/argoproxy/config.yaml" "argo-proxy config" write_argoproxy_config
 
   # 4b) Validate the on-disk config's port matches what the client asked us

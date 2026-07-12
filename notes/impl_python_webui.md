@@ -588,19 +588,20 @@ test-first → merge → polish order). None touch the engine/connect path.
 
 ## Engine hardening backlog
 
-- **Port-change-aware config prompts (surfaced 2026-07-11 during the Part-B live
-  test).** In the auto-port / collision path (`ensure_or_reuse_tunnel`, ~L5177-5223)
-  the engine changes `PROXY_PORT`, then the node `config.yaml` and client-config
-  `[k/b/d/m/a]` prompts fire *without knowing a port change is in progress* — so the
-  safe-looking `[k]`eep (node) / `[u]`se-once (client) options keep a **stale port**
-  and trip the server-side readback ("Refusing to launch argo-proxy with a config
-  that disagrees on port"). This is **safe, never silent** (the readback is an
-  unconditional guardrail, and the engine already diagnoses the `[k]` cause in its
-  error), but it's a UX trap. Fix: when the engine itself just changed the port,
-  make the two config prompts port-change-aware — default to / force `[b]`ackup+
-  overwrite (node) and `[m]`igrate (client), or at minimum warn "the port is
-  changing; keeping this config will mismatch." Ties into D-020/D-021 port
-  coherence. (Pre-existing behavior; not introduced by the v3 branch.)
+- **Port-change-aware config prompt — DONE (2026-07-12).** In the auto-port /
+  collision path the engine changes `PROXY_PORT`, then the node `config.yaml`
+  `[k/b/d/m/a]` prompt fired *without knowing a port change was in progress* — so
+  the safe-looking `[k]`eep kept a **stale port** and tripped the server-side
+  readback ("Refusing to launch argo-proxy with a config that disagrees on
+  port"). Safe (the readback is an unconditional guardrail) but a UX trap. Fix
+  landed in `mode_server`: **a heads-up warning before the config prompt** —
+  when an existing `config.yaml` declares a different port than the one we're
+  about to serve, it warns "port is changing … pick `[b]`/`[m]`; `[k]`eep will
+  be refused" so the user makes an informed choice instead of hitting the
+  after-the-fact refusal. The client-side (OpenCode) prompt is already
+  change-triggered (`prompt_port_choice` fires *because* the port differs), so
+  the node heads-up was the gap. Pre-existing behavior; not introduced by the v3
+  branch. Ties into D-020/D-021 port coherence.
 
 ## Remaining work (P4–P5)
 
