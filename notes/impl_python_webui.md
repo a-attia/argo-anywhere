@@ -586,6 +586,20 @@ test-first → merge → polish order). None touch the engine/connect path.
      External links open in the real browser via the existing `_AppBridge`
      bridge (scrollback's pattern — don't trap `target=_blank` in the webview).
 
+## Copy / UX polish backlog
+
+- **Mux-handoff monitor messages read as alarms (surfaced 2026-07-12).** In the
+  `monitor_tunnel_loop` steady state under SSH multiplexing (D-003), the
+  foreground `ssh -N -L` is *expected* to exit once the mux master owns the
+  forward; the loop prints `[warn] SSH tunnel process exited` + `[warn] Health
+  monitor exited; checking forward state` then `mux master owns the forward. No
+  reconnect needed`. These are **healthy** but yellow-`warn`-styled, and in the
+  web UI they batch up while the terminal drawer is hidden and look scary on
+  hide→show. Polish: demote the expected mux-handoff lines from `warn` to `log`
+  (reserve `warn` for an actual reconnect), and consider reducing the
+  monitor exit/respawn churn so the pair isn't reprinted every cycle. Benign;
+  pre-existing (not v3-introduced).
+
 ## Engine hardening backlog
 
 - **Port-change-aware config prompt — DONE (2026-07-12).** In the auto-port /
