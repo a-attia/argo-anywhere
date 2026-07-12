@@ -324,6 +324,18 @@
     </div>
   </div>
 
+  <div class="backdrop" id="confirmBackdrop" hidden>
+    <div class="popover" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h2 id="confirmTitle">Confirm</h2>
+      <div class="lede" id="confirmLede"></div>
+      <div class="warnbox" id="confirmWarn" hidden></div>
+      <div class="pop-actions">
+        <button id="confirmOk" class="btn btn-danger">Confirm</button>
+        <button id="confirmCancel" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/xterm.js"></script>
   <script src="/static/xterm-addon-fit.js"></script>
   <script>
@@ -498,8 +510,17 @@
     setInterval(() => doHealthCheck(), HEALTH_POLL_MS);
     async function stopSession(id) {
       let r = await fetch(`/api/sessions/${id}/stop`, { method: 'POST' });
-      if (r.status === 409) { const w = await r.json(); if (!confirm(w.detail + '\n\nStop it anyway?')) return;
-        r = await fetch(`/api/sessions/${id}/stop?force=true`, { method: 'POST' }); }
+      if (r.status === 409) {
+        const s = lastSessions.find((x) => x.id === id) || {};
+        const ok = await confirmSheet({
+          title: 'Stop session',
+          lede: `Session ${id}${s.verb ? ' (' + s.verb + ')' : ''} is holding the channel on :${cachedPort || '—'}.`,
+          warn: 'Stopping it <b>tears down the tunnel</b>. Reconnecting needs a new Duo prompt.',
+          okLabel: 'Stop it',
+        });
+        if (!ok) return;
+        r = await fetch(`/api/sessions/${id}/stop?force=true`, { method: 'POST' });
+      }
       refreshStatus();
     }
 
@@ -555,7 +576,8 @@
     document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') return;
       if (!el('launchBackdrop').hasAttribute('hidden')) closeLaunch();
       if (!el('aboutBackdrop').hasAttribute('hidden')) closeAbout();
-      if (!el('disconnectBackdrop').hasAttribute('hidden')) closeDisconnect(); });
+      if (!el('disconnectBackdrop').hasAttribute('hidden')) closeDisconnect();
+      if (!el('confirmBackdrop').hasAttribute('hidden')) _closeConfirm(false); });
 
     // ---- About + Disconnect modals --------------------------------------
     const nodeShort = () => { const n = (lastStatus.cached && lastStatus.cached.node) || ''; return n ? n.split('.')[0] : ''; };
@@ -610,6 +632,27 @@
     el('disconnectBackdrop').addEventListener('click', (e) => { if (e.target === el('disconnectBackdrop')) closeDisconnect(); });
     el('doDisconnect').addEventListener('click', () => { sendInterrupt(); closeDisconnect(); term.focus(); setTimeout(refreshStatus, 400); });
 
+    // Reusable in-app confirm sheet (replaces native confirm(): no app-icon, no
+    // backend-speak, consistent styling). Returns a Promise<boolean>.
+    let _confirmResolve = null;
+    function confirmSheet({ title = 'Confirm', lede = '', warn = '', okLabel = 'Confirm' }) {
+      el('confirmTitle').textContent = title;
+      el('confirmLede').textContent = lede;
+      const w = el('confirmWarn');
+      if (warn) { w.innerHTML = warn; w.removeAttribute('hidden'); } else { w.setAttribute('hidden', ''); }
+      el('confirmOk').textContent = okLabel;
+      el('confirmBackdrop').removeAttribute('hidden');
+      el('confirmOk').focus();
+      return new Promise((resolve) => { _confirmResolve = resolve; });
+    }
+    function _closeConfirm(val) {
+      el('confirmBackdrop').setAttribute('hidden', '');
+      const r = _confirmResolve; _confirmResolve = null; if (r) r(val);
+    }
+    el('confirmOk').addEventListener('click', () => _closeConfirm(true));
+    el('confirmCancel').addEventListener('click', () => _closeConfirm(false));
+    el('confirmBackdrop').addEventListener('click', (e) => { if (e.target === el('confirmBackdrop')) _closeConfirm(false); });
+
     el('doLaunch').addEventListener('click', async () => {
       const verb = el('lVerb').value, tool = el('lTool').value, scope = el('lScope').value.trim(), target = el('lTarget').value;
       const params = new URLSearchParams({ verb });
@@ -618,8 +661,15 @@
 
       if (target === 'embedded') {
         const owner = lastSessions.find((s) => s.alive && s.owns_channel);
-        if (owner && tunnelUp && !confirm(
-          `The embedded terminal is holding the channel on :${cachedPort} (${owner.verb}).\nRunning ${verb} replaces it and drops the tunnel.\n\nContinue?`)) return;
+        if (owner && tunnelUp) {
+          const ok = await confirmSheet({
+            title: 'Replace the channel?',
+            lede: `The embedded terminal is holding the channel on :${cachedPort} (${owner.verb}).`,
+            warn: `Running ${verb} replaces it and <b>drops the tunnel</b>. Reconnecting needs a new Duo prompt.`,
+            okLabel: 'Replace',
+          });
+          if (!ok) return;
+        }
         closeLaunch(); openTerminal(params.toString(), verb + (tool ? ' · ' + tool : ''));
         return;
       }
