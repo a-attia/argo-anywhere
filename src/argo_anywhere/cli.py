@@ -227,6 +227,29 @@ def _cmd_web(args: Sequence[str]) -> int:
     return 0
 
 
+def _set_macos_app_name(name: str) -> None:
+    """Make the macOS menu-bar app name ``name`` instead of "Python".
+
+    A non-bundled Python process shows "Python" in the menu bar because Cocoa
+    reads the name from the main bundle's ``CFBundleName``. Overriding the info
+    dict before the ``NSApplication`` menu is built fixes it. No-op off macOS and
+    if pyobjc (pulled in by pywebview's Cocoa backend) isn't importable. When run
+    from the install-launcher ``.app`` bundle, ``CFBundleName`` is already right.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from Foundation import NSBundle  # provided by pyobjc on macOS
+
+        bundle = NSBundle.mainBundle()
+        if bundle is not None:
+            info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+            if info is not None:
+                info["CFBundleName"] = name
+    except Exception:
+        pass  # best-effort cosmetic; never block the app from opening
+
+
 def _cmd_app(args: Sequence[str]) -> int:
     """Open the web UI in a native desktop window (pywebview), server and all.
 
@@ -290,9 +313,12 @@ def _cmd_app(args: Sequence[str]) -> int:
                         return "opened"
                     return "rejected"
 
-            # `title` names the window (and, on macOS, the menu-bar app when not
-            # launched from the .app bundle). The .app bundle's Info.plist
-            # (install-launcher) supplies the richer native "About" on macOS.
+            # On macOS a non-bundled Python process shows "Python" in the menu
+            # bar; name it before the Cocoa app/menu is built. No-op elsewhere
+            # (Windows/Linux use the window title) and when run from the .app
+            # bundle (CFBundleName is already correct there).
+            _set_macos_app_name("argo-anywhere")
+
             webview.create_window(
                 "argo-anywhere", url, js_api=_AppBridge(),
                 width=1200, height=820, min_size=(900, 600),
