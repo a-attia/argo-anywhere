@@ -336,19 +336,40 @@ def _install_macos_app_chrome() -> None:
 
         _about_handler = _AboutHandler.alloc().init()
 
-        main_menu = app.mainMenu()
-        if main_menu is None or main_menu.numberOfItems() == 0:
-            return
-        app_menu = main_menu.itemAtIndex_(0).submenu()
-        for i in range(app_menu.numberOfItems()):
-            item = app_menu.itemAtIndex_(i)
-            action = item.action()
-            title = str(item.title() or "")
-            if (action is not None and str(action) == "orderFrontStandardAboutPanel:") \
-                    or title.startswith("About"):
-                item.setTarget_(_about_handler)
-                item.setAction_(b"showAbout:")
-                break
+        def _rewire_about() -> bool:
+            # Re-point the standard "About" item to our handler. Returns True once
+            # done. pywebview may not have built its menu yet when this first runs
+            # (that's why the Dock icon lands but this didn't) -- so we also retry
+            # on a short delay below.
+            try:
+                main_menu = app.mainMenu()
+                if main_menu is None or main_menu.numberOfItems() == 0:
+                    return False
+                app_menu = main_menu.itemAtIndex_(0).submenu()
+                if app_menu is None:
+                    return False
+                for i in range(app_menu.numberOfItems()):
+                    item = app_menu.itemAtIndex_(i)
+                    action = item.action()
+                    title = str(item.title() or "")
+                    if (action is not None and str(action) == "orderFrontStandardAboutPanel:") \
+                            or title.startswith("About"):
+                        item.setTarget_(_about_handler)
+                        item.setAction_(b"showAbout:")
+                        return True
+            except Exception:
+                pass
+            return False
+
+        if not _rewire_about():
+            # Menu not built yet -> retry a few times on the main run loop.
+            try:
+                from PyObjCTools import AppHelper  # type: ignore
+
+                for delay in (0.3, 0.8, 1.5, 3.0):
+                    AppHelper.callLater(delay, _rewire_about)
+            except Exception:
+                pass
     except Exception:
         pass
 
