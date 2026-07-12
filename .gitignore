@@ -32,7 +32,8 @@ dist/
 .argo_opencode.server.log
 .argo_opencode.sh
 
-# IDE / editor metadata
+# IDE / editor / agent-client metadata (per-user, machine-local)
 .idea/
 .vscode/
 .aider*
+.claude/
