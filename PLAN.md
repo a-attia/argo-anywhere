@@ -7,18 +7,16 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: **v3.0.0 pending first PyPI publish** (version set to
-`3.0.0`). The Model-A Python-package + web-UI rebuild (D-026..D-030)
-has merged to `main`: the package builds, the vendored engine
-round-trips verbatim, the `pytest` suite is green, CI + a tag-gated
-OIDC publish workflow are in place, Q11 is ratified in
-`docs/SECURITY.md`, and the D-028/D-030 live-test gate PASSED
-(2026-07-12; `notes/test_plan_v3_branch.md`). The only remaining
-steps before the release are configuring the PyPI Trusted Publisher
-and pushing the `v3.0.0` tag (the user's action). Last tagged release: **v2.2.0 (2026-05-18)**,
-which remains current until v3.0.0 ships; v2.0.0 / v2.1.0 (both
-2026-05-15) precede it. v1.x line tagged at v1.0.0 / v1.1.0 / v1.2.0;
-legacy URLs redirect forever.
+**Status**: **v3.0.0 RELEASED on PyPI** — the Model-A Python-package +
+web-UI rebuild (D-026..D-030): package owns the runtime, wraps the
+vendored engine, web UI + native app; CI + tag-gated OIDC publish;
+Q11 ratified in `docs/SECURITY.md`; D-028/D-030 live-test gate PASSED
+(2026-07-12). **v3.0.1** (version set to `3.0.1`) is on `main` —
+docs re-ground + README screenshots + install-launcher docs +
+`[screenshots]` tooling — published from CI on its `v3.0.1` tag.
+Prior tags: **v2.2.0 (2026-05-18)** last `.sh`-era release; v2.0.0 /
+v2.1.0 (both 2026-05-15); v1.x line v1.0.0 / v1.1.0 / v1.2.0; legacy
+URLs redirect forever.
 **Repo**: <https://github.com/a-attia/argo-anywhere>.
 **License**: MIT (matches the repo's existing convention).
 
@@ -235,7 +233,7 @@ Phase status as of **2026-05-18** (post-v2.2.0 release):
 | **Per-tool `update-models` refresh (follow-up)** | Generalize `update-models` from a hard-coded OpenCode refresh into a per-tool contract: an optional `<name>_update_models` function each tool may implement. `opencode` refreshes its picker list (today's behavior); `aider` would regenerate `.aider.model.settings.yml`'s per-model `use_temperature:false` entries from the LIVE `/v1/models` (replacing the current static 41-entry list, so newly-served models are covered automatically); `claudecode` stays N/A. Tool-awareness scaffolding (the `--cli-tool` gate + not-applicable messaging) already landed 2026-07-09; this is the remaining "make it actually do per-tool work" step. | planned (as of 2026-07-09); filed while making `update-models` tool-aware |
 | **Phase 6+ (under consideration)** | Generic OpenAI-compatible `--cli-tool` (e.g. `--cli-tool generic --config-path <PATH>`) | under consideration |
 | **Phase C local-shim mode** | Local HTTP shim layer (stream forcing + thinking-block stripping + transparent retry) per 2026-05-18 argo-shim comparative audit | **REJECTED** — would break D-001 single-file UX and address problems already handled upstream by argo-proxy's `anthropic_stream_mode: force` default (v3.x). Documented in `docs/AUDIT_2026-05-18_argo-shim-comparison.md` (Step 4 of v2.2.0 release sequence). |
-| **Model A — Python package + web UI** (D-026..D-030) | Rebuild as a `pip` package that owns the runtime and wraps the unchanged bash engine: two-lane driver, FastAPI web terminal + native app, `argo-anywhere` console script, lifecycle unification; clean-break v3.0.0. Full plan + phasing (P0–P5) in [`notes/impl_python_webui.md`](notes/impl_python_webui.md). | **MERGED to `main`** (2026-07-12); P0–P4 code-complete + `pytest` green + package builds; **LIVE-TEST PASSED (2026-07-12)** (`notes/test_plan_v3_branch.md`; D-028/D-030 gate closed). **Remaining before publish**: configure the PyPI Trusted Publisher, then push the `v3.0.0` tag. P5 (headless engine flags) optional; stdlib-PTY-over-*cold*-Duo is an observed-partial (non-blocking). |
+| **Model A — Python package + web UI** (D-026..D-030) | Rebuild as a `pip` package that owns the runtime and wraps the unchanged bash engine: two-lane driver, FastAPI web terminal + native app, `argo-anywhere` console script, lifecycle unification; clean-break v3.0.0. Full plan + phasing (P0–P5) in [`notes/impl_python_webui.md`](notes/impl_python_webui.md). | **RELEASED as v3.0.0 on PyPI** (2026-07-12); P0–P4 code-complete + `pytest` green + package builds; **LIVE-TEST PASSED** (`notes/test_plan_v3_branch.md`; D-028/D-030 gate closed). Post-release polish (docs re-ground, README screenshots, install-launcher docs, CI) ships as **v3.0.1**. P5 (headless engine flags) optional; stdlib-PTY-over-*cold*-Duo is an observed-partial (non-blocking). |
 
 Milestones are **shippable**, not commit-sized. Each phase ends with a
 live-test gate before the next starts, per the post-CSPO discipline

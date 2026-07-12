@@ -70,22 +70,22 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.0.0 PENDING FIRST PYPI PUBLISH** (version set to
-  `3.0.0`; on `main` at the Model-A merge `01ac516`). The Python-package + web-UI rebuild
-  (D-026..D-030) is merged: package builds (wheel+sdist bundle the
+- **Status**: **v3.0.0 RELEASED on PyPI** (`pipx install argo-anywhere`;
+  Model-A merge `01ac516`). The Python-package + web-UI rebuild
+  (D-026..D-030) shipped: package builds (wheel+sdist bundle the
   engine + assets + static), engine round-trips verbatim via
-  `--print-script`, `pytest` suite green (133 tests, no ANL infra),
-  `LICENSE` (MIT) added and shipped in metadata; version set to
-  `3.0.0` (decided 2026-07-12); CI + tag-gated OIDC publish workflow
-  added under `.github/workflows/`; Q11 web-server security posture
-  ratified in `docs/SECURITY.md` (loopback bind + Host guard + argv
-  allowlist accepted for v3.0.0; loopback-token/Origin check queued as
-  post-3.0 hardening); the **D-028/D-030 live-test gate PASSED
-  (2026-07-12)** (`notes/test_plan_v3_branch.md`: package-mode
-  `connect` reached ALL GREEN with hyphenated node files + dormant
-  bootstrap). **Pre-publish residuals**: configuring the PyPI Trusted
-  Publisher and the tag push + publish itself (the user's action;
-  done last). The stdlib-PTY-over-*cold*-Duo point is an
+  `--print-script`, `pytest` suite green (no ANL infra), `LICENSE`
+  (MIT) in metadata, CI + tag-gated OIDC publish under
+  `.github/workflows/`, Q11 web-server security posture ratified in
+  `docs/SECURITY.md` (loopback bind + Host guard + argv allowlist;
+  loopback-token/Origin check queued as post-3.0 hardening), and the
+  **D-028/D-030 live-test gate PASSED (2026-07-12)**
+  (`notes/test_plan_v3_branch.md`: package-mode `connect` reached ALL
+  GREEN with hyphenated node files + dormant bootstrap). **v3.0.1**
+  (version set to `3.0.1`) is on `main` — docs re-ground + README
+  screenshots (`assets/screenshots/`, via `scripts/screenshots.py` +
+  `[screenshots]` extra) + install-launcher docs — published from CI on
+  its `v3.0.1` tag. The stdlib-PTY-over-*cold*-Duo point is an
   observed-partial (non-blocking; a warm master was reused during the
   gate). The engine's internal `SCRIPT_VERSION`
   is `2.2.1-dev` — intentionally distinct from the package version per
@@ -191,8 +191,8 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: v2.2.0 (tagged 2026-05-18); **v3.0.0 in
-  preparation** on `main` (`3.0.0`, unpublished — see Status)
+- **Current release**: **v3.0.0 (released on PyPI)**; **v3.0.1** on
+  `main` (`3.0.1`, published from CI on its tag — see Status)
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
 
 ### Human-facing doc map

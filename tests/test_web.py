@@ -16,6 +16,7 @@ pytest.importorskip("httpx")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import argo_anywhere  # noqa: E402
 from argo_anywhere.web.app import _host_is_loopback, create_app  # noqa: E402
 
 CTRL = "\x00CTRL"
@@ -69,7 +70,8 @@ def test_api_status(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert "package" in body and "listeners" in body
-    assert body["package"]["package_version"].startswith("3.0.0")
+    # The API reports the actual package version (don't pin a frozen patch).
+    assert body["package"]["package_version"] == argo_anywhere.__version__
     assert isinstance(body["listeners"], list)
 
 

@@ -22,9 +22,10 @@ _SOURCE_ENGINE = _REPO_ROOT / "argo-anywhere.sh"
 
 def test_package_imports_and_has_version() -> None:
     assert isinstance(argo_anywhere.__version__, str)
-    # PEP 440-ish: starts with the target major.minor.patch.
+    # PEP 440-ish: major.minor.patch. Assert the 3.x line (not a frozen patch,
+    # which would break on every version bump).
     assert re.match(r"^\d+\.\d+\.\d+", argo_anywhere.__version__)
-    assert argo_anywhere.__version__.startswith("3.0.0")
+    assert argo_anywhere.__version__.startswith("3.")
 
 
 def test_engine_bytes_look_like_the_engine() -> None:

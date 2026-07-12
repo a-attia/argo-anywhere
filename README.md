@@ -177,16 +177,15 @@ Section 4 for the rationale.
 
 ## Status
 
-**v3.0.0 is pending its first PyPI publish.** The Python-package + web-UI
-rebuild (Model A; design decisions D-026..D-030) has landed on `main`: the
-package builds, the vendored engine round-trips verbatim, the `pytest` suite is
-green, and the live-test gate passed against real ANL infrastructure. The
-release is published from CI via PyPI Trusted Publishing on a version tag. Until
-that tag is pushed, install from `main` (see [Install](#install)).
+**v3.0.0 is on PyPI** — `pipx install argo-anywhere` works. It is the
+Python-package + web-UI rebuild (Model A; design decisions D-026..D-030): the
+package owns the runtime, wraps the vendored bash engine, and adds the web UI /
+native app. **v3.0.1** (docs, screenshots, CI, packaging polish) is on `main`
+and published from CI via PyPI Trusted Publishing on its version tag.
 
-The last tagged release is **v2.2.0 (2026-05-18)**, which remains current until
-v3.0.0 ships. All older tags — `v1.0.0`–`v1.2.0` and `v2.0.0`/`v2.1.0` — still
-resolve, and legacy pinned `.sh` URLs keep working.
+Older tags — `v1.0.0`–`v1.2.0` and the v2.x line (`v2.0.0`, `v2.1.0`, `v2.2.0`,
+the last `.sh`-era release) — still resolve, and legacy pinned `.sh` URLs keep
+working.
 
 The correctness story in one sentence: a 43-finding fresh-eyes audit
 ([`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md)) covering CSPO defenses,
