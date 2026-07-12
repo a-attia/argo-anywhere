@@ -8,14 +8,14 @@ dynamic = ["version"]
 description = "Run AI coding CLIs (OpenCode, Claude Code, aider) against the ANL Argo gateway from anywhere -- now a Python package that owns the runtime and adds a local web UI, wrapping the unchanged bash engine."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Ahmed Attia" }]
 keywords = ["argo", "anl", "llm", "opencode", "claude-code", "aider", "ssh-tunnel"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3 :: Only",
@@ -44,12 +44,20 @@ app = [
     "pywebview>=5",
 ]
 all = ["argo-anywhere[app]"]
-# Dev/test: pytest + httpx (FastAPI's TestClient needs httpx).
-test = [
+# dev is self-sufficient for the full test suite + lint: the web-API tests need
+# fastapi/uvicorn (via [web]) + an HTTP client for Starlette's TestClient
+# (httpx), and CI runs ruff. pywebview is NOT included -- it needs a system GUI
+# backend CI runners lack, and no test imports it. This is the extra CI installs
+# (`pip install -e .[dev]`).
+dev = [
     "argo-anywhere[web]",
     "pytest>=8",
     "httpx>=0.27",
+    "ruff>=0.4",
 ]
+# `test` is retained as an alias of `dev` for backwards-compatibility (earlier
+# docs + notes reference `.[test]`); prefer `dev` for new invocations.
+test = ["argo-anywhere[dev]"]
 
 [project.urls]
 Homepage = "https://github.com/a-attia/argo-anywhere"
@@ -71,3 +79,12 @@ where = ["src"]
 # ships its vendored static assets (xterm.js etc.) the same way; assets/ holds
 # the app icon used by `install-launcher` for the macOS .app bundle.
 argo_anywhere = ["engine/*.sh", "web/static/*", "web/static/**/*", "assets/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# The vendored bash engine + web static assets are not Python; nothing to lint.
+extend-exclude = ["src/argo_anywhere/engine", "src/argo_anywhere/web/static"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
