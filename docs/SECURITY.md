@@ -1,11 +1,18 @@
 # Security model
 
-This document describes `argo-anywhere.sh`'s threat model, what the
-script does to defend its users, what it does NOT defend against, and
-the privacy posture of the data flowing through it. It is for
-security-conscious users + ANL admins who want to understand the
-script's behavior before recommending it (or installing it on shared
-infrastructure).
+This document describes argo-anywhere's threat model, what it does to
+defend its users, what it does NOT defend against, and the privacy
+posture of the data flowing through it. It is for security-conscious
+users + ANL admins who want to understand the behavior before
+recommending it (or installing it on shared infrastructure).
+
+As of v3.0.0 argo-anywhere is a Python package that owns the runtime
+and drives the bash **engine** (vendored verbatim). The engine's
+security model — SSH tunnel, identity attribution, CSPO defenses,
+on-disk logging — is unchanged and is the bulk of this document. The
+package adds one new local attack surface: an **optional loopback-only
+web UI** (`argo-anywhere web` / `app`), covered in its own section
+below.
 
 ## TL;DR
 
@@ -28,6 +35,10 @@ infrastructure).
 - **CSPO defenses**: persistent on-disk SSH-failure lock with TTL +
   exponential backoff prevents accidentally racking up failed SSH
   attempts that could trigger ANL's IP-block defense.
+- **Local web UI** (opt-in): binds `127.0.0.1` only + a DNS-rebinding
+  Host-header guard; runs only allowlisted engine verbs (no shell
+  passthrough). It is **unauthenticated** and shares your shell trust
+  boundary — see [Local web UI](#local-web-ui-argo-anywhere-web--app).
 - **What the script does not defend against**: a malicious laptop
   user, a malicious compute node, or a malicious upstream
   installer (`curl | bash` from `claude.ai` / `opencode.ai` is used
@@ -41,6 +52,8 @@ The script's adversary model is light:
 |:-------|:----------|:--------|
 | Network adversary observing your SSH traffic | Yes (implicitly) | SSH itself; the script doesn't add anything below the SSH layer. |
 | Network adversary observing the local tunnel (between your AI client and the SSH tunnel) | Yes | Tunnel binds to `127.0.0.1` only; not exposed on routable interfaces. |
+| Remote adversary reaching the local web UI | Yes | Web server binds `127.0.0.1` only + a DNS-rebinding guard (Host header must name loopback, else 403/1008). Not reachable off-host. See [Local web UI](#local-web-ui-argo-anywhere-web--app). |
+| Local process / browser page POSTing to the local web UI | Partial | The web UI is unauthenticated (no token / same-origin check), so any local process (or a web page in your browser, CSRF-style) that reaches `127.0.0.1:<port>` can trigger engine verbs incl. a Duo push. Mitigated by: argv allowlist (no shell passthrough), loopback bind, and the fact such a peer already shares your shell trust boundary. A loopback token / Origin check is queued as post-3.0 hardening. |
 | Other users on your laptop | Partial | argo-proxy config files have OS-default permissions (typically 0644 for JSON, 0644 for YAML); your username (used as the Argo bearer token) is therefore readable by other local users. |
 | Other users on the compute node | Yes | Strict identity check on argo-proxy reuse (v2.0 H5 fix); script refuses to attach to a running argo-proxy unless `cfg_user == want_user` is positively verified. |
 | Accidental CSPO IP-block via SSH-failure burst | Yes | Persistent on-disk failure lock with TTL + exponential backoff (v2.0 C4/C5/C7 fixes); see [CSPO defenses](#cspo-defenses). |
@@ -72,7 +85,10 @@ A complete inventory of where prompt and identity data may persist:
 | `~/.claude/settings.json` (global scope) OR `./.claude/settings.local.json` (project scope; default since v2.0) | Claude Code config including `env.ANTHROPIC_AUTH_TOKEN` (= ANL username) | low (PII) |
 | `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master sockets | none (sockets, not data) |
 
-No prompt content is logged on the laptop.
+No prompt content is logged on the laptop. The web UI keeps no data at
+rest: it holds live PTY sessions in memory only and serves vendored
+static assets; nothing it does writes prompt or identity data beyond
+what the engine already writes above.
 
 ### Compute node side
 
@@ -167,6 +183,50 @@ Even with the lock active, there's a recovery instruction printed
 once that explains how to verify your SSH manually outside the
 script (`ssh -o ConnectTimeout=5 <user>@logins.cels.anl.gov true`).
 
+## Local web UI (`argo-anywhere web` / `app`)
+
+The v3.0.0 package adds an **optional** loopback-only web UI: a browser
+terminal (and a `pywebview` native-window wrapper) that can drive the
+engine — `connect` incl. Duo, the live monitor, `configure`/`run`, and
+read-only info views — without a native terminal. It runs only when you
+start it (`argo-anywhere web` or `app`); it is not started by any other
+subcommand and listens on nothing until you do.
+
+### What it exposes
+
+| Property | Behavior |
+|:---------|:---------|
+| Bind address | `127.0.0.1` only (default port `8799`). Never a routable interface. |
+| DNS-rebinding guard | Every HTTP request and the WebSocket upgrade require a loopback `Host` header (`127.0.0.1` / `localhost` / `::1`); anything else gets `403` (HTTP) / close `1008` (WS). Defeats a malicious page that resolves an attacker domain to `127.0.0.1`. |
+| Authentication | **None.** No token, no same-origin/CSRF check. |
+| What a request can do | Spawn a PTY running the engine, but only via an **argv allowlist**: known verbs only, `--cli-tool`/`--scope` constrained to a `^[a-z0-9][a-z0-9-]{0,31}$` alphabet, `--port` range-checked. There is **no free-form / shell passthrough** — the browser can hand values only to the vendored engine, never to a shell. Returning verbs (`status`, `list-models`, `list-tools`) run captured with stdin closed. |
+| ANL-reaching actions | Never auto-run. Channel `/health` and model-list calls (which traverse the tunnel) fire only on an explicit user action; the kill-guard refuses (409) to stop a session that owns a live channel unless you confirm. |
+| Data at rest | None (see [What gets logged where](#laptop-side)). |
+
+### Ratified posture (PLAN.md Q11)
+
+The posture is **accepted as-is for v3.0.0**: loopback bind + Host-header
+guard + argv allowlist are adequate for the project's threat model of a
+**trusted user on a trusted laptop**. The rationale is the same as for
+the on-node tunnel: anyone who can reach `127.0.0.1:<port>` on your
+laptop is already a peer of your shell, and the server cannot be coerced
+into running anything the engine itself wouldn't.
+
+### The residual (queued hardening)
+
+Because the UI is unauthenticated, it does **not** defend against a
+**hostile local process** or a **malicious web page in your browser**
+(CSRF-style) that POSTs to `127.0.0.1:<port>`. Such a caller could
+trigger an engine verb — including a `connect` that fires a Duo push —
+though it still cannot run arbitrary shell (the argv allowlist holds).
+The loopback bind + Host guard stop *remote* and *DNS-rebinding*
+attacks; they do not stop a same-host attacker.
+
+A **loopback token or `Origin`/same-origin check** on state-changing
+endpoints + the WebSocket is queued as post-3.0 hardening. Until then:
+don't run the web UI on a laptop you share with an untrusted local user,
+and close it when you're not using it (it listens only while running).
+
 ## Identity attribution
 
 Every prompt sent through this script is attributed to a single
@@ -209,6 +269,13 @@ Explicit non-defenses, listed so they're not surprises:
   to their argo-proxy) but doesn't defend against them attaching to
   yours. Mitigations: pick a non-default port via `--port`, or just
   don't run on shared compute nodes you don't trust.
+- **A same-host attacker against the local web UI**. When you run
+  `argo-anywhere web` / `app`, the unauthenticated loopback server can
+  be reached by any local process or (CSRF-style) a malicious browser
+  page, which could trigger an engine verb incl. a Duo push. It cannot
+  run arbitrary shell (argv is allowlisted) and is not reachable
+  off-host (loopback bind + Host guard). A loopback token / Origin
+  check is queued as hardening; see [Local web UI](#local-web-ui-argo-anywhere-web--app).
 - **Compromised upstream installers**. The script runs `curl ... |
   bash` from `opencode.ai` and `claude.ai` to install the AI clients.
   No checksum verification (audit finding L8). If those domains are
@@ -263,4 +330,8 @@ maintainer); response times are best-effort, not SLA-backed.
 
 *Created 2026-05-15 by Ahmed Attia (with substantial AI assistance
 from Claude per [`CONTRIBUTORS.md`](../CONTRIBUTORS.md)) as part of
-Phase 2c+3 of the v2.0 release.*
+Phase 2c+3 of the v2.0 release. Revised 2026-07-12 for v3.0.0: broadened
+the intro to the Python package; added the ratified "Local web UI"
+threat model (PLAN.md Q11) — loopback bind + Host guard + argv allowlist
+accepted, local-process/CSRF residual documented, loopback-token/Origin
+check queued as hardening.*

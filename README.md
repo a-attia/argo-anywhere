@@ -1,38 +1,44 @@
 # argo-anywhere
 
-> **Audience pointer for AI coding tools**: project conventions are in
-> [`AGENTS.md`](AGENTS.md) (canonical) and [`CLAUDE.md`](CLAUDE.md)
-> (symlink). [`PLAN.md`](PLAN.md) is the active plan-of-record.
+> **For AI coding tools**: read [`AGENTS.md`](AGENTS.md) first (project conventions + skill loading); [`PLAN.md`](PLAN.md) is the plan-of-record. This README is for humans.
 
-A self-contained bash script that lets Argonne (ANL) users run AI
-coding CLI tools — [OpenCode](https://opencode.ai/),
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) — against
-[argo-proxy](https://github.com/Oaklight/argo-proxy) on an ANL compute
-node, **from any laptop on any network**, with **one Duo prompt per
-session**.
+argo-anywhere lets Argonne (ANL) users run AI coding CLI tools —
+[OpenCode](https://opencode.ai/),
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code), and
+[aider](https://aider.chat/) — against
+[argo-proxy](https://github.com/Oaklight/argo-proxy) on an ANL compute node,
+**from any laptop on any network**, with **one Duo prompt per session**.
 
-> **New here, or upgrading from a previous version?** Start with the
+It is a `pip`-installable Python package that owns the runtime and drives a
+single self-contained bash **engine** (vendored verbatim) which does the
+orchestration: the SSH tunnel, the on-node `argo-proxy` bootstrap, and each
+tool's config. On top of the command-line workflow it adds an optional
+loopback-only **web UI** and a native **desktop app**, so you can connect,
+monitor, and run tools from a browser window without touching a terminal.
+
+> **New here, or upgrading?** Start with the
 > **[install & migrate guide](docs/UPGRADING.md#start-here-install-and-migrate)** —
 > one short path each for new users, v2.x upgraders, and v1.x upgraders.
-> (Full per-version deltas follow in the same doc.)
 
 ## Contents
 
 - [Heads up before you start](#heads-up-before-you-start)
+- [Install](#install)
+- [Quick start](#quick-start)
 - [What this is](#what-this-is)
 - [Status](#status)
-- [Quick start](#quick-start)
-- [Web UI & desktop app](#web-ui--desktop-app)
-- [Currently supported `--cli-tool` values](#currently-supported---cli-tool-values)
+- [Web UI and desktop app](#web-ui-and-desktop-app)
+- [Supported AI CLI tools](#supported-ai-cli-tools)
 - [Prerequisites](#prerequisites)
 - [Known limitations (please read)](#known-limitations-please-read)
-- [How `argo-anywhere.sh` is organised (subcommands)](#how-argo_anywheresh-is-organised-subcommands)
+- [Subcommands](#subcommands)
 - [What it writes where](#what-it-writes-where)
+- [Running the raw engine (fork mode)](#running-the-raw-engine-fork-mode)
 - [MFA / Duo handling](#mfa--duo-handling)
 - [Running on a compute node](#running-on-a-compute-node)
 - [Sharing a compute node with other users](#sharing-a-compute-node-with-other-users)
 - [Claude Code config scope (project vs. global)](#claude-code-config-scope-project-vs-global)
-- [Port policy (v2.2 port-as-state + cross-client coherence)](#port-policy-v22-port-as-state--cross-client-coherence)
+- [Port policy](#port-policy)
 - [Tunnel monitoring and reconnect](#tunnel-monitoring-and-reconnect)
 - [SSH failure protection (CSPO defense)](#ssh-failure-protection-cspo-defense)
 - [Common operations](#common-operations)
@@ -45,451 +51,449 @@ session**.
 
 ## Heads up before you start
 
-Two things you'll want to know in the first thirty seconds of using
-this script:
+Two things worth knowing in the first thirty seconds:
 
-1. **Claude Code with `claude-opus-4-7` is currently broken** through
-   the ANL Argo gateway: every request fails with `API returned an
-   empty or malformed response (HTTP 200)`. The bug is in Anthropic's
-   Vertex deployment (rejects `thinking.type.enabled` for opus-4-7)
-   and Claude Code 2.1.x's SSE error-event parsing — not in
-   `argo-anywhere` or `argo-proxy`. **Workaround**: run
-   `claude --model claude-sonnet-4-6` (or `haiku-4-5`, `opus-4-1`,
-   any non-opus-4-7), or set `ANTHROPIC_MODEL=claude-sonnet-4-6` in
-   the `env` block of your `~/.claude/settings.json`. Full diagnosis
-   + persistent workaround in
-   [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Upstream stack:
-   argo-proxy + AI CLI tools".
+1. **Claude Code with `claude-opus-4-7` is currently broken** through the ANL
+   Argo gateway: every request fails with `API returned an empty or malformed
+   response (HTTP 200)`. The bug is upstream — Anthropic's Vertex deployment
+   rejects `thinking.type.enabled` for opus-4-7, and Claude Code 2.1.x
+   mis-parses the resulting SSE error event — not in argo-anywhere or
+   argo-proxy. **Workaround**: run `claude --model claude-sonnet-4-6` (or any
+   non-opus-4-7 model), or set `ANTHROPIC_MODEL=claude-sonnet-4-6` in the `env`
+   block of your `~/.claude/settings.json`. Full diagnosis in
+   [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Upstream stack".
 
-2. **Single-file `curl`-and-run distribution**. Whatever you `curl`
-   IS what runs on your laptop AND gets `scp`'d to the compute node.
-   Pinning to a release tag (immutable) is recommended for any
-   workflow you care about; `main` is fine for fresh exploration.
+2. **Install with `pipx` / `pip`.** As of v3.0.0, argo-anywhere is a Python
+   package; `pipx install argo-anywhere` is the supported install path. The
+   old "`curl` one `.sh` and `bash` it" route is retired as the primary route
+   — though you can still inspect or fork the raw engine (see
+   [Running the raw engine](#running-the-raw-engine-fork-mode)).
 
-The rest of this document assumes neither of these surprised you.
+## Install
 
-## What this is
+The recommended install is [`pipx`](https://pipx.pypa.io/) — it puts the
+`argo-anywhere` command on your `PATH` in its own isolated environment:
 
-One bash script (`argo-anywhere.sh`) that orchestrates two roles:
+```sh
+pipx install argo-anywhere            # command-line only
+pipx install 'argo-anywhere[app]'     # + the native desktop window / web UI
+```
 
-- **Client mode (laptop)**: install the chosen AI CLI tool if needed,
-  write its config, push this script to a chosen ANL compute node,
-  start `argo-proxy` there inside `screen` (preferred; falls back to
-  `tmux`, then `nohup`), then open the SSH tunnel and monitor its
-  health.
-- **Server mode (ANL compute node)**: create a Python venv, install
-  `argo-proxy`, write `~/.config/argoproxy/config.yaml`, start
-  `argo-proxy serve` inside the chosen session manager.
+Plain `pip install argo-anywhere` (ideally into a virtual environment) works
+too. Requires Python 3.10+. See [Prerequisites](#prerequisites) for the SSH /
+`jq` / laptop tooling the engine needs at run time.
 
-Server mode is auto-invoked over SSH by client mode. **You normally
-only ever run `client`**. Server mode is also documented as a
-standalone workflow for the "leave a proxy on this node for any
-tool to reach" use case (see
-[Running on a compute node](#running-on-a-compute-node)).
+> **Until v3.0.0 is on PyPI**, install from the `main` branch:
+> `pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@main'`.
+> See [Status](#status).
 
-Single-file distribution is a load-bearing design choice (PLAN.md
-decision D-001): users `curl` one URL to one file and run it. The
-same file is `scp`'d to the compute node and re-exec'd as `server`.
-No tarballs, no Python package, no multi-file install. Every
-architectural temptation we've evaluated against this rule
-(e.g. a local HTTP-shim layer for transport-level fixes) has been
-rejected for breaking it — see
-[`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
-Section 4 for the canonical Phase-C-rejection rationale.
-
-> **On the `feat/python-package-webui` branch this is being revisited (D-026..D-030):**
-> argo-anywhere is becoming a `pipx`-installable Python package that *wraps* the
-> unchanged single-file engine and adds a loopback-only web UI + native app. The
-> engine stays one self-contained `.sh` (vendored verbatim); the package is the
-> new distribution around it. See [Web UI & desktop app](#web-ui--desktop-app).
-
-## Status
-
-**v2.2.0 released 2026-05-18.** Tags on the v1.x line — `v1.0.0`,
-`v1.1.0`, `v1.2.0` — still resolve forever; legacy pinned URLs keep
-working. The v2.x line through this release: `v2.0.0` and `v2.1.0`
-(both 2026-05-15) + `v2.2.0`.
-
-The audit story so far, in one sentence: a 43-finding fresh-eyes
-audit ([`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md))
-covering CSPO defenses + identity-handling correctness + privacy
-posture + multi-tool support kicked off the v2 cycle, and as of
-v2.2.0 **42 of 43 findings are closed** (only L8, the unchecksummed
-`curl|bash` from `claude.ai`, remains as documented no-fix; not
-actionable at our layer).
-
-What landed in each v2.x release, briefly:
-
-- **v2.0.0** — symlink removal + `--cli-tool` dispatch; rename to
-  `*anywhere*`; CSPO defense + identity-handling + verbose-default
-  privacy fixes; broad medium/low-severity audit closures.
-- **v2.1.0** — Phase 2d defensive-hardening: seven "fail louder, not
-  silently" fixes (M6-M10 + L6 + L10).
-- **v2.2.0** — Phase 4 multi-tool framework: per-tool scope vocabulary
-  (D-018), `ARGO_ANYWHERE_SCOPE` user-facing namespace (D-019),
-  per-tool default scope policy with hybrid claudecode default
-  (D-017), port-as-transport-state caching (D-020; closes audit M4),
-  OpenCode project-scope, and cross-client port-coherence
-  enforcement (D-021).
-
-See [`PLAN.md`](PLAN.md) Section 4 (Milestones) for the
-phase-by-phase status + the roadmap ahead (v2.2.1, v2.3, Phase 5
-aider, Phase 6+ generic; Phase C local-shim REJECTED).
-[`docs/UPGRADING.md`](docs/UPGRADING.md) covers the user-facing
-behavior changes across all three v2.x releases.
+Coming from a v1.x / v2.x `.sh` install? See [Upgrading](#upgrading) for the
+clean-cutover steps.
 
 ## Quick start
 
+The all-in-one flow — open the channel, install and configure your tool, and
+hold the health monitor — is a single command:
+
 ```sh
-# 1. Download (pin to a release; tags are immutable):
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.2.0/argo-anywhere.sh \
-     -o argo-anywhere.sh && chmod +x argo-anywhere.sh
+# Pick a tool; the first run prompts for your ANL username + a compute node:
+argo-anywhere --cli-tool opencode client       # OpenCode
+argo-anywhere --cli-tool claudecode client     # Claude Code
+argo-anywhere --cli-tool aider client          # aider
 
-# 2. Run with explicit tool selection (one-shot: channel + tool + monitor):
-bash argo-anywhere.sh --cli-tool opencode client       # OpenCode
-bash argo-anywhere.sh --cli-tool claudecode client     # Claude Code
-bash argo-anywhere.sh --cli-tool aider client          # aider
-
-# 3. In another terminal once the script reports ALL GREEN:
-opencode    # (or `claude`, or `aider`, depending on which tool you picked)
+# Then, in another terminal once it reports ALL GREEN:
+opencode    # or `claude`, or `aider` — whichever you configured
 ```
 
-Or use the split workflow — the SSH channel is a **shared** local
-endpoint that any number of tools can hit at once, so you can hold it in
-one window and configure/run tools in others:
+If you configured Claude Code, remember the opus-4-7 workaround from
+[Heads up](#heads-up-before-you-start): `claude --model claude-sonnet-4-6`.
+
+Prefer the **split workflow**? The SSH channel is a *shared* local endpoint
+that any number of tools can hit at once, so you can hold it in one window and
+configure or run tools in others:
 
 ```sh
 # Window 1 — bring up the shared channel and keep it alive:
-bash argo-anywhere.sh connect
+argo-anywhere connect
 
-# Window 2+ — point tools at the existing channel (no new tunnel/Duo):
-bash argo-anywhere.sh configure opencode aider   # configure several at once
-bash argo-anywhere.sh run aider                  # configure one + launch it
+# Window 2+ — point tools at the existing channel (no new tunnel, no new Duo):
+argo-anywhere configure opencode aider   # configure several at once
+argo-anywhere run aider                  # configure one, then launch it
 ```
 
-If you ran the Claude Code flow, **don't forget the opus-4-7
-workaround** (see [Heads up](#heads-up-before-you-start)):
+Not sure which tool? Let the picker choose:
 
 ```sh
-claude --model claude-sonnet-4-6
+argo-anywhere client          # picker fires when --cli-tool is omitted
+argo-anywhere setup           # always shows the picker
+argo-anywhere list-tools      # list the accepted --cli-tool values
 ```
 
-Or invoke `argo-anywhere.sh` without `--cli-tool` to be prompted
-interactively:
+Subsequent runs reuse the cached username, node, and port from
+`~/.config/argo_anywhere/`, so you rarely re-answer the prompts.
+
+## What this is
+
+argo-anywhere has two layers:
+
+- The **Python package** is the runtime you install and the command you run
+  (`argo-anywhere`). It also provides the web UI, the native app, and the
+  install/uninstall lifecycle.
+- The **bash engine** (`argo-anywhere.sh`) does all the orchestration. It is
+  vendored inside the package **verbatim** and is the single source of truth
+  for how the tunnel, bootstrap, and per-tool configs work. The package drives
+  it; it never reimplements it.
+
+The engine plays two roles:
+
+- **Client mode (laptop)** — install the chosen AI CLI tool if needed, write
+  its config, push the engine to a chosen ANL compute node, start `argo-proxy`
+  there (inside `screen`, falling back to `tmux` then `nohup`), open the SSH
+  tunnel, and monitor its health.
+- **Server mode (ANL compute node)** — create a Python venv, install
+  `argo-proxy`, write `~/.config/argoproxy/config.yaml`, and start
+  `argo-proxy serve`.
+
+You normally only run the client flow; server mode is auto-invoked over SSH.
+Server mode is also a documented standalone workflow — see
+[Running on a compute node](#running-on-a-compute-node).
+
+**The engine stays a single self-contained `.sh` file** (design decision D-001,
+which now governs the engine rather than the whole project). The package
+vendors that one file, `scp`s it to the compute node, and re-exec's it there as
+`server`. What changed at v3.0.0 (D-026) is the *distribution*: the installable
+unit is now the package, not a `curl`ed script. A local HTTP-shim transport
+layer was evaluated against the single-engine-file rule and rejected — see
+[`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
+Section 4 for the rationale.
+
+## Status
+
+**v3.0.0 is pending its first PyPI publish.** The Python-package + web-UI
+rebuild (Model A; design decisions D-026..D-030) has landed on `main`: the
+package builds, the vendored engine round-trips verbatim, the `pytest` suite is
+green, and the live-test gate passed against real ANL infrastructure. The
+release is published from CI via PyPI Trusted Publishing on a version tag. Until
+that tag is pushed, install from `main` (see [Install](#install)).
+
+The last tagged release is **v2.2.0 (2026-05-18)**, which remains current until
+v3.0.0 ships. All older tags — `v1.0.0`–`v1.2.0` and `v2.0.0`/`v2.1.0` — still
+resolve, and legacy pinned `.sh` URLs keep working.
+
+The correctness story in one sentence: a 43-finding fresh-eyes audit
+([`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md)) covering CSPO defenses,
+identity-handling, privacy posture, and multi-tool support drove the v2 cycle,
+and **42 of 43 findings are closed** (only L8, the unchecksummed `curl | bash`
+from `claude.ai`, remains as a documented no-fix). For the phase-by-phase
+history and the roadmap ahead, see [`PLAN.md`](PLAN.md) Section 4 (Milestones);
+for user-facing behavior changes across releases, see
+[`docs/UPGRADING.md`](docs/UPGRADING.md).
+
+## Web UI and desktop app
+
+<img src="https://raw.githubusercontent.com/a-attia/argo-anywhere/main/src/argo_anywhere/assets/icon.svg" alt="argo-anywhere app icon" width="104" align="right" />
+
+Alongside the CLI, argo-anywhere ships a **loopback-only web UI** you can drive
+from a browser or a native desktop window — Duo, the live monitor, and the
+interactive prompts all work without a terminal. It binds `127.0.0.1` only and
+runs only allowlisted engine verbs; see
+[`docs/SECURITY.md`](docs/SECURITY.md) "Local web UI" for the threat model.
 
 ```sh
-bash argo-anywhere.sh client          # picker fires
-bash argo-anywhere.sh setup           # always shows picker
-bash argo-anywhere.sh list-tools      # see what `--cli-tool` accepts
-```
-
-To track `main` instead of a pinned release (gets the latest fixes,
-but may move under your feet):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/main/argo-anywhere.sh \
-     -o argo-anywhere.sh
-```
-
-The first run prompts for your ANL (Argonne) username and asks you
-to pick a compute node. Subsequent runs reuse the cached values from
-`~/.config/argo_anywhere/`.
-
-## Web UI & desktop app
-
-<img src="src/argo_anywhere/assets/icon.svg" alt="argo-anywhere app icon" width="104" align="right" />
-
-On the `feat/python-package-webui` branch, argo-anywhere is also a
-`pipx`-installable Python package that owns the runtime, wraps the **unchanged**
-bash engine, and adds a loopback-only web UI you can drive from a browser or a
-native window — Duo, the live monitor, and the interactive prompts all work
-without a terminal. (Full design: [`notes/impl_python_webui.md`](notes/impl_python_webui.md),
-decisions D-026..D-030.)
-
-```sh
-# Install the package (pre-release, from the branch):
-pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'
+pipx install 'argo-anywhere[app]'    # the [app] extra adds the native window
 
 argo-anywhere app                 # open the web UI in a native desktop window
 argo-anywhere web                 # ...or serve it to your browser
-argo-anywhere install-launcher    # drop a double-clickable launcher (no terminal needed)
+argo-anywhere install-launcher    # drop a double-clickable launcher (no terminal)
 ```
 
 `install-launcher` writes a **persistent, double-clickable launcher** so you can
-start the UI without opening a terminal: on macOS a
-`~/Desktop/argo-anywhere.command` plus a real `~/Applications/argo-anywhere.app`
-(the constellation icon on the right); on Linux a `.desktop` menu entry plus a
-`~/Desktop/argo-anywhere.sh`. Each bakes the absolute interpreter path (GUI
-launches run with a minimal `PATH`) and opens the native window, falling back to
-your browser if the `[app]` extra isn't installed.
+start the UI without a terminal: on macOS a `~/Desktop/argo-anywhere.command`
+plus a real `~/Applications/argo-anywhere.app` (with the constellation icon
+shown here); on Linux a `.desktop` menu entry plus a `~/Desktop/argo-anywhere.sh`.
+Each bakes the absolute interpreter path (GUI launches run with a minimal
+`PATH`) and opens the native window, falling back to your browser if the `[app]`
+extra isn't installed.
 
-Package-level commands (everything else passes straight through to the engine
-verbs documented below):
+These verbs are handled by the **package**; everything else passes straight
+through to the engine (see [Subcommands](#subcommands)):
 
-| Command | Does |
+| Command | What it does |
 |:--|:--|
-| `argo-anywhere app` | Open the web UI in a native desktop window (needs the `[app]` extra; browser fallback). |
+| `argo-anywhere app` | Open the web UI in a native desktop window (needs `[app]`; browser fallback). |
 | `argo-anywhere web` | Serve the web UI to your browser (loopback-only). |
 | `argo-anywhere install-launcher` | Install a double-clickable launcher (`--desktop` / `--app-bundle` / `--dest` narrow it). |
 | `argo-anywhere info [--json]` | Local status: package + engine versions, loopback listeners, and argo-anywhere's on-disk footprint (no ANL contact). |
-| `argo-anywhere uninstall` | Remove argo-anywhere's footprint (manifest-driven config restore + the launchers), then print the `pipx`/`pip` command to remove the package itself. |
+| `argo-anywhere uninstall [...]` | Remove argo-anywhere's footprint (manifest-driven config restore + the launchers), then print the `pipx`/`pip` command to remove the package itself. |
 | `argo-anywhere --print-script` | Emit the raw bash engine to stdout (inspect-and-fork). |
+| `argo-anywhere --version` | Print the package version. |
 
-Everything the package puts on disk is listed by `argo-anywhere info` and removed
-by `argo-anywhere uninstall`; your AI-tool configs are only ever read and
-restored, never argo-anywhere's to delete.
+Everything the package puts on disk is listed by `argo-anywhere info` and
+removed by `argo-anywhere uninstall`. Your AI-tool configs are only ever read
+and restored — never argo-anywhere's to delete.
 
-## Currently supported `--cli-tool` values
+## Supported AI CLI tools
 
-- `opencode` — [OpenCode](https://opencode.ai/) (sst/opencode-style
-  OpenAI-compatible client). Supports `--scope project|global` as of
-  v2.2.0; default is `global`. Project-scope writes
-  `<git-root>/opencode.json` (or `<cwd>/opencode.json` when not in a
-  git repo); global writes `~/.config/opencode/config.json`.
-- `claudecode` — [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-  (Anthropic CLI; uses `ANTHROPIC_BASE_URL` env). Supports
-  `--scope project|global`; default is hybrid per
-  [PLAN.md D-017](PLAN.md) (`~/.claude.json` present → project for
-  OAuth-safety; absent → global for convenience). See
-  [Claude Code config scope](#claude-code-config-scope-project-vs-global)
-  below. ⚠️ **subject to the opus-4-7 issue documented in
-  [Heads up](#heads-up-before-you-start)**.
+Pass one to `--cli-tool` (or pick it interactively):
 
-**Roadmap**: `aider` integration is deferred to Phase 5 (no
-scheduled trigger; the v2.2 scope framework + per-tool API contract
-make it a clean ~5-function addition when a user requests it).
-Cursor is **not planned as an integrated tool** (upstream guidance
-discourages routing through LLM gateways for cursor specifically);
-the workaround is `bash argo-anywhere.sh tunnel` and point cursor's
-OpenAI-compatible endpoint at `http://localhost:<port>/v1` manually.
-A `generic` OpenAI-compatible `--cli-tool` is under consideration
-for later releases.
+- **`opencode`** — [OpenCode](https://opencode.ai/), an OpenAI-compatible
+  client. Supports `--scope project|global` (default `global`). Project scope
+  writes `<git-root>/opencode.json` (or `<cwd>/opencode.json` outside a git
+  repo); global writes `~/.config/opencode/config.json`.
+- **`claudecode`** — [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+  (uses `ANTHROPIC_BASE_URL`). Supports `--scope project|global`; default is
+  **hybrid** per [PLAN.md D-017](PLAN.md) (project when `~/.claude.json` is
+  present, for OAuth safety; global otherwise). See
+  [Claude Code config scope](#claude-code-config-scope-project-vs-global).
+  ⚠️ Subject to the opus-4-7 issue in [Heads up](#heads-up-before-you-start).
+- **`aider`** — [aider](https://aider.chat/) via its OpenAI-compatible endpoint.
+  Writes `~/.aider.conf.yml` plus a sibling `.aider.model.settings.yml` that
+  disables `temperature` for reasoning / opus / gpt-5 models (which otherwise
+  return an empty stream). Global vs. project per `--scope`.
+
+**Roadmap.** Cursor is **not** planned as an integrated tool (upstream guidance
+discourages routing it through an LLM gateway); the workaround is
+`argo-anywhere tunnel` and pointing cursor's OpenAI-compatible endpoint at
+`http://localhost:<port>/v1` manually. A `generic` OpenAI-compatible
+`--cli-tool` is under consideration for a later release.
 
 ## Prerequisites
 
 **Laptop:**
 
-- bash 3.2+ (macOS default works), `ssh`, `scp`, `curl`, `lsof`.
-  macOS ships all of these. Minimal Linux installs (Alpine, slim
-  Docker images) sometimes lack `lsof` — install it before running
-  the script.
-- SSH key-based auth to `logins.cels.anl.gov`. The script refuses to
-  proceed and shows exact instructions if password auth is required.
-- `jq`: **required** for `update-models`; **strongly recommended**
-  for `status` (without it, the model-count math is approximate and
-  the `[m]erge` config-handling option is unavailable for JSON
-  files).
-- `python3` 3.10+: required for the inline Python heredocs the script
-  uses to merge JSON/YAML config files safely (preserves your other
-  keys; we only overwrite the ones we own).
-- Optional: ANL VPN if you're off-site and your local network policy
-  needs it.
+- **Python 3.10+** to install and run the package.
+- **bash 3.2+**, `ssh`, `scp`, `curl`, `lsof` for the engine. macOS ships all
+  of these; minimal Linux images (Alpine, slim Docker) sometimes lack `lsof` —
+  install it first.
+- **SSH key-based auth** to `logins.cels.anl.gov`. The engine refuses to
+  proceed (with exact instructions) if password auth is required.
+- **`jq`** — required for `update-models`; strongly recommended for `status`
+  (without it the model-count math is approximate and the `[m]erge`
+  config-handling option is unavailable for JSON files).
+- Optional: ANL VPN if your local network policy needs it off-site.
 
-**ANL compute node** (auto-handled by `server` mode):
-
-- Python 3.10+
-- `screen` or `tmux` (falls back to `nohup`)
+**ANL compute node** (auto-handled by server mode): Python 3.10+, and `screen`
+or `tmux` (falls back to `nohup`).
 
 ## Known limitations (please read)
 
-The script is the entry-point users see, so we surface the most
-common foot-guns here rather than make users hunt through
-[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md). That document remains
-the canonical reference with the full rationale + roadmap for each
-limitation; this section is the "if you only read one block, read
-this one" summary.
+The most common foot-guns are surfaced here; [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)
+is the canonical reference with full rationale and roadmap for each.
 
 ### Upstream stack
 
-- **Claude Code + `claude-opus-4-7`** ⚠️ — fails with "API returned
-  an empty or malformed response (HTTP 200)". Root cause is
-  Anthropic Vertex's per-model `thinking.type` validation + Claude
-  Code 2.1.x's SSE error-event parsing; not actionable at our
-  layer. **Workaround**: `claude --model claude-sonnet-4-6` (any
-  non-opus-4-7 model works), or persist via
-  `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `settings.json`.
-  Auto-default fix queued for v2.3.
-- **Vertex HTTP 500 on large non-streaming requests** — already
-  mitigated upstream by `argo-proxy` v3.x's
-  `anthropic_stream_mode: force` default. Just keep your on-node
-  `argo-proxy` up-to-date: `bash argo-anywhere.sh update argoproxy`
-  (lossless in-place upgrade since v2.2.1 per PLAN.md D-022; the
-  legacy `ssh -J ... 'argo-proxy update install'` recipe is still
-  documented in `help` as a manual fallback). No action needed in
-  normal use.
-
-Full diagnosis + STATUS tracking in
-[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Upstream stack:
-argo-proxy + AI CLI tools".
+- **Claude Code + `claude-opus-4-7`** ⚠️ — fails with "API returned an empty or
+  malformed response (HTTP 200)". Root cause is Anthropic Vertex's per-model
+  `thinking.type` validation plus Claude Code 2.1.x's SSE error-event parsing;
+  not actionable at our layer. **Workaround**: `claude --model
+  claude-sonnet-4-6`, or persist via `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in
+  `settings.json`. Auto-default fix queued for a later release.
+- **Vertex HTTP 500 on large non-streaming requests** — already mitigated
+  upstream by `argo-proxy` v3.x's `anthropic_stream_mode: force` default. Just
+  keep the on-node proxy current: `argo-anywhere update argoproxy`. No action
+  needed in normal use.
 
 ### Architectural
 
-- **Single-instance constraint**: one `argo-proxy` per user per
-  compute node; one SSH tunnel per local port. The script refuses
-  to overwrite someone else's argo-proxy and prompts on local
-  re-runs. See [Sharing a compute node with other
-  users](#sharing-a-compute-node-with-other-users).
-- **Load-balanced compute-node aliases can leak orphan argo-proxy
-  processes** across physical hosts. See the caveat under [Sharing
-  a compute node](#caveat-load-balanced-node-aliases-and-orphan-argo-proxies).
-- **Single-file distribution is intentional** (PLAN.md D-001). We
-  reject features that require breaking this — most notably a
-  local HTTP-shim layer for transport-level fixes (see
+- **Single-instance constraint** — one `argo-proxy` per user per compute node;
+  one SSH tunnel per local port. The engine refuses to overwrite someone else's
+  argo-proxy and prompts on local re-runs. See
+  [Sharing a compute node](#sharing-a-compute-node-with-other-users).
+- **Load-balanced compute-node aliases can leak orphan argo-proxy processes**
+  across physical hosts. See
+  [the caveat](#caveat-load-balanced-node-aliases-and-orphan-argo-proxies).
+- **The bash engine stays a single self-contained file** (D-001, engine-only
+  now). We reject engine features that require splitting it — most notably a
+  local HTTP-shim transport layer (see
   [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
-  Section 4 for the Phase-C rejection rationale).
+  Section 4).
 
 ### Operational
 
-- **No automated test suite, no CI** by design. Mocking real SSH +
-  real Duo + real `argo-proxy` on a real compute node is more
-  expensive than the value it delivers. The "tests" are smoke
-  checks documented inline and [`docs/TESTING.md`](docs/TESTING.md)
-  for end-to-end live verification.
-- **`bash 3.2+` target** (macOS default) limits us: no `mapfile`,
-  no `declare -A`, no `${var,,}`. Python heredocs absorb the
-  language gap when we need structured-data work.
+- **Two-layer testing.** The Python package (driver / CLI / web) has an
+  automated `pytest` suite that runs with no ANL infra. The bash engine keeps
+  live-only verification — mocking real SSH + Duo + argo-proxy on a real
+  compute node costs more than it delivers — so its "tests" are smoke checks
+  plus [`docs/TESTING.md`](docs/TESTING.md) for end-to-end live verification.
+- **`bash 3.2+` target** (macOS default) limits the engine: no `mapfile`, no
+  `declare -A`, no `${var,,}`. Inline Python heredocs absorb the gap for
+  structured-data work.
 
-## How `argo-anywhere.sh` is organised (subcommands)
+## Subcommands
+
+Everything below is an **engine verb**: run it as `argo-anywhere <verb>` and the
+package passes it through to the engine on your real terminal (full-fidelity Duo
+and prompts). The package-only verbs (`app`, `web`, `install-launcher`, `info`,
+`uninstall`, `--print-script`, `--version`) are in
+[Web UI and desktop app](#web-ui-and-desktop-app).
 
 | Subcommand | What it does |
 |:---|:---|
-| `client` (default) | Full laptop-side flow: install chosen CLI tool + write its config + tunnel + monitor. CLI tool selected via `--cli-tool <name>`; without it, the picker fires. |
-| `setup` | Same as `client` but ALWAYS shows the picker, even if `--cli-tool` is set. Useful for one-off installations of a different tool from your usual. |
-| `tunnel` | Same as `client` but does NOT install or configure any CLI tool; just brings up the tunnel + monitor. Useful for power users managing their own configs or keeping a tunnel alive while configuring multiple tools. |
-| `connect` | Bring up the **shared channel** (SSH tunnel + remote argo-proxy) and hold it in the foreground monitor. The friendlier name for `tunnel`. The channel is a client-agnostic local HTTP endpoint — run `connect` in one window, then use `configure` / `run` in other windows against it. |
-| `configure TOOL...` | Install + write config for **one or more** CLI tools against an **existing** channel, e.g. `configure opencode aider`. Detects the channel via `/health` and fails with a hint if none is up; pass `--ensure` to bring it up. Does not block (the channel belongs to the `connect` window). The three-level split of `client`. |
-| `run TOOL` | Configure **one** CLI tool then launch it, e.g. `run aider`. Brings the channel up if missing (prompts; `--ensure` / `-y` auto-confirm). Equivalent to `configure TOOL` + running the tool. |
-| `server` | Auto-invoked on the ANL compute node by `client`. Also a documented standalone workflow ("leave a proxy on this node for any client to reach"). |
-| `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL). Surfaces cross-client port-coherence disagreements (D-021) as warnings without flipping the exit code. |
-| `update` | Lossless in-place upgrade of installed components (`argo-anywhere`, `argoproxy`, `opencode`, `claudecode`). `update argo-anywhere` self-updates the script itself (resolves the latest GitHub release tag and atomically replaces the canonical install at `~/.argo_anywhere/bin/argo-anywhere.sh`); other components hit their respective upstreams in place. `--all` updates everything; a positional component list (`update argoproxy opencode`) restricts the run; bare `update` lists the registry without acting. `--check` is report-only; `--yes` auto-confirms install prompts for missing components. After a successful `update argoproxy` the script auto-POSTs `/refresh` so the running proxy pulls fresh upstream models without a restart. The lossless complement to `--force-reinstall` (which wipes the venv). |
-| `update-models` | Refresh a client's in-config model list from the live `/v1/models`. Tool-aware via `--cli-tool` (default `opencode`). Only OpenCode enumerates models in config, so only `--cli-tool opencode` does real work; `--cli-tool claudecode`/`aider` print a "not applicable" note (those tools pick the model at runtime via `--model`) and point at `list-models`. |
-| `list-models` | Tabulate the models the proxy serves on `/v1/models` (read-only sibling of `update-models`). Columns: `internal_name`, `id`, `provider`, `modalities`, `configured`. Filters embeddings by default; cross-references the OpenCode config when present (`yes`/`no`/`orphan` per row). Pretty text by default; `--format tsv|json` and `--output FILE` for scripting. |
-| `stop` | Kill the local SSH tunnel. Does NOT touch the remote argo-proxy (see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Single-instance constraint" for why). |
-| `clean` | Remove every artifact this script created (local + remote, with risk-tiered prompts). |
-| `install` | Materialize the canonical install at `~/.argo_anywhere/bin/` (script + `install`/`uninstall` wrappers + PATH `env` helper) and stamp the install manifest. Auto-runs on the first `client`/`setup`; run explicitly to (re)install or preview with `--dry-run`. |
-| `uninstall` | Symmetric teardown. **Tier 1** (always): canonical install + state dir + the SSH tunnel we own. **Tier 2** (`--restore-configs`): restore client configs to their pre-argo-anywhere state via the install manifest (delete files we created; restore the original backup for files we modified). **Tier 3** (`--remove-binaries`): remove tool binaries **we** installed (manifest-gated; never touches ones you already had). **Tier 4** (`--remote`): points you at `clean --purge` for the compute-node venv. `--dry-run` previews; `-y` skips the top-level confirm. Never kills a channel it does not own. |
+| `client` (default) | Full laptop-side flow: install the chosen CLI tool + write its config + tunnel + monitor. Tool via `--cli-tool <name>`; without it, the picker fires. |
+| `setup` | Like `client` but ALWAYS shows the picker, even with `--cli-tool` set. Handy for a one-off install of a different tool. |
+| `tunnel` | Like `client` but installs/configures nothing — just brings up the tunnel + monitor. For power users managing their own configs. |
+| `connect` | Bring up the **shared channel** (SSH tunnel + remote argo-proxy) and hold it in the foreground monitor. The friendlier name for `tunnel`: run it in one window, then use `configure` / `run` in others. |
+| `configure TOOL...` | Install + write config for **one or more** tools against an **existing** channel (e.g. `configure opencode aider`). Detects the channel via `/health`; fails with a hint if none is up (or pass `--ensure`). Does not block. |
+| `run TOOL` | Configure **one** tool, then launch it (e.g. `run aider`). Brings the channel up if missing (prompts; `--ensure` / `-y` auto-confirm). |
+| `server` | Auto-invoked on the compute node by `client`. Also a standalone workflow ("leave a proxy on this node for any client to reach"). |
+| `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL). Reports cross-client port disagreements (D-021) as warnings without changing the exit code. |
+| `update` | Lossless in-place upgrade of installed components (`argoproxy`, `opencode`, `claudecode`). `--all` updates everything; a positional list restricts it; bare `update` lists the registry. `--check` is report-only; `--yes` auto-confirms install prompts. After `update argoproxy` it auto-POSTs `/refresh` so the proxy pulls fresh models without a restart. *(The package itself is upgraded with `pipx upgrade argo-anywhere`, not this verb — see the note below.)* |
+| `update-models` | Refresh a client's in-config model list from the live `/v1/models`. Tool-aware via `--cli-tool` (default `opencode`); only OpenCode enumerates models in config, so the others print a "not applicable" note and point at `list-models`. |
+| `list-models` | Tabulate the models the proxy serves on `/v1/models` (read-only). Columns: `internal_name`, `id`, `provider`, `modalities`, `configured`. `--format tsv|json` and `--output FILE` for scripting. |
+| `stop` | Kill the local SSH tunnel. Does NOT touch the remote argo-proxy (see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Single-instance constraint"). |
+| `clean` | Remove every artifact the engine created (local + remote, with risk-tiered prompts). |
 | `list-tools` | Print the registry of supported `--cli-tool` values. |
-| `help` | Long-form guide (paths, troubleshooting, customization). Keep open while learning prompts. |
+| `help` | Long-form guide (paths, troubleshooting, customization). The package appends a note on its own extra verbs. |
 
-Long help:
+> **`update` and the package.** Under the package, `argo-anywhere` upgrades
+> itself through `pipx upgrade argo-anywhere` (or `pip`); the engine's own
+> `update argo-anywhere` self-update is dormant and simply points you at pipx
+> (design decision D-030a). The other components (`argoproxy`, `opencode`,
+> `claudecode`) are upgraded by the `update` verb as usual.
+
+The engine also has `install` / `uninstall` verbs for the canonical `.sh`
+install, but under the package those are handled differently — see
+[Running the raw engine](#running-the-raw-engine-fork-mode). To remove the
+package itself, use `argo-anywhere uninstall` (which restores your configs) then
+`pipx uninstall argo-anywhere`.
+
+For the long help text:
 
 ```sh
-bash argo-anywhere.sh help | less
+argo-anywhere help | less
 ```
 
 ## What it writes where
 
-**Laptop:**
+The paths below assume the **package** install (the common case). Files under
+`~/.argo_anywhere/` are written only in engine (fork) mode — see the note after
+the tables and [Running the raw engine](#running-the-raw-engine-fork-mode).
+
+**Laptop (package mode):**
 
 | Path | Purpose |
 |:---|:---|
-| `~/.argo_anywhere/bin/argo-anywhere.sh` | **Canonical install** of the script itself (PATH-discoverable; created on first `client` / `setup` run; managed by `update argo-anywhere`). Moved under `bin/` in the lifecycle-commands work (was `~/.argo_anywhere/argo-anywhere.sh` per D-023; auto-migrated). |
-| `~/.argo_anywhere/bin/install`, `~/.argo_anywhere/bin/uninstall` | Thin wrappers -> `argo-anywhere.sh install` / `uninstall` (discoverability shims; single-file logic stays in the script). |
-| `~/.argo_anywhere/env` | Sourceable PATH helper (rustup/cargo style). Add `. "$HOME/.argo_anywhere/env"` to your shell rc to make `argo-anywhere.sh` (+ `install`/`uninstall`) callable as bare commands. |
-| `~/.argo_anywhere/manifest.json` | **Install manifest** (per D-025): records, at first touch, whether each client config pre-existed (so `uninstall --restore-configs` can restore originals) and which tool binaries this script installed (so `uninstall --remove-binaries` only removes ours). |
-| `~/.config/opencode/config.json` | OpenCode global config (only when running `--cli-tool opencode --scope global`, or the default global scope) |
-| `<git-root>/opencode.json` or `<cwd>/opencode.json` | OpenCode project-scope config (when running `--cli-tool opencode --scope project`) |
-| `~/.claude/settings.json` *or* `./.claude/settings.local.json` | Claude Code config (only when running the Claude Code flow); see [Claude Code config scope](#claude-code-config-scope-project-vs-global) |
-| `~/.aider.conf.yml` (+ `.aider.model.settings.yml`) *or* `<git-root>/.aider.conf.yml` | aider config (only when running the aider flow). The sibling `.aider.model.settings.yml` disables `temperature` for reasoning/opus/gpt-5 models (they return an empty stream otherwise). Global vs project per `--scope`. |
 | `~/.config/argo_anywhere/user` | Cached ANL username |
 | `~/.config/argo_anywhere/node` | Last-used compute node |
-| `~/.config/argo_anywhere/port` | Cached proxy port (new in v2.2; transport-layer state per D-020) |
-| `~/.config/argo_anywhere/ssh-fail-lock`, `~/.config/argo_anywhere/ssh-fail-lock-count` | SSH-failure-tracker state files (created only after lock fires); see [SSH failure protection](#ssh-failure-protection-cspo-defense) |
-| `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master socket (Duo prompts only fire once per session) |
+| `~/.config/argo_anywhere/port` | Cached proxy port (transport-layer state per D-020) |
+| `~/.config/argo_anywhere/manifest.json` | **Install manifest** (D-025): records, at first touch, whether each client config pre-existed (so `uninstall` can restore originals) and which tool binaries argo-anywhere installed (so it only removes its own) |
+| `~/.config/argo_anywhere/ssh-fail-lock`, `…-count` | SSH-failure-tracker state (created only after a lock fires); see [SSH failure protection](#ssh-failure-protection-cspo-defense) |
+| `~/.config/opencode/config.json` | OpenCode global config (global scope) |
+| `<git-root>/opencode.json` or `<cwd>/opencode.json` | OpenCode project-scope config |
+| `~/.claude/settings.json` *or* `./.claude/settings.local.json` | Claude Code config; see [Claude Code config scope](#claude-code-config-scope-project-vs-global) |
+| `~/.aider.conf.yml` (+ `.aider.model.settings.yml`) *or* `<git-root>/.aider.conf.yml` | aider config; the sibling settings file disables `temperature` for reasoning/opus/gpt-5 models |
+| `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master socket (Duo fires once per session) |
+| `~/Desktop/argo-anywhere.command`, `~/Applications/argo-anywhere.app` (macOS) | Launchers, only if you ran `install-launcher` |
 
-> **Note (since v2.2.1)**: the first time you run `client` or
-> `setup`, the script auto-creates `~/.argo_anywhere/` and copies
-> itself there as the canonical install (rustup/cargo style PATH
-> directory). It then prints one-shot instructions for adding the
-> `env` file to your shell rc. After that, `argo-anywhere.sh` is
-> callable as a bare command from any directory, and
-> `update argo-anywhere` keeps it fresh. Opt out with
-> `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`. See PLAN.md D-023 for the
-> design.
-
-**ANL compute node** (after first run):
+**ANL compute node (after first run):**
 
 | Path | Purpose |
 |:---|:---|
-| `~/.argo-anywhere.sh` | Pushed copy of this script |
-| `~/.argo_anywhere.server.log` | Server-mode bootstrap log |
+| `~/.argo-anywhere.sh` | Pushed copy of the engine |
+| `~/.argo-anywhere.server.log` | Server-mode bootstrap log |
 | `~/argovenv/` | Python venv with argo-proxy installed |
-| `~/.config/argoproxy/config.yaml` | argo-proxy config (port + user; preserves any other keys you've added like `argo_base_url`, `anthropic_stream_mode`) |
+| `~/.config/argoproxy/config.yaml` | argo-proxy config (port + user; preserves any other keys you've added, e.g. `argo_base_url`, `anthropic_stream_mode`) |
 
-See [`examples/`](./examples/) for sanitized templates of both
-configs (laptop OpenCode + compute-node argo-proxy). The full
-inventory of where prompt + identity data may persist (with
-sensitivity classifications) lives in
-[`docs/SECURITY.md`](docs/SECURITY.md) "What gets logged where".
+> **Package vs. engine mode.** Under the package, argo-anywhere does **not**
+> create a `~/.argo_anywhere/` canonical install — the package (pipx/pip) *is*
+> the install (D-030a). If you instead run a forked engine `.sh` directly, it
+> bootstraps a rustup-style canonical install at `~/.argo_anywhere/bin/` on
+> first use; that path is covered in
+> [Running the raw engine](#running-the-raw-engine-fork-mode).
+
+See [`examples/`](./examples/) for sanitized config templates. The full
+inventory of where prompt + identity data may persist (with sensitivity
+classifications) is in [`docs/SECURITY.md`](docs/SECURITY.md) "What gets logged
+where".
+
+## Running the raw engine (fork mode)
+
+The package is the supported way to install and run argo-anywhere. But because
+the engine is a single self-contained `.sh`, you can also inspect it, audit it,
+or run it without the package — the D-026/D-027 escape hatch:
+
+```sh
+argo-anywhere --print-script > argo-anywhere.sh   # emit the engine verbatim
+bash argo-anywhere.sh --cli-tool opencode client  # run it directly
+```
+
+When you run a forked engine `.sh` directly (rather than through the package),
+its **self-management machinery is active** — the parts the package deliberately
+keeps dormant:
+
+- On first `client` / `setup`, the engine **bootstraps a canonical install** at
+  `~/.argo_anywhere/bin/` (a rustup/cargo-style PATH directory holding the
+  script, `install` / `uninstall` wrappers, and a sourceable `env` helper), then
+  prints one-shot instructions for adding `env` to your shell rc. Opt out with
+  `ARGO_ANYWHERE_SKIP_BOOTSTRAP=1`.
+- `argo-anywhere.sh install` materializes that canonical install explicitly;
+  `argo-anywhere.sh uninstall` tears it down (tiered, manifest-driven config
+  restore).
+- `argo-anywhere.sh update argo-anywhere` self-updates the canonical copy from
+  the latest GitHub release tag.
+
+Under the package these three become no-ops that point you at `pipx` instead
+(D-030a), because pipx already owns the runtime and a second self-updating copy
+would drift from it (D-029). Forks predate the marker, so they behave exactly as
+the pre-v3 `.sh` did. See [PLAN.md](PLAN.md) decisions D-023, D-025, D-029,
+D-030 for the full design.
 
 ## MFA / Duo handling
 
-ANL CELS hosts use Duo. The script defaults to MFA-aware mode using
-SSH `ControlMaster` connection multiplexing — **one Duo prompt per
-session**, not per SSH call. The mux master is opened against the
-chosen compute node (not the jump host, which on CELS is
-shell-restricted: `logins.cels.anl.gov` rejects all command
-execution, so we can't open the master there).
+ANL CELS hosts use Duo. The engine defaults to MFA-aware mode using SSH
+`ControlMaster` connection multiplexing — **one Duo prompt per session**, not
+per SSH call. The mux master is opened against the chosen compute node, not the
+jump host (`logins.cels.anl.gov` is shell-restricted and rejects command
+execution, so the master can't live there).
 
-Socket paths use literal `%r-%h-%p` tokens (user-host-port) rather
-than `%C` (the OpenSSH hash); `%C` proved fragile when
-`~/.ssh/config` rewrites jump-host names, producing two different
-socket paths for what was logically the same connection. See
-[`AGENTS.md`](AGENTS.md) "MFA-aware by default" for the full
-rationale.
+Socket paths use literal `%r-%h-%p` tokens (user-host-port) rather than `%C`
+(the OpenSSH hash); `%C` proved fragile when `~/.ssh/config` rewrites jump-host
+names, producing two different socket paths for one logical connection. See
+[`AGENTS.md`](AGENTS.md) "MFA-aware by default" for the full rationale.
 
-To turn this off for non-Duo hosts: `--no-mfa` or
-`ARGO_ANYWHERE_NO_MFA=1`.
+Turn this off for non-Duo hosts with `--no-mfa` or `ARGO_ANYWHERE_NO_MFA=1`.
 
 ## Running on a compute node
 
-The default `client` flow assumes you are running the script from a
-laptop *outside* the ANL network. If the script detects it is itself
-running on an ANL compute node (the FQDN ends in `.cels.anl.gov`),
-it adjusts:
+The default `client` flow assumes you run from a laptop *outside* the ANL
+network. If the engine detects it is itself running on an ANL compute node (the
+FQDN ends in `.cels.anl.gov`), it adjusts:
 
-- `--no-jump` and `--no-mfa` are auto-defaulted on (intra-site SSH
-  needs neither).
-- If the picked node is the local host, the SSH tunnel is **skipped
-  entirely**: `client` invokes the server-mode bootstrap inline and
-  the local CLI-tool config is pointed at `http://localhost:<port>/v1`
-  directly. argo-proxy keeps running under `screen`/`tmux`/`nohup`
-  after `client` returns; use `clean` to stop it.
+- `--no-jump` and `--no-mfa` are auto-enabled (intra-site SSH needs neither).
+- If the picked node is the local host, the SSH tunnel is **skipped entirely**:
+  `client` invokes the server-mode bootstrap inline and points the local tool
+  config at `http://localhost:<port>/v1` directly. argo-proxy keeps running
+  under `screen`/`tmux`/`nohup` after `client` returns; use `clean` to stop it.
 
 Override either default with `ARGO_ANYWHERE_NO_JUMP=0` or
 `ARGO_ANYWHERE_NO_MFA=0` if your setup needs the slow path.
 
-If you only want to leave argo-proxy running on a node (no client
-install, no tunnel), use `server` directly:
+To leave argo-proxy running on a node with no client install or tunnel, use
+`server` directly. Note the node won't have the package installed — run the
+pushed engine copy there:
 
 ```sh
 ssh <user>@compute-XX.cels.anl.gov
-bash argo-anywhere.sh server   # starts argo-proxy under screen, returns
+bash ~/.argo-anywhere.sh server   # starts argo-proxy under screen, then returns
 ```
 
-Other clients on other machines can then point at this proxy via
-their own SSH `-L` forward, or via
-`bash argo-anywhere.sh --cli-tool <name> client --node compute-XX`
-from those machines.
+Other machines can then reach that proxy via their own SSH `-L` forward, or via
+`argo-anywhere --cli-tool <name> client --node compute-XX` from those machines.
 
 ## Sharing a compute node with other users
 
-Each user runs their own argo-proxy instance on the compute node —
-the proxy is per-user, listening on `127.0.0.1:<port>`, and your
-config + auth travel with it. Two users **can** share a compute
-node, but they cannot share the same port: whoever binds first
-wins, and the other gets refused. The single-instance constraint
-(one argo-proxy per user per node) is documented in
+Each user runs their own argo-proxy on the node — it is per-user, listening on
+`127.0.0.1:<port>`, with your config and auth traveling with it. Two users can
+share a node but not a port: whoever binds first wins, and the other is refused.
+The single-instance constraint is documented in
 [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 
-To handle this gracefully, the script:
+To handle this gracefully, the engine:
 
-- **Detects port collisions before bootstrap.** Before `client` SSH's
-  into the node to start argo-proxy, it probes `127.0.0.1:<port>`
-  on the node and identifies the owner. If it's you, the script
-  reuses AFTER positively verifying identity (v2.0 H5 fix:
-  `cfg_user` must EQUAL `want_user`, not just "not be different");
-  if it's someone else, you're prompted:
+- **Detects port collisions before bootstrap.** Before SSHing in to start
+  argo-proxy, it probes `127.0.0.1:<port>` on the node and identifies the owner.
+  If it's you, it reuses the proxy *after positively verifying identity*
+  (`cfg_user` must equal `want_user`); if it's someone else, you're prompted:
 
   ```text
   [warn] Port 64742 on compute-01 is in use by another user
@@ -504,62 +508,48 @@ To handle this gracefully, the script:
     Your choice [n/p/r/a, default=n]:
   ```
 
-- **`--auto-port`** (or `ARGO_ANYWHERE_AUTO_PORT=1`) skips the
-  prompt and auto-picks the next free port. After picking, the
-  port-cache-migration prompt fires so you can choose to make the
-  new port sticky (recommended) or use it for one run only.
-
-- **`--port-range LO-HI`** overrides the default search range
-  (defaults to `64742`-`64842`). Use it if your environment
-  reserves a different range for ad-hoc services. The remote
-  port-scan range is clamped to ≤200 ports per call (v2.0 H4 fix)
-  regardless of how wide the requested range is.
-
-- **Local self-collision** (you re-run `client` while a tunnel is
-  already up from a previous invocation): the script detects the
-  existing healthy tunnel and reuses it instead of erroring, then
-  proceeds to client setup. This makes "I want to add another tool
-  to my running tunnel" a natural workflow.
+- **`--auto-port`** (or `ARGO_ANYWHERE_AUTO_PORT=1`) skips the prompt and picks
+  the next free port; the port-cache-migration prompt then lets you make it
+  sticky or one-shot.
+- **`--port-range LO-HI`** overrides the default search range (`64742`–`64842`).
+  The remote scan is clamped to ≤200 ports per call regardless of the requested
+  width.
+- **Local self-collision** — re-running `client` while your own tunnel is
+  already up: the engine detects the healthy tunnel and reuses it, then proceeds
+  to client setup. This makes "add another tool to my running tunnel" a natural
+  workflow.
 
 ### Caveat: load-balanced node aliases and orphan argo-proxies
 
-The user-facing names in `ANL_NODES` (`compute-01.cels.anl.gov`,
-etc.) are **DNS aliases** that CELS resolves internally to one of
-several physical hosts (`compute-XXX-Y`). Two consequences worth
-knowing:
+The user-facing node names (`compute-01.cels.anl.gov`, etc.) are **DNS aliases**
+that CELS resolves to one of several physical hosts (`compute-XXX-Y`). Two
+consequences:
 
-- **Successive `client` runs may land on different physical hosts.**
-  If today's run picks `compute-01` and lands on `compute-386-01`,
-  and tomorrow's run on the same `compute-01` lands on
-  `compute-742-03`, yesterday's argo-proxy keeps running on
-  `compute-386-01` — orphaned but harmless. Over time these
-  accumulate. The script can't reliably clean them up because it
+- **Successive runs may land on different physical hosts.** If today's
+  `compute-01` resolves to `compute-386-01` and tomorrow's to `compute-742-03`,
+  yesterday's argo-proxy keeps running on `compute-386-01` — orphaned but
+  harmless. These accumulate; the engine can't reliably clean them up because it
   doesn't know the alias-to-physical mapping.
-
-- **Periodic manual cleanup is the recommended mitigation.** From a
-  shell on whichever physical host you happen to be on:
+- **Periodic manual cleanup is the mitigation.** From a shell on the physical
+  host you're on:
 
   ```sh
   ssh <user>@<physical-host> 'pkill -u <user> -f "argo-proxy serve"'
   ```
 
-  Or simply `bash argo-anywhere.sh clean` whenever you've
-  definitively finished with a node — that handles the current
-  physical host's argo-proxy via the screen session. Orphans on
-  other physical hosts remain.
-
-- **The on-node short-circuit** (running `client` directly on a
-  compute node) recognizes load-balanced aliases by resolving the
-  picked hostname to its IPs and intersecting with the local
-  interface IPs — so picking `compute-01` while logged into
-  `compute-386-01` (where the alias includes you) correctly skips
-  the SSH tunnel.
+  Or `argo-anywhere clean` when you're done with a node — that handles the
+  current physical host's argo-proxy via its screen session. Orphans on other
+  physical hosts remain.
+- **The on-node short-circuit** recognizes load-balanced aliases by resolving
+  the picked hostname to its IPs and intersecting with the local interface IPs —
+  so picking `compute-01` while logged into `compute-386-01` (which the alias
+  includes) correctly skips the SSH tunnel.
 
 ## Claude Code config scope (project vs. global)
 
-Claude Code reads its config from up to three files (more-specific
-wins, but the `env` block is **replaced** wholesale across scopes —
-Anthropic chose not to deep-merge it):
+Claude Code reads its config from up to three files (more-specific wins, but the
+`env` block is *replaced* wholesale across scopes — Anthropic chose not to
+deep-merge it):
 
 | File | Scope |
 |:---|:---|
@@ -567,191 +557,130 @@ Anthropic chose not to deep-merge it):
 | `./.claude/settings.json` | per-project, **committed** (visible to collaborators) |
 | `./.claude/settings.local.json` | per-project, **gitignored** by default |
 
-The script writes EITHER the global file OR the project-local file
-(never the committed file — that would force your collaborators to
-also use this proxy). Since v2.2 the default policy is **hybrid**
-(per PLAN.md decision D-017): the script picks project or global
-based on the safety risk in each situation. Checked in this order:
+argo-anywhere writes EITHER the global file OR the project-local file — never the
+committed file (which would force collaborators onto your proxy). Since v2.2 the
+default is **hybrid** (design decision D-017), chosen in this order:
 
-1. **`--scope project|global` flag (or `ARGO_ANYWHERE_SCOPE` env;
-   `CLAUDECODE_SCOPE` deprecated but still honored with a one-time
-   WARN)** — explicit override wins. No conflict detection is
-   silenced; you'll still be prompted `[k]eep / [s]witch / [a]bort`
-   if the chosen scope would shadow an existing config or OAuth
-   state.
-2. **`~/.claude.json` exists** — Claude Code's auth state file,
-   created by `claude auth login`. Its presence means you have a
-   personal Anthropic subscription. Writing `ANTHROPIC_AUTH_TOKEN`
-   to the global `~/.claude/settings.json` would shadow your OAuth
-   token and break all non-proxy Claude Code usage → **project
-   scope automatically** (safety wins).
-3. **`~/.claude/settings.json` already has an `env` block** — you
-   (or another tool) put env vars in the global file; clobbering
-   it would silently remove them → **project scope automatically**
-   (safety wins).
-4. **None of the above** → **global scope** (changed in v2.2; was
-   project pre-v2.2). The new default is more convenient for fresh
-   installs (no per-directory `claude` invocation requirement) and
-   has no OAuth-precedence risk because there's no `~/.claude.json`
-   to be shadowed. If you later run `claude auth login`, the next
-   `client` invocation hits branch 2 and switches to project scope
-   automatically; the user is informed via the `[k/s/a]` prompt.
+1. **`--scope project|global`** (or `ARGO_ANYWHERE_SCOPE`; the old
+   `CLAUDECODE_SCOPE` is deprecated but honored with a one-time WARN) — explicit
+   override wins. Conflict detection still fires: you're prompted
+   `[k]eep / [s]witch / [a]bort` if the chosen scope would shadow an existing
+   config or OAuth state.
+2. **`~/.claude.json` exists** — Claude Code's auth-state file, meaning you have
+   a personal Anthropic subscription. Writing `ANTHROPIC_AUTH_TOKEN` to the
+   global file would shadow your OAuth token and break non-proxy usage →
+   **project scope automatically** (safety wins).
+3. **`~/.claude/settings.json` already has an `env` block** — clobbering it would
+   silently drop those vars → **project scope automatically**.
+4. **None of the above** → **global scope** (convenient for fresh installs; no
+   OAuth-precedence risk without a `~/.claude.json`). If you later run
+   `claude auth login`, the next run hits branch 2 and switches to project scope,
+   informing you via the `[k/s/a]` prompt.
 
-This **revises the pre-v2.2 "always project" default** (formerly
-audit recommendation H6, closed by D-017's revised policy). The
-v2.0 / v2.1 default was strictly safer but penalized the common
-case (fresh Claude Code install with no OAuth subscription); the
-v2.2 hybrid restores convenience for that case while preserving
-all of v2.0's safety guarantees for users with OAuth state.
+This revises the pre-v2.2 "always project" default (audit recommendation H6,
+closed by D-017): strictly safer, but it penalized the common fresh-install
+case; the hybrid restores convenience while preserving the safety guarantees for
+users with OAuth state.
 
 To force one or the other:
 
 ```sh
-bash argo-anywhere.sh --cli-tool claudecode client --scope global
-bash argo-anywhere.sh --cli-tool claudecode client --scope project
+argo-anywhere --cli-tool claudecode client --scope global
+argo-anywhere --cli-tool claudecode client --scope project
 ```
 
-When the script writes the project scope, **you must run `claude`
-from that same directory** to pick up the settings. The script
-prints which directory at the end of the setup step.
+When the project scope is written, **run `claude` from that same directory** to
+pick it up; the engine prints which directory at the end of setup. If you opt
+into `--scope global` *after* `~/.claude.json` exists, do NOT run
+`claude auth login` from that machine — the OAuth precedence rule will silently
+neutralize the proxy config. The conflict-detection prompt warns you about this.
 
-If you opt back into `--scope global` AFTER `~/.claude.json`
-exists, accept that you must NOT run `claude auth login` from that
-machine — the OAuth precedence rule will silently neutralize the
-proxy config the moment you do. The conflict-detection prompt
-(branch 1 above) warns you about this.
+argo-anywhere always preserves non-Argo keys in the target `env` block (and the
+file's other top-level keys: `model`, `permissions`, `hooks`, …). It owns only
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. After writing, it prints a
+privacy reminder that the config now contains your ANL username (used as the
+bearer token) and should be gitignored if `~/.claude/` is in a dotfiles repo.
+See [`docs/SECURITY.md`](docs/SECURITY.md) for the full privacy posture.
 
-The script always preserves any non-Anthropic-Argo keys in the
-target file's `env` block (and the file's other top-level keys:
-`model`, `permissions`, `hooks`, etc.). It only owns
-`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. After writing, the
-script also prints a privacy warning (v2.0 H7 fix) reminding you
-that the config now contains your ANL username (used as the bearer
-token) and that the file should be gitignored if your `~/.claude/`
-is tracked in a dotfiles repo. See
-[`docs/SECURITY.md`](docs/SECURITY.md) for the full privacy posture.
+## Port policy
 
-> **v2.3 preview**: SH-01 (queued from the argo-shim comparative
-> audit) replaces the ANL-username-as-token with a randomly
-> generated per-session token via `apiKeyHelper`. The H7 privacy
-> warning becomes obsolete at that point. See
-> [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
-> Section 7 (STATUS tracker).
-
-## Port policy (v2.2 port-as-state + cross-client coherence)
-
-Pre-v2.2, the port was derived from the OpenCode config's `baseURL`.
-v2.2 promotes the port to **transport-layer state** owned by the
-script itself (PLAN.md decision D-020): the source of truth is now
-`~/.config/argo_anywhere/port`. Per-tool config files (OpenCode
-`baseURL`, Claude Code `ANTHROPIC_BASE_URL`) are downstream
-renderings of that state. Closes audit finding M4
-("port resolution is OpenCode-specific in a multi-client world").
+Pre-v2.2 the port was derived from the OpenCode config's `baseURL`. v2.2
+promotes the port to **transport-layer state** owned by the engine (design
+decision D-020): the source of truth is `~/.config/argo_anywhere/port`, and each
+tool's config (`baseURL`, `ANTHROPIC_BASE_URL`) is a downstream rendering. This
+closed audit finding M4 ("port resolution is OpenCode-specific in a multi-client
+world").
 
 Resolution precedence:
 
 1. `--port N` flag (one-shot override)
 2. `ARGO_ANYWHERE_PORT` env var (one-shot override)
-3. `~/.config/argo_anywhere/port` cache (the new source of truth)
-4. One-shot first-run migration from any existing client config
-   that has a baseURL (Cases 1 / 2 / 3 per D-020)
+3. `~/.config/argo_anywhere/port` cache (the source of truth)
+4. First-run migration from an existing client config's baseURL
 5. Built-in default `64742`
 
-The cache is **write-through**: any time the script resolves a port
-via something other than the cache (e.g. you passed `--port`), the
-new value is written back so subsequent runs use it.
+The cache is **write-through**: resolving a port via anything other than the
+cache writes the new value back, so subsequent runs use it.
 
-**Cross-client coherence (D-021)** sits on top: `status` passively
-reports when any installed client config disagrees with the
-resolved port, and `client` proactively prompts to resolve the
-disagreement at startup. Default port is **64742**.
-
-To override for one run:
+**Cross-client coherence (D-021)** sits on top: `status` passively reports when
+an installed client config disagrees with the resolved port, and `client`
+proactively prompts to reconcile at startup:
 
 ```sh
-bash argo-anywhere.sh --port 64999 --cli-tool opencode client
+argo-anywhere --port 64999 --cli-tool opencode client
 # Prompts whether to:
 #   [m] migrate config to port 64999 (writes config file),
-#   [u] use 64999 for THIS run only (config keeps current port),
+#   [u] use 64999 for THIS run only (config keeps its port),
 #   [k] keep config's port (use it instead),
 #   [a] abort.
 ```
 
-For non-`client` subcommands, a port mismatch prints a warning but
-doesn't prompt (e.g. `bash argo-anywhere.sh --port 1234 status`
-warns and runs against `:1234` instead of the resolved port).
-
-`status` will also surface multi-config disagreement non-fatally:
-
-```text
-[warn] Cross-client port disagreement detected (D-021):
-[warn]   Resolved port (cache / CLI / env / default): 64742
-[warn]   Disagreeing client config(s):
-[warn]     claudecode global 64999 /Users/.../.claude/settings.json
-[warn]   Run 'argo-anywhere.sh client' to canonicalize via the [m/u/k/a] prompt.
-```
-
-(The exit code is unchanged by this — `status` is a pure health
-check; disagreement is informational.)
+Non-`client` subcommands warn on a mismatch but don't prompt (e.g.
+`argo-anywhere --port 1234 status` warns and runs against `:1234`). `status`
+reports multi-config disagreement non-fatally (the exit code is unchanged — it's
+a pure health check).
 
 ## Tunnel monitoring and reconnect
 
 While `client` is in the foreground, a background loop polls
-`http://localhost:<port>/health` every 15s and notifies you on
-sustained failure. If the foreground SSH process exits but
-`/health` still responds (common on macOS, where the multiplex
-master takes over the forward and the foreground client exits
-immediately), the script recognizes this as the no-op it is and
-stays quiet — the master keeps the tunnel alive on its own.
+`http://localhost:<port>/health` every 15s and notifies you on sustained
+failure. If the foreground SSH process exits but `/health` still responds
+(common on macOS, where the multiplex master takes over the forward and the
+foreground client exits immediately), the engine recognizes the no-op and stays
+quiet — the master keeps the tunnel alive.
 
-If a real reconnect IS needed and the mux master is still alive,
-the script attempts a silent reconnect (no Duo prompt). If
-reconnects fire too rapidly (≥3 within 60s — typically a sign of a
-flapping network or an OpenSSH quirk the script can't paper over),
-the script escalates: pauses 5 minutes after each burst event, and
-**gives up after 3 burst events** (~9 attempts spread over ~30
-minutes of degraded operation). At that point the script notifies
-you and the loop exits; the SSH multiplex master remains alive,
-holding whatever forward it had. You decide when to re-run
-`client`.
+If a real reconnect is needed and the mux master is still alive, the engine
+attempts a silent reconnect (no Duo). If reconnects fire too rapidly (≥3 within
+60s — typically a flapping network), it escalates: pauses 5 minutes after each
+burst, and **gives up after 3 bursts** (~9 attempts over ~30 minutes). It then
+notifies you and exits the loop; the mux master stays alive holding its forward,
+and you decide when to re-run `client`.
 
-This burst-cap escalation was added in v2.0 (audit finding C7) to
-prevent CSPO IP blocks from sustained reconnect loops; see
-[SSH failure protection](#ssh-failure-protection-cspo-defense) for
-the full CSPO defense and [`docs/SECURITY.md`](docs/SECURITY.md)
-for the broader threat-model context.
+This burst-cap escalation (audit finding C7) prevents CSPO IP blocks from
+sustained reconnect loops; see [SSH failure protection](#ssh-failure-protection-cspo-defense)
+and [`docs/SECURITY.md`](docs/SECURITY.md) for the threat-model context.
 
 ## SSH failure protection (CSPO defense)
 
-ANL/CELS networks are monitored for repeated failed SSH
-authentications; too many failures from one IP trigger a CSPO
-(Cyber Security Program Office) block on that IP. On a shared
-compute node where many users share the same outbound IP, one
+ANL/CELS networks are monitored for repeated failed SSH authentications; too
+many failures from one IP trigger a CSPO (Cyber Security Program Office) block on
+that IP. On a shared compute node where many users share one outbound IP, one
 user's broken SSH agent can lock out everyone.
 
-The script defends against this with three layered mechanisms
-(PLAN.md decision D-012):
+The engine defends against this with three layered mechanisms (design decision
+D-012):
 
-1. **Persistent on-disk failure lock**. After 3 consecutive SSH
-   authentication failures, the script writes
-   `~/.config/argo_anywhere/ssh-fail-lock` and refuses all further
-   SSH attempts. The lock persists across script restarts so
-   re-running immediately doesn't silently accumulate more
-   failures. First lock TTL: 30 minutes.
-
-2. **Exponential backoff on repeat lock events**. Each successive
-   lock doubles the TTL (30min → 60min → 120min → ... capped at
-   24h). The lock-event count persists to
-   `~/.config/argo_anywhere/ssh-fail-lock-count`. A successful SSH
-   attempt clears both files, returning you to fresh state — so
-   well-behaved users are never permanently penalized.
-
-3. **Wide tracker scope**. Every authenticating SSH call goes
-   through the tracker: `ssh_reachable`, `ssh_mux_open`, the `scp`
-   + bootstrap `ssh` in `remote_bootstrap`,
-   `find_next_free_remote_port`, `probe_remote_port_owner`, the
-   clean-mode `ssh`, AND (as of v2.0 audit C7) the reconnect path
-   in `monitor_tunnel_loop`.
+1. **Persistent on-disk failure lock.** After 3 consecutive SSH auth failures,
+   the engine writes `~/.config/argo_anywhere/ssh-fail-lock` and refuses further
+   SSH attempts. The lock survives restarts, so re-running immediately doesn't
+   silently accumulate more failures. First lock TTL: 30 minutes.
+2. **Exponential backoff on repeat locks.** Each successive lock doubles the TTL
+   (30m → 60m → 120m → … capped at 24h), tracked in `ssh-fail-lock-count`. A
+   successful SSH clears both files, so well-behaved users are never permanently
+   penalized.
+3. **Wide tracker scope.** Every authenticating SSH call goes through the
+   tracker — reachability check, mux open, the `scp` + bootstrap ssh, port
+   probing, the clean-mode ssh, and the reconnect path in the monitor loop.
 
 Sample lock message:
 
@@ -775,184 +704,158 @@ Sample lock message:
 [err ]      (one Duo prompt is fine; what we want is a clean exit.)
 [err ]   2. If that fails, fix your auth (ssh-add, reconnect agent forwarding,
 [err ]      renew tickets, correct the username, etc.).
-[err ]   3. Re-run the script -- the lock will have expired by then, or
-[err ]      delete it immediately.
+[err ]   3. Re-run -- the lock will have expired by then, or delete it immediately.
 ```
 
-**Recovery** is what the message says: verify SSH manually, fix
-whatever's broken, then either wait for the lock to expire or
-`rm ~/.config/argo_anywhere/ssh-fail-lock` to clear it immediately.
-
-The comparative audit
-([`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md))
-notes that `argo-shim`'s in-memory-only SSH failure tracker is
-strictly weaker (resets on restart; circumventable). D-012 is the
-right model.
+**Recovery** is what the message says: verify SSH manually, fix what's broken,
+then wait for the lock to expire or `rm ~/.config/argo_anywhere/ssh-fail-lock`
+to clear it immediately.
 
 ## Common operations
 
 ```sh
-# Check what's happening (includes D-021 cross-client coherence report)
-bash argo-anywhere.sh status
+# Check what's happening (includes the D-021 cross-client coherence report)
+argo-anywhere status
 
 # See the full /v1/models list (raw JSON dump)
-ARGO_ANYWHERE_SHOW_MODELS=1 bash argo-anywhere.sh status
+ARGO_ANYWHERE_SHOW_MODELS=1 argo-anywhere status
 
 # Tabulate served models (read-only; cross-references the OpenCode config)
-bash argo-anywhere.sh list-models                              # pretty text table
-bash argo-anywhere.sh list-models --include-embeddings         # include embedding rows
-bash argo-anywhere.sh list-models --format tsv > models.tsv    # script-friendly
-bash argo-anywhere.sh list-models --format json | jq '.[] | select(.provider=="claude")'
+argo-anywhere list-models                              # pretty text table
+argo-anywhere list-models --include-embeddings         # include embedding rows
+argo-anywhere list-models --format tsv > models.tsv    # script-friendly
+argo-anywhere list-models --format json | jq '.[] | select(.provider=="claude")'
 
 # Refresh the OpenCode model list from the live proxy
-bash argo-anywhere.sh update-models                  # interactive: prompts per-orphan
-bash argo-anywhere.sh update-models --keep-orphans   # add new; keep all stale entries
-bash argo-anywhere.sh update-models --drop-orphans   # add new; drop all stale entries
+argo-anywhere update-models                  # interactive: prompts per orphan
+argo-anywhere update-models --keep-orphans   # add new; keep stale entries
+argo-anywhere update-models --drop-orphans   # add new; drop stale entries
 
 # Upgrade installed components in place (lossless; preserves configs + venv)
-bash argo-anywhere.sh update --all                   # update argo-anywhere + argoproxy + opencode + claudecode
-bash argo-anywhere.sh update argo-anywhere           # self-update the script (canonical install at ~/.argo_anywhere/)
-bash argo-anywhere.sh update argoproxy               # just the on-node argo-proxy (+ auto /refresh)
-bash argo-anywhere.sh update opencode claudecode     # explicit list
-bash argo-anywhere.sh update --check --all           # report-only: show installed vs latest
-bash argo-anywhere.sh update                         # no args: list registry without acting
+argo-anywhere update --all                   # argoproxy + opencode + claudecode
+argo-anywhere update argoproxy               # just the on-node proxy (+ auto /refresh)
+argo-anywhere update --check --all           # report-only: installed vs latest
+# (the package itself: pipx upgrade argo-anywhere)
 
 # Tear down only the local tunnel (remote argo-proxy survives)
-bash argo-anywhere.sh stop
+argo-anywhere stop
 
-# Remove everything this script created (preview first)
-bash argo-anywhere.sh clean --dry-run                # safe enumeration; no changes
-bash argo-anywhere.sh clean                          # interactive (per-file prompts for risky items)
-bash argo-anywhere.sh clean -y                       # non-interactive; deletes safe items, KEEPS risky configs
-bash argo-anywhere.sh clean -y --purge-backups       # also drop accumulated .bak.* files
-bash argo-anywhere.sh clean -y --purge               # delete EVERYTHING, including configs
+# Remove everything the engine created (preview first)
+argo-anywhere clean --dry-run                # safe enumeration; no changes
+argo-anywhere clean                          # interactive (per-file prompts for risky items)
+argo-anywhere clean -y                       # non-interactive; deletes safe items, KEEPS configs
+argo-anywhere clean -y --purge-backups       # also drop accumulated .bak.* files
+argo-anywhere clean -y --purge               # delete EVERYTHING, including configs
 ```
 
 `clean` separates artifacts into three risk tiers:
 
-- **safe** (state dir incl. port cache, mux sockets, our SSH
-  tunnel, the remote venv) — removed on confirmation.
-- **risky** (`~/.config/opencode/config.json`,
-  `~/.config/argoproxy/config.yaml`, and their `.bak.*` files) —
-  per-file `[k]eep / [r]estore-from-backup / [d]elete /
-  [b]ackups-only` prompt, or `--purge` / `--purge-backups` for the
+- **safe** (state dir incl. port cache, mux sockets, our SSH tunnel, the remote
+  venv) — removed on confirmation.
+- **risky** (`~/.config/opencode/config.json`, `~/.config/argoproxy/config.yaml`,
+  and their `.bak.*` files) — per-file `[k]eep / [r]estore-from-backup /
+  [d]elete / [b]ackups-only` prompt, or `--purge` / `--purge-backups` for the
   non-interactive paths.
-- **never touched** — the OpenCode binary, the script itself,
-  system tools.
+- **never touched** — tool binaries, the engine itself, system tools.
 
-For the full troubleshooting guide (env vars, security notes,
-escape hatches), run `bash argo-anywhere.sh help`.
+To remove **argo-anywhere the package** (as opposed to a channel's artifacts),
+use `argo-anywhere uninstall` (restores your client configs via the manifest,
+sweeps the launchers) then `pipx uninstall argo-anywhere`.
+
+For the full troubleshooting guide (env vars, security notes, escape hatches),
+run `argo-anywhere help`.
 
 ## Where to read more
 
 | Doc | When to read |
 |:----|:-------------|
-| [`docs/UPGRADING.md`](docs/UPGRADING.md) | You're upgrading from `argo_opencode.sh` v1.x or from an earlier v2.x release; covers v1.x → v2.0 + v2.0 → v2.1 + v2.1 → v2.2 deltas |
-| [`docs/SECURITY.md`](docs/SECURITY.md) | You're security-conscious or admin-recommending the script; want the threat model + privacy posture in one place |
-| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | You're evaluating whether the script fits your use case; want to know the known limitations + their rationale upfront. **Includes the "Upstream stack" section for argo-proxy / Claude Code limitations** (most prominently the opus-4-7 issue) |
-| [`docs/TESTING.md`](docs/TESTING.md) | You're a maintainer / contributor who made a non-trivial change and want to live-verify before tagging |
-| [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | You want the audit trail of every fix that landed across v2.0 → v2.2 (43 findings + STATUS resolutions; 42-of-43 closed at v2.2.0) |
-| [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | You want the comparative audit `argo-anywhere` ↔ `argo-shim` (the alternative project), the Phase-C-local-shim REJECTED rationale, and the slide-ready Executive comparison section |
-| [`PLAN.md`](PLAN.md) | You're a maintainer / co-author; plan-of-record + design decisions D-001..D-021 + roadmap |
-| [`AGENTS.md`](AGENTS.md) | You're an AI coding tool working on this codebase; project conventions + skill loading |
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | Upgrading from a v1.x/v2.x `.sh` install, or between releases; covers v1 → v2 → the v2 → v3 hard cutover. |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model + privacy posture (incl. the local web UI); for security-conscious users and ANL admins. |
+| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Known limitations + rationale before you adopt; includes the "Upstream stack" section (opus-4-7 etc.). |
+| [`docs/TESTING.md`](docs/TESTING.md) | Maintainers/contributors: live-verify the `client` path before tagging. |
+| [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | The fix trail across v2.0 → v2.2 (43 findings; 42 closed). |
+| [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Comparative audit vs. `argo-shim`, the Phase-C-rejection rationale, slide-ready summary. |
+| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-030 + roadmap. |
+| [`AGENTS.md`](AGENTS.md) | AI coding tools working on this codebase: conventions + skill loading. |
 
 ## Upgrading
 
-The canonical filename was `argo_opencode.sh` before v2.0. v2.0
-renames to `argo_anywhere.sh` and removes the per-client symlinks
-(`argo_opencode.sh`, `argo_claudecode.sh`) that v1.x distributed.
-Per-tool selection is now via `--cli-tool <name>` (or the
-interactive picker).
+The canonical filename was `argo_opencode.sh` before v2.0; v2.0 renamed it to
+`argo-anywhere` and replaced the per-client symlinks with `--cli-tool <name>`
+(or the picker).
 
-The cumulative behavior changes through v2.2 are documented in
-[`docs/UPGRADING.md`](docs/UPGRADING.md) — re-curl + alias updates,
-env-var renames (`ARGO_OPENCODE_*` → `ARGO_ANYWHERE_*`),
-`CLAUDECODE_SCOPE` → `ARGO_ANYWHERE_SCOPE` deprecation (still
-honored with WARN), the v2.2 port cache + cross-client coherence
-prompts, the D-017 claudecode hybrid default policy. The script
-also auto-detects v1.x state on first run and prints exact cleanup
-commands.
+**v3.0.0 is a clean break** (design decision D-027): the supported install is
+now `pipx install argo-anywhere`, and the single-`.sh` `curl` route is retired as
+primary (the raw engine is still reachable via `argo-anywhere --print-script`).
+The v2 → v3 hard-cutover steps — uninstall the old `.sh` install, then
+`pipx install` — are in
+[`docs/UPGRADING.md`](docs/UPGRADING.md#v2x--v300-the-python-package-rebuild).
 
-Old curl URLs against the previous repo name
-(`a-attia/argo-opencode`) **keep working forever** — GitHub
-auto-redirects them to the new name (`a-attia/argo-anywhere`).
+Cumulative behavior changes through v2.2 are documented in
+[`docs/UPGRADING.md`](docs/UPGRADING.md): env-var renames (`ARGO_OPENCODE_*` →
+`ARGO_ANYWHERE_*`), the `CLAUDECODE_SCOPE` → `ARGO_ANYWHERE_SCOPE` deprecation
+(still honored with a WARN), the port cache + cross-client coherence prompts, and
+the D-017 claudecode hybrid default. The engine also auto-detects v1.x state on
+first run and prints exact cleanup commands.
 
-Pinning to old release tags also works:
-
-```sh
-# Still works (uses the v1.1.0 immutable tag):
-curl -fsSL https://raw.githubusercontent.com/a-attia/argo-opencode/v1.1.0/argo_opencode.sh -o argo_opencode.sh
-```
+Old `curl` URLs against the previous repo name (`a-attia/argo-opencode`) keep
+working forever — GitHub auto-redirects them — and pinning old release tags still
+works.
 
 ## Testing
 
-[`docs/TESTING.md`](./docs/TESTING.md) is a step-by-step
-live-verification guide for the `client` end-to-end path. Use it
-after non-trivial edits or before tagging a release. It's
-structured so you can follow it without external help (~5–10 min,
-one Duo prompt).
+[`docs/TESTING.md`](./docs/TESTING.md) is a step-by-step live-verification guide
+for the `client` end-to-end path (~5–10 min, one Duo prompt); use it after
+non-trivial changes or before tagging a release.
 
-For lighter smoke tests after edits:
+The Python package has an automated `pytest` suite (no ANL infra needed) — see
+[Contributing](#contributing). For the engine, lighter smoke checks after edits
+(these operate on the raw `.sh`, so they're contributor-facing):
 
 ```sh
 bash -n argo-anywhere.sh                              # syntax
-bash argo-anywhere.sh -h                              # short usage
-bash argo-anywhere.sh status                          # exit 1 if no tunnel
-bash argo-anywhere.sh clean --dry-run -y --local-only # safe enumeration
+argo-anywhere -h                                      # short usage
+argo-anywhere status                                  # exit 1 if no tunnel
+argo-anywhere clean --dry-run -y --local-only         # safe enumeration
 ```
 
-Per-phase test plans (used during the v2.0 → v2.2 development
-cycle) live in `notes/`:
-
-- [`notes/test_plan_phase1.md`](notes/test_plan_phase1.md) — passed
-  2026-05-12 (D1+D2+D4 + legacy detection)
-- [`notes/test_plan_phase2a.md`](notes/test_plan_phase2a.md) —
-  passed 2026-05-14 (P3 added + verified during the live test)
-- [`notes/test_plan_phase2b.md`](notes/test_plan_phase2b.md) —
-  passed 2026-05-15 with three follow-up amendments (H5 yaml_scalar,
-  P2 setdefault, N1 scope-keyed)
-- [`notes/test_plan_phase2c3.md`](notes/test_plan_phase2c3.md) —
-  passed 2026-05-15 with one follow-up amendment (L4+L5 incomplete
-  dedup at 3 additional sites) and two test-plan defects
-- [`notes/test_plan_phase2d.md`](notes/test_plan_phase2d.md) —
-  passed 2026-05-15 with **zero** mid-test code amendments (and two
-  test-plan defects identified)
-- [`notes/test_plan_phase4.md`](notes/test_plan_phase4.md) —
-  passed 2026-05-18 with three mid-test code amendments
-  (`e221847`: eager `--scope` validation; `1249924`: stale `--scope`
-  help text; `acf0722`: `[m]igrate` confirmation overpromise) + two
-  doc-only commits + two SHA backfills + one test-plan
-  disambiguation. Phase 4 = v2.2.0.
+Per-phase and live-test plans (used across the development cycle) are indexed in
+[`notes/README.md`](notes/README.md).
 
 ## Contributing
 
 This project follows the
 [scicomp-research-skills](https://github.com/a-attia/scicomp-research-skills)
-framework's conventions for agent-facing project files:
+framework's conventions.
 
-- [`AGENTS.md`](AGENTS.md) — canonical project conventions for AI
-  coding tools. [`CLAUDE.md`](CLAUDE.md) is a symlink to it for
-  Claude Code's discovery.
-- [`PLAN.md`](PLAN.md) — plan-of-record (scope, architecture,
-  milestones, design decisions D-001..D-021).
-- [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) — active
-  fresh-eyes audit (43 findings; 42-of-43 closed at v2.2.0). New
-  closures append a STATUS block in place.
+Set up a development environment and run the checks:
+
+```sh
+pip install -e '.[dev]'    # package + web + pytest + ruff (or: uv pip install -e '.[dev]')
+pytest -q                  # the package test suite (no ANL infra)
+ruff check src tests       # lint
+```
+
+Key project files:
+
+- [`AGENTS.md`](AGENTS.md) — canonical project conventions for AI coding tools.
+  [`CLAUDE.md`](CLAUDE.md) is a symlink to it for Claude Code's discovery.
+- [`PLAN.md`](PLAN.md) — plan-of-record (scope, architecture, milestones,
+  design decisions D-001..D-030).
+- [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) — active fresh-eyes
+  audit (43 findings; 42 closed). New closures append a STATUS block in place.
 - [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
-  — comparative audit; SH-* items and their per-release dispositions
-  (v2.2.1 / v2.3 / REJECTED). Same STATUS-block convention for
-  closures.
-- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — known limitations
-  (read before adding features that bump up against the
-  single-instance constraint or the bash 3.2 target).
-- [`notes/agent_feedback.md`](notes/agent_feedback.md) — per-project
-  feedback channel into the upstream `scicomp-research-skills`.
-- [`CONTRIBUTORS.md`](CONTRIBUTORS.md) — primary author + AI
-  collaborator acknowledgment + commit-trailer convention.
+  — comparative audit; SH-* items and their per-release dispositions.
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — known limitations (read before
+  adding features that bump the single-instance constraint or the bash 3.2
+  target).
+- [`notes/agent_feedback.md`](notes/agent_feedback.md) — per-project feedback
+  channel into the upstream framework.
+- [`CONTRIBUTORS.md`](CONTRIBUTORS.md) — authorship + AI-collaborator
+  acknowledgment + commit-trailer convention.
 
-For the commit-message convention (Conventional Commits + the
-`Co-Authored-By: Claude` trailer for AI-assisted commits), activate
-the project's `.gitmessage` template after cloning:
+For the commit convention (Conventional Commits + the `Co-Authored-By: Claude`
+trailer for AI-assisted commits), activate the project's template after cloning:
 
 ```sh
 git config --local commit.template .gitmessage
@@ -960,42 +863,33 @@ git config --local commit.template .gitmessage
 
 ## Related projects
 
-- [argo-proxy](https://github.com/Oaklight/argo-proxy) — the
-  on-node proxy this script orchestrates. Authored + maintained by
-  Peng Ding (Argonne CELS).
-- **`argo-shim`** (v0.2.0 as of 2026-05-18) — an alternative
-  project solving the same user problem from the opposite layer of
-  the stack (Python local HTTP proxy on the laptop). See
+- [argo-proxy](https://github.com/Oaklight/argo-proxy) — the on-node proxy this
+  project orchestrates. Authored + maintained by Peng Ding (Argonne CELS).
+- **`argo-shim`** — an alternative project solving the same problem from the
+  opposite layer of the stack (a Python local HTTP proxy on the laptop). See
   [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)
-  for the full comparative audit + slide-ready summary.
-- [OpenCode](https://opencode.ai/) — one of the supported AI coding
-  CLI tools.
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) —
-  the other supported AI coding CLI tool.
-- [ANL AI4Dev notes](https://web.cels.anl.gov/~jacob/ai4dev.html) —
-  the internal reference this script is built around.
+  for the full comparison.
+- [OpenCode](https://opencode.ai/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+  [aider](https://aider.chat/) — the supported AI coding CLI tools.
+- [ANL AI4Dev notes](https://web.cels.anl.gov/~jacob/ai4dev.html) — the internal
+  reference this project is built around.
 - [scicomp-research-skills](https://github.com/a-attia/scicomp-research-skills)
   — the framework providing this project's agent conventions.
 
 ## Authors
 
 - **Primary**: Ahmed Attia ([aattia@anl.gov](mailto:aattia@anl.gov))
-- **AI collaborator**: Claude (Anthropic), used substantially across
-  the v2.0 → v2.2 development cycle. Per-commit attribution via the
-  `Co-Authored-By:` trailer; see [`CONTRIBUTORS.md`](CONTRIBUTORS.md)
-  for the full acknowledgment + rationale.
+- **AI collaborator**: Claude (Anthropic), used substantially across the v2.0 →
+  v3.0 development cycle. Per-commit attribution via the `Co-Authored-By:`
+  trailer; see [`CONTRIBUTORS.md`](CONTRIBUTORS.md).
 
 ---
 
-*Created 2025 (project inception); rewritten 2026-05-14 to follow
-the [scicomp-research-skills](https://github.com/a-attia/scicomp-research-skills)
-human-facing-doc-authoring conventions; revised 2026-05-15 (Phase
-2c+3) for v2.0; revised 2026-05-18 (Phase 4 / v2.2.0) to add the
-"Heads up before you start" callout (with the Claude Code opus-4-7
-limitation), the "Known limitations (please read)" section pointing
-at `docs/LIMITATIONS.md`, the new port-as-state + cross-client
-coherence framing in the "Port policy" section, the v2.2 OpenCode
-project-scope additions in "What it writes where", references to
-the new comparative audit and design decisions D-017..D-021, and
-the v2.2.0-aligned Status + Quick start + Testing sections.
-Maintained by Ahmed Attia.*
+*Created 2025 (project inception); rewritten 2026-05-14 to follow the
+[scicomp-research-skills](https://github.com/a-attia/scicomp-research-skills)
+human-facing-doc-authoring conventions; revised through v2.2.0 (Phase 4).
+Rewritten 2026-07-12 for v3.0.0: re-grounded in the Python package as it exists
+in code (package-first, engine as a vendored/forkable component), added the
+Install and "Running the raw engine" sections, and corrected the `.sh`-era
+descriptions of bootstrap, self-update, and on-disk paths. Maintained by Ahmed
+Attia.*

@@ -7,10 +7,18 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: v2.1.0 tagged + released 2026-05-15 (Phase 2d
-defensive-hardening). v2.0.0 tagged + released earlier same day.
-v1.x line tagged at v1.0.0 / v1.1.0 / v1.2.0; legacy URLs
-redirect forever.
+**Status**: **v3.0.0 pending first PyPI publish** (version set to
+`3.0.0`). The Model-A Python-package + web-UI rebuild (D-026..D-030)
+has merged to `main`: the package builds, the vendored engine
+round-trips verbatim, the `pytest` suite is green, CI + a tag-gated
+OIDC publish workflow are in place, Q11 is ratified in
+`docs/SECURITY.md`, and the D-028/D-030 live-test gate PASSED
+(2026-07-12; `notes/test_plan_v3_branch.md`). The only remaining
+steps before the release are configuring the PyPI Trusted Publisher
+and pushing the `v3.0.0` tag (the user's action). Last tagged release: **v2.2.0 (2026-05-18)**,
+which remains current until v3.0.0 ships; v2.0.0 / v2.1.0 (both
+2026-05-15) precede it. v1.x line tagged at v1.0.0 / v1.1.0 / v1.2.0;
+legacy URLs redirect forever.
 **Repo**: <https://github.com/a-attia/argo-anywhere>.
 **License**: MIT (matches the repo's existing convention).
 
@@ -227,7 +235,7 @@ Phase status as of **2026-05-18** (post-v2.2.0 release):
 | **Per-tool `update-models` refresh (follow-up)** | Generalize `update-models` from a hard-coded OpenCode refresh into a per-tool contract: an optional `<name>_update_models` function each tool may implement. `opencode` refreshes its picker list (today's behavior); `aider` would regenerate `.aider.model.settings.yml`'s per-model `use_temperature:false` entries from the LIVE `/v1/models` (replacing the current static 41-entry list, so newly-served models are covered automatically); `claudecode` stays N/A. Tool-awareness scaffolding (the `--cli-tool` gate + not-applicable messaging) already landed 2026-07-09; this is the remaining "make it actually do per-tool work" step. | planned (as of 2026-07-09); filed while making `update-models` tool-aware |
 | **Phase 6+ (under consideration)** | Generic OpenAI-compatible `--cli-tool` (e.g. `--cli-tool generic --config-path <PATH>`) | under consideration |
 | **Phase C local-shim mode** | Local HTTP shim layer (stream forcing + thinking-block stripping + transparent retry) per 2026-05-18 argo-shim comparative audit | **REJECTED** — would break D-001 single-file UX and address problems already handled upstream by argo-proxy's `anthropic_stream_mode: force` default (v3.x). Documented in `docs/AUDIT_2026-05-18_argo-shim-comparison.md` (Step 4 of v2.2.0 release sequence). |
-| **Model A — Python package + web UI** (branch `feat/python-package-webui`) | Rebuild as a `pip` package that owns the runtime and wraps the unchanged bash engine (D-026..D-029): two-lane driver, FastAPI web terminal, `argo-anywhere` console script; clean-break v3.0.0. Full plan + phasing (P0–P5) in [`notes/impl_python_webui.md`](notes/impl_python_webui.md). | **P1 gate PASS**; **P0 code-complete (2026-07-10)**; P2–P5 pending. Not on `main`. |
+| **Model A — Python package + web UI** (D-026..D-030) | Rebuild as a `pip` package that owns the runtime and wraps the unchanged bash engine: two-lane driver, FastAPI web terminal + native app, `argo-anywhere` console script, lifecycle unification; clean-break v3.0.0. Full plan + phasing (P0–P5) in [`notes/impl_python_webui.md`](notes/impl_python_webui.md). | **MERGED to `main`** (2026-07-12); P0–P4 code-complete + `pytest` green + package builds; **LIVE-TEST PASSED (2026-07-12)** (`notes/test_plan_v3_branch.md`; D-028/D-030 gate closed). **Remaining before publish**: configure the PyPI Trusted Publisher, then push the `v3.0.0` tag. P5 (headless engine flags) optional; stdlib-PTY-over-*cold*-Duo is an observed-partial (non-blocking). |
 
 Milestones are **shippable**, not commit-sized. Each phase ends with a
 live-test gate before the next starts, per the post-CSPO discipline
@@ -1560,11 +1568,14 @@ install/uninstall. Each independently shippable + live-tested.
 
 ### D-026 — Python-package-as-runtime (Model A); supersedes D-001 (2026-07-10)
 
-**Status**: accepted; designing. Supersedes [D-001](#d-001--single-file-distribution-curl-and-run-ux-2025-inception).
+**Status**: accepted; **implemented + merged to `main`** (2026-07-12);
+**live-test gate PASSED (2026-07-12, with D-028/D-030;
+`notes/test_plan_v3_branch.md`)**. Supersedes [D-001](#d-001--single-file-distribution-curl-and-run-ux-2025-inception).
 Make-or-break gate (P1 — Duo/connect driven from a browser terminal) PASSED
-(2026-07-09; cold-Duo residual closed 2026-07-10). Exploration record on branch
-`feat/python-package-webui` (`spike/RESULTS.md`, `spike/HANDOFF.md`); to be
-promoted to `notes/impl_python_webui.md`.
+(2026-07-09; cold-Duo residual closed 2026-07-10). Implementation record in
+[`notes/impl_python_webui.md`](../notes/impl_python_webui.md); the `spike/`
+exploration docs (`spike/RESULTS.md`, `spike/HANDOFF.md`) are now stubs pointing
+there.
 
 **Context.** D-001 chose single-file bash specifically to avoid a Python
 dependency layer on the user's laptop. Two facts have since inverted that
@@ -1621,7 +1632,9 @@ as `server` (compute nodes keep receiving a plain `.sh`).
 
 ### D-027 — Clean-break web-UI major release; no in-place migration (2026-07-10)
 
-**Status**: accepted; designing.
+**Status**: accepted; **implemented + merged to `main`** (2026-07-12).
+The v2 → v3 hard-cutover section is in `docs/UPGRADING.md`; the PyPI
+publish that makes the clean break real is the remaining step.
 
 **Context.** The move to a Python package (D-026) plus the script rename (D-028)
 is a hard discontinuity in install shape and entry-point name. The user base is
@@ -1646,7 +1659,10 @@ communicated out-of-band to the small user set.
 
 ### D-028 — Rename `argo_anywhere` -> `argo-anywhere` everywhere user-facing (2026-07-10)
 
-**Status**: **IMPLEMENTED on `feat/python-package-webui` (2026-07-11)** — the
+**Status**: **IMPLEMENTED + merged to `main` (2026-07-12); LIVE-TEST PASSED
+(2026-07-12)** — `notes/test_plan_v3_branch.md` T7 confirmed the hyphenated
+node-side files live (`~/.argo-anywhere.sh`, `~/.argo-anywhere.server.log`) and
+ALL GREEN from a package `connect`. The
 user-facing surfaces are hyphenated (filename `argo-anywhere.sh` incl. the
 `git mv`, `REMOTE_SELF`/`REMOTE_LOG` node files + v2.x legacy sweep, log prefix
 `[argo-anywhere]`, self-integrity + self-update sentinels, summary-box titles,
@@ -1702,7 +1718,8 @@ above. One-time doc/reference sweep (live docs only). No user-facing alias
 
 ### D-029 — PyPI as the single source of truth for install + upgrade (2026-07-10)
 
-**Status**: accepted; designing. Depends on [D-026], [D-027]. Retires the
+**Status**: accepted; **implemented + merged to `main`** (2026-07-12); the PyPI
+publish that activates it is the remaining step. Depends on [D-026], [D-027]. Retires the
 `argo-anywhere` self-update path from [D-022]/[D-023] for the package era (the
 other `update`-registry components are unaffected — see below).
 
@@ -1732,7 +1749,7 @@ return 404, incl. the `argo_anywhere` / `argoanywhere` normalized variants).
    upgrades in place.
 3. **Not yet hosted.** PyPI publication happens once a working Python version
    exists (the first `v3.0.0` candidate; see §11). Until then, install is
-   from-git on the `feat/python-package-webui` branch.
+   from-git on the `main` branch (the Model-A work is merged).
 
 **Consequences.** Removes the two-homes upgrade ambiguity D-026 flags.
 `docs/UPGRADING.md`'s hard-cutover section (D-027) documents the `pipx`
@@ -1742,13 +1759,16 @@ still-queued CITATION.cff / Zenodo DOI aligns to the PyPI release + git tag.
 
 ### D-030 — Unified lifecycle under the package; engine self-install dormant in package mode (2026-07-11)
 
-**Status**: accepted; **CODE COMPLETE on `feat/python-package-webui`
-(2026-07-11)** — unit-tested + sandbox-verified; Part-A live pre-flight passed
-with one amendment ("Finding 1": uninstall now removes a leftover
-`~/.argo_anywhere` in package mode too, so it matches the footprint — see the
-notes); Part-B (`connect`) live gate pending (with the D-028 rename). Depends on
+**Status**: accepted; **CODE COMPLETE + merged to `main` (2026-07-12);
+LIVE-TEST PASSED (2026-07-12)** — unit-tested + sandbox-verified; Part-A live
+pre-flight passed with one amendment ("Finding 1": uninstall now removes a
+leftover `~/.argo_anywhere` in package mode too, so it matches the footprint);
+**Part-B (`connect`) gate CLOSED** — a package-mode `connect` showed the
+first-run bootstrap dormant (no new `~/.argo_anywhere/bin/`), the manifest home
+at `~/.config/argo_anywhere`, and ALL GREEN (`notes/test_plan_v3_branch.md` T7).
+Depends on
 [D-026], [D-029]; qualifies [D-023], [D-025] in package mode. Full design + phasing in
-[`notes/impl_python_webui.md` → Lifecycle unification](notes/impl_python_webui.md#lifecycle-unification-d-030-proposed).
+[`notes/impl_python_webui.md` → Lifecycle unification](notes/impl_python_webui.md#lifecycle-unification-d-030-landed).
 Modeled on the sibling `scrollback` project's lifecycle design.
 
 **Context.** On the `feat/python-package-webui` branch two lifecycle systems
@@ -1961,7 +1981,12 @@ Release process:
 
 Raised 2026-07-10 during the pre-P0 multipass review of D-026..D-029.
 Tracked here so they don't block; each must resolve before the P0 file it
-gates.
+gates. **Status (2026-07-12, post-merge):** Q9 settled and reflected in
+`pyproject.toml`; Q10 surfacing resolved (one minor sub-question open);
+Q11 (web-server security posture) **RESOLVED — ratified in
+`docs/SECURITY.md`**; Q12's manifest-home half is resolved (D-030), the
+PTY-concurrency half remains open (not a publish blocker). None of the
+remaining sub-questions block the publish.
 
 9. **Package identity + Python floor (gates `pyproject.toml`)**. Name is
    settled: **`argo-anywhere`** (confirmed available on PyPI, D-029); console
@@ -1980,13 +2005,17 @@ gates.
     Remaining sub-question: whether `update`'s UX needs to show the engine
     component version too.
 11. **Web-server security posture (gates `web/app.py`; needs a `SECURITY.md`
-    row)**. The spike server is **unauthenticated** — loopback-only bind +
-    host-header (DNS-rebinding) guard — and can spawn PTYs running arbitrary
-    engine flows (incl. SSH). Proposed posture to ratify: acceptable because
-    it shares the user's shell trust boundary (a local attacker who can reach
-    `127.0.0.1:<port>` already has the user's shell). Decide whether a
-    loopback token / same-origin check is warranted, and add the threat-model
-    row to `docs/SECURITY.md`.
+    row)** — **RESOLVED 2026-07-12**. The web server is **unauthenticated** —
+    loopback-only bind + host-header (DNS-rebinding) guard — and spawns PTYs
+    running the engine, but only via an **argv allowlist** (known verbs +
+    constrained `--cli-tool`/`--scope`/`--port`; no shell passthrough).
+    **Ratified posture: accepted as-is for v3.0.0** because it shares the
+    user's shell trust boundary (a caller that can reach `127.0.0.1:<port>` is
+    already a peer of the user's shell, and cannot coerce arbitrary shell). The
+    **local-process / browser-CSRF residual** is documented, and a loopback
+    token / `Origin` (same-origin) check is **queued as post-3.0 hardening**
+    (not a publish blocker). The threat-model row + a dedicated "Local web UI"
+    section landed in [`docs/SECURITY.md`](../docs/SECURITY.md).
 12. **Lane-2 PTY concurrency model (gates `driver.py`)**. Lane 2 streams a PTY
     to "the browser terminal", but a `configure`/`run` action can hit a
     Lane-2 prompt (config-conflict / scope-conflict, D-026) while `connect`'s

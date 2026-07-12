@@ -1,11 +1,14 @@
 # Implementation plan — Python package + web UI (Model A)
 
-**Status**: building — P1 gate PASSED; **P0 + P2 + P3 code complete** (2026-07-10,
-P3 single-terminal model; concurrency deferred to Q12); P4–P5 pending.
-**Owner**: Ahmed Attia. **Last updated**: 2026-07-10.
-**Branch**: `feat/python-package-webui` (forked from `main` at the D-024 verb
-split; not yet merged). **Linked PLAN.md**: design decisions
-[D-026..D-029](../PLAN.md#7-design-decisions-log); open questions
+**Status**: **MERGED to `main`** (2026-07-12, at the Model-A merge `01ac516`).
+P1 gate PASSED; **P0–P4 code complete** (P3 single-terminal model, concurrency
+deferred to Q12; P4 packaging polish incl. `LICENSE` + PyPI-safe metadata);
+P5 optional. Pre-publish residuals: the joint D-028/D-030 live-test gate, the
+stdlib-PTY-over-real-Duo observation, Q11 security posture, the version
+decision, and the PyPI publish itself.
+**Owner**: Ahmed Attia. **Last updated**: 2026-07-12.
+**Linked PLAN.md**: design decisions
+[D-026..D-030](../PLAN.md#7-design-decisions-log); open questions
 [§11 items 9–12](../PLAN.md#11-open-questions).
 
 This is the single source of truth for the Python-package + web-UI rebuild. It
@@ -23,7 +26,7 @@ and built since.
 - [The two-lane driver contract](#the-two-lane-driver-contract)
 - [What is built (P2)](#what-is-built-p2)
 - [What is built (P3)](#what-is-built-p3)
-- [Lifecycle unification (D-030, proposed)](#lifecycle-unification-d-030-proposed)
+- [Lifecycle unification (D-030, landed)](#lifecycle-unification-d-030-landed)
 - [Remaining work (P4–P5)](#remaining-work-p4p5)
 - [Residuals and open questions](#residuals-and-open-questions)
 - [Operational lessons](#operational-lessons)
@@ -49,7 +52,7 @@ the single-file rule (D-001) are recorded as
 | **P0** | Package skeleton + verbatim engine + two-lane driver + web layer + CLI dispatch | **CODE COMPLETE** — 42 tests pass (see `tests/`) |
 | **P2** | Dashboard + monitor: process registry, `/health` polling, a "show all tunnels" view (new capability; D-006 has none today) | **CODE COMPLETE (2026-07-10)** — status/health core (`status.py`, `argo-anywhere info`, `GET /api/status`) + session registry (`web/registry.py`) + dashboard endpoints (`/api/sessions`, on-demand `/api/health`, guarded `POST /api/sessions/{id}/stop`) + the dashboard UI (channel signal-path + sessions + listeners). 65 tests pass. Residual: one at-the-keyboard `/api/health` observation against a live tunnel (never auto-polled; user-action only) |
 | **P3** | Configure/run in the UI: conflict-escalation to the PTY lane; run-client-in-terminal; info views (list-models/list-tools/status) | **CODE COMPLETE (2026-07-10, single-terminal model)** — info views (`POST /api/run/{verb}`), parameterized embedded launcher (`/ws?verb=…&cli_tool=…&scope=…`) with channel-owner replace-guard, **plus native new-window launch** (`external_terminal.py` + `/api/launch-external` + `/api/terminals`; user-picked terminal, OS default). Conflict-escalation is inherent: `configure`/`run` are Lane-2 so their prompts run in the PTY. Concurrent multi-session now served by new native windows; in-UI PtySession concurrency remains Q12. 103 tests pass |
-| **P4** | Packaging polish: `pywebview` native window, `docs/UPGRADING.md` hard-cutover section, the D-028 clean-break content rename, PyPI publish | **in progress (2026-07-11)** — `argo-anywhere app` native window (`[app]` extra; pywebview, browser fallback) + `docs/UPGRADING.md` v2→v3 hard-cutover section + build/install verified (`python -m build` -> wheel bundles engine + static; fresh-venv console-script smoke) + `--print-script` BrokenPipe fix. **D-030 lifecycle unification (code-complete 2026-07-11) + D-028 content rename (done 2026-07-11)** both landed. **Still pending**: actual PyPI publish (needs a token; the user's action) + the joint D-030/D-028 live-test gate. 123 tests pass |
+| **P4** | Packaging polish: `pywebview` native window, `docs/UPGRADING.md` hard-cutover section, the D-028 clean-break content rename, PyPI publish | **CODE COMPLETE + MERGED to `main` (2026-07-12)** — `argo-anywhere app` native window (`[app]` extra; pywebview, browser fallback) + `docs/UPGRADING.md` v2→v3 hard-cutover section + build/install verified (`python -m build` -> wheel + sdist bundle engine + static + assets; fresh-venv console-script smoke) + `--print-script` BrokenPipe fix. **D-030 lifecycle unification + D-028 content rename** both landed. **`LICENSE` (MIT) added + wired into pyproject** (`license-files`; ships in wheel/sdist metadata as `License-Expression: MIT`). **Still pending (pre-publish)**: the actual PyPI publish (needs a token; the user's action, done last) + the joint D-030/D-028 live-test gate + the version decision. 133 tests pass |
 | **P5** | Optional/upstream-able: add engine flags for the 3 un-pre-answerable prompts so they run headless in Lane 1 | pending |
 
 Commit trail for P0 lives on the branch (`git log --oneline`); the key SHAs as
@@ -118,7 +121,7 @@ engine. Layout as built:
 pyproject.toml                     setuptools/PEP 621; console-script `argo-anywhere`;
                                    requires-python >=3.10; extras [web]/[all]/[test]
 src/argo_anywhere/
-├── __init__.py                    __version__ = "3.0.0.dev0" (authoritative; D-029)
+├── __init__.py                    __version__ = "3.0.0" (authoritative; D-029)
 ├── __main__.py                    `python -m argo_anywhere`
 ├── cli.py                         dispatch: --version/--print-script/web + engine passthrough
 ├── _engine.py                     engine_bytes() + engine_path() context manager
@@ -254,12 +257,13 @@ matching how they already juggle many terminals. The narrower open question
 (multiple concurrent *PtySessions inside the web UI*, and where `manifest.json`
 lives) remains PLAN.md Q12; it is no longer blocking real multi-session use.
 
-## Lifecycle unification (D-030, proposed)
+## Lifecycle unification (D-030, landed)
 
-**Status**: **CODE COMPLETE on the branch (2026-07-11)**; unit-tested (13 new
-tests), sandbox-verified (no ANL); **live-test gate pending** (the engine edit
-wants one real re-test alongside the D-028 rename). Was written design-first and
-reviewed before coding, at the user's request. Models on the sibling
+**Status**: **CODE COMPLETE + merged to `main` (2026-07-12)**; unit-tested (13
+new tests), sandbox-verified (no ANL); **live-test gate PASSED (2026-07-12,
+with the D-028 rename; `notes/test_plan_v3_branch.md` T7)**. Was written
+design-first and reviewed before coding, at the user's request. Models on the
+sibling
 `scrollback` project's lifecycle design (`../scrollback`:
 `src/scrollback/launcher_install.py` `footprint()` + `src/scrollback/cli.py`
 `cmd_uninstall` / `_detect_install_tool`). Recorded in PLAN.md as the `D-030`
@@ -762,20 +766,26 @@ migration on D-030's manifest move. `notes/` + PLAN.md keep their historical
 
 ## Residuals and open questions
 
-**Residual to exercise before promotion (live, needs a keyboard):** the web
-bridge drives the **stdlib** `PtySession`, whereas the spike proved the browser
-path with `ptyprocess`. The stdlib PTY has not yet been observed over real
-ssh/Duo. This is the same class as the (now-closed) spike cold-Duo residual;
-stdlib PTYs are the standard approach, but one at-the-keyboard observation is
-warranted (CSPO: one attempt). Run it with
-`ARGO_ANYWHERE_WEB_ENGINE='connect' argo-anywhere web`, then complete Duo in the
-browser.
+**Residual (stdlib PTY over ssh/Duo) — OBSERVED-PARTIAL 2026-07-12; not a
+publish blocker.** The web bridge drives the **stdlib** `PtySession`, whereas the
+spike proved the browser path with `ptyprocess`. On 2026-07-12 the stdlib PTY was
+observed driving a full engine `connect` to ALL GREEN from the browser terminal
+(`ARGO_ANYWHERE_WEB_ENGINE='connect' argo-anywhere web`), so the stdlib PTY is
+proven end-to-end against real infra. A **cold Duo was not reproduced** that run:
+the ControlPersist mux master was still warm and got reused, so no fresh Duo
+fired. The cold-Duo-legibility-in-browser point is already covered by the P1
+spike observation (cold Duo in the browser, 2026-07-10). The only un-reproduced
+sliver is stdlib-PTY **+** cold Duo simultaneously — left as an opportunistic
+catch on a future natural cold connect (drop the master or wait out
+ControlPersist first). See `notes/test_plan_v3_branch.md` T7(e).
 
 **Open questions** (full text in [PLAN.md §11 items 9–12](../PLAN.md#11-open-questions)):
-Python floor is settled at `>=3.10`; still open are the two-version-number
-surfacing (Q10), the web-server security posture to ratify in `docs/SECURITY.md`
-(Q11), and the Lane-2 PTY concurrency model plus `manifest.json`'s new home
-(Q12).
+Python floor is settled at `>=3.10` (Q9); the two-version-number surfacing is
+resolved (Q10, one minor sub-question); the web-server security posture is
+**ratified in `docs/SECURITY.md`** (Q11, resolved 2026-07-12); `manifest.json`'s
+home is resolved (Q12, D-030). Still open: whether `update`'s UX shows the engine
+version (Q10 sub-question) and the Lane-2 PTY concurrency model (Q12) — neither a
+publish blocker.
 
 ## Operational lessons
 

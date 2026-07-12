@@ -5,8 +5,8 @@ this section is reference detail you only need if something surprises you.
 
 > **Pre-release note.** v3 isn't on PyPI yet, so `pipx install argo-anywhere` will
 > work once v3.0.0 ships. **Until then**, wherever a step below says
-> `pipx install argo-anywhere`, use the branch command:
-> `pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'`
+> `pipx install argo-anywhere`, install from the repo `main` branch:
+> `pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@main'`
 
 ### New to argo-anywhere
 
@@ -847,10 +847,10 @@ pipx install 'argo-anywhere[app]'     # + native window  (argo-anywhere app)
 
 Prefer `pipx` so the CLI lands on your `PATH` in its own isolated environment;
 `pip install --user` works too. Until v3.0.0 is published to PyPI, install the
-pre-release straight from the branch:
+pre-release straight from the `main` branch:
 
 ```bash
-pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@feat/python-package-webui'
+pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@main'
 ```
 
 ### What you do

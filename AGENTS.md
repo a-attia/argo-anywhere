@@ -63,10 +63,37 @@ loading set for normal sessions.
 ## Project facts
 
 - **Name**: argo-anywhere
-- **Nature**: research-software (CLI orchestrator); single-file bash
-  script with inline Python heredocs for structured-data work
-- **Status**: **v2.2.0 RELEASED 2026-05-18** (tag at commit
-  `737563d`). Phase 4 lands the per-tool scope framework + port-
+- **Nature**: research-software (CLI orchestrator). **As of v3.0.0 a
+  Python package** (`src/argo_anywhere/`) that owns the runtime and
+  vendors the bash **engine** (`argo-anywhere.sh`, ~5800 lines, inline
+  Python heredocs for structured-data work) VERBATIM as package data,
+  plus a loopback-only FastAPI web UI + pywebview native app. The
+  engine stays a single self-contained `.sh` (D-001, engine-only);
+  the *project* is no longer single-file (D-026).
+- **Status**: **v3.0.0 PENDING FIRST PYPI PUBLISH** (version set to
+  `3.0.0`; on `main` at the Model-A merge `01ac516`). The Python-package + web-UI rebuild
+  (D-026..D-030) is merged: package builds (wheel+sdist bundle the
+  engine + assets + static), engine round-trips verbatim via
+  `--print-script`, `pytest` suite green (133 tests, no ANL infra),
+  `LICENSE` (MIT) added and shipped in metadata; version set to
+  `3.0.0` (decided 2026-07-12); CI + tag-gated OIDC publish workflow
+  added under `.github/workflows/`; Q11 web-server security posture
+  ratified in `docs/SECURITY.md` (loopback bind + Host guard + argv
+  allowlist accepted for v3.0.0; loopback-token/Origin check queued as
+  post-3.0 hardening); the **D-028/D-030 live-test gate PASSED
+  (2026-07-12)** (`notes/test_plan_v3_branch.md`: package-mode
+  `connect` reached ALL GREEN with hyphenated node files + dormant
+  bootstrap). **Pre-publish residuals**: configuring the PyPI Trusted
+  Publisher and the tag push + publish itself (the user's action;
+  done last). The stdlib-PTY-over-*cold*-Duo point is an
+  observed-partial (non-blocking; a warm master was reused during the
+  gate). The engine's internal `SCRIPT_VERSION`
+  is `2.2.1-dev` — intentionally distinct from the package version per
+  D-029 (package version = release identity; engine version = internal
+  component tag). Historical v2.x record below (preserved for
+  provenance). **Last tagged release: v2.2.0 RELEASED 2026-05-18** (tag
+  at commit `737563d`). Phase 4 lands the per-tool scope framework +
+  port-
   as-transport-state + OpenCode project-scope + cross-client
   port-coherence on top of v2.1.0's defensive-hardening base; five
   new design decisions D-017..D-021 in PLAN.md codify the new
@@ -164,7 +191,8 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: v2.2.0 (tagged 2026-05-18)
+- **Current release**: v2.2.0 (tagged 2026-05-18); **v3.0.0 in
+  preparation** on `main` (`3.0.0`, unpublished — see Status)
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
 
 ### Human-facing doc map
@@ -190,7 +218,7 @@ Section 6.4):
 | [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
 | [`notes/impl_codex_aider.md`](notes/impl_codex_aider.md) | Maintainer | Design + implementation record for aider (Phase 5a; LIVE-TEST PASSED 2026-07-09) + codex (Phase 5b; gated). Config-format facts, per-tool contract application, live-test findings. |
 | [`notes/impl_lifecycle_commands.md`](notes/impl_lifecycle_commands.md) | Maintainer | Design + implementation record for D-024 (connect/configure/run) + D-025 (install/uninstall + install manifest). Three-level model, locked decisions, live-test amendments. LIVE-TEST PASSED 2026-07-09. |
-| [`notes/impl_python_webui.md`](notes/impl_python_webui.md) | Maintainer | **Single source of truth** for the Model-A Python-package + web-UI rebuild (branch `feat/python-package-webui`; D-026..D-029). Plan/phasing (P0–P5), P1+cold-Duo PASS, P0 code-complete layout, two-lane driver contract, residuals. Consolidates the former `spike/HANDOFF.md` + `spike/RESULTS.md` (now stubs). Not on `main`. |
+| [`notes/impl_python_webui.md`](notes/impl_python_webui.md) | Maintainer | **Single source of truth** for the Model-A Python-package + web-UI rebuild (merged to `main` 2026-07-12; D-026..D-030). Plan/phasing (P0–P5), P1+cold-Duo PASS, P0–P4 code-complete layout, two-lane driver contract, residuals. Consolidates the former `spike/HANDOFF.md` + `spike/RESULTS.md` (now stubs). |
 | [`notes/test_plan_phase*.md`](notes/), [`notes/test_plan_lifecycle.md`](notes/test_plan_lifecycle.md) | Maintainer | Per-phase live-test plans (historical artifact once phase complete). `test_plan_lifecycle.md` covers aider + the lifecycle commands (PASSED 2026-07-09). |
 
 ## Project-specific overrides
@@ -198,10 +226,10 @@ Section 6.4):
 (Anything that differs from the universal conventions in
 `~/.scicomp-research-skills/AGENTS.md` Section 6.)
 
-### Override: single-file architecture; no `src/`/`tests/`/`experiments/` (decided 2025 inception; reaffirmed 2026-05-14) — SUPERSEDED on `feat/python-package-webui`
+### Override: single-file architecture; no `src/`/`tests/`/`experiments/` (decided 2025 inception; reaffirmed 2026-05-14) — SUPERSEDED on `main` (v3.0.0)
 
-> **Status (branch `feat/python-package-webui`, 2026-07-10): SUPERSEDED by
-> D-026..D-029 (Model A — Python package + web UI).** On this branch the
+> **Status (`main`, v3.0.0, merged 2026-07-12): SUPERSEDED by
+> D-026..D-030 (Model A — Python package + web UI).** On `main` the
 > project IS a Python package. New code lands under `src/argo_anywhere/`, and a
 > real `tests/` tree is expected for the Python layer (driver / cli / web).
 > **The bash engine stays a single file** — vendored VERBATIM as package-data
@@ -230,15 +258,15 @@ breaks both flows. Documented as design decision D-001 in PLAN.md.
 `tests/`. The "tests" are smoke checks documented inline in this
 AGENTS.md and a live-verification guide in `docs/TESTING.md`.
 
-### Override: no automated test suite; no CI (decided 2025 inception) — REVISED on `feat/python-package-webui`
+### Override: no automated test suite; no CI (decided 2025 inception) — REVISED on `main` (v3.0.0)
 
-> **Status (branch `feat/python-package-webui`, 2026-07-10): REVISED by
+> **Status (`main`, v3.0.0, merged 2026-07-12): REVISED by
 > D-026.** The Python layer (driver / cli / web / PTY bridge) is unit-testable
-> WITHOUT real ANL infra and SHOULD have a `tests/` suite (pytest); CI for that
-> layer is in scope (P4 packaging polish). The **bash engine keeps its
+> WITHOUT real ANL infra and HAS a `tests/` suite (pytest; 133 tests green as
+> of the merge); CI for that layer is in scope. The **bash engine keeps its
 > live-only verification** (`docs/TESTING.md`: real SSH + Duo + argo-proxy) —
-> mocking that stack tests the mocks, not the engine. Net rule on this branch:
-> automated unit tests for the package code; manual live tests for the engine.
+> mocking that stack tests the mocks, not the engine. Net rule: automated
+> unit tests for the package code; manual live tests for the engine.
 > Original rule below preserved for provenance.
 
 **Framework rule** (research-software-engineering skill): substantial
@@ -256,13 +284,13 @@ mocked CI would test the mocks, not the script.
 
 **Scope**: project-wide.
 
-### Override: bash + inline Python heredoc language policy (decided 2025 inception) — REVISED on `feat/python-package-webui`
+### Override: bash + inline Python heredoc language policy (decided 2025 inception) — REVISED on `main` (v3.0.0)
 
-> **Status (branch `feat/python-package-webui`, 2026-07-10): REVISED by
+> **Status (`main`, v3.0.0, merged 2026-07-12): REVISED by
 > D-026.** Two-language project now. The vendored **bash engine** keeps the
 > bash-3.2+ policy below (it is carried VERBATIM, unchanged). A **Python 3.10+**
 > package layer wraps it (driver / cli / web); new non-engine code is Python and
-> follows Python conventions (type hints, `ruff`/`black`, pytest). The
+> follows Python conventions (type hints, `ruff` for lint + format, pytest). The
 > engine's inline Python-heredoc escape hatch is unchanged. Original rule below
 > preserved for provenance.
 
@@ -309,11 +337,16 @@ reading PLAN.md cover-to-cover or grepping the script.
 
 ### Distribution + architecture overview
 
-The script is published at <https://github.com/a-attia/argo-anywhere>.
-Users `curl` either `main` or a pinned release tag (e.g. `v1.2.0`);
-both URL forms documented in `README.md` and the script's own header.
+The project is published at <https://github.com/a-attia/argo-anywhere>.
+**As of v3.0.0 the supported install is the PyPI package**
+(`pipx install argo-anywhere`; from `main` until the first publish) —
+see `README.md` "Install". The pre-v3 `curl` one-`.sh` route is
+retired as primary; the raw engine is still obtainable for
+inspect/fork via `argo-anywhere --print-script` (D-026), and a forked
+`.sh` self-manages exactly as the pre-v3 script did (see `README.md`
+"Running the raw engine (fork mode)").
 
-The script is one file (~5800 lines as of v2.0) divided into 25
+The engine is one file (~5800 lines as of v2.0) divided into 25
 numbered sections (search for `# SECTION:` to navigate). Three
 conceptual layers — **transport** (SSH multiplex + tunnel + monitor),
 **per-tool** (`setup_<tool>_cli_tool` functions), **server-side
