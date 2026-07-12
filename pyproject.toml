@@ -58,6 +58,12 @@ dev = [
 # `test` is retained as an alias of `dev` for backwards-compatibility (earlier
 # docs + notes reference `.[test]`); prefer `dev` for new invocations.
 test = ["argo-anywhere[dev]"]
+# Maintainers only: regenerate the README screenshots (scripts/screenshots.py).
+# rich renders the client shot (+ a system rsvg-convert/ImageMagick for SVG->PNG);
+# playwright + the web extra render the web-UI shot via headless Chromium
+# (one-time `python -m playwright install chromium`). Not required to run or test
+# argo-anywhere.
+screenshots = ["argo-anywhere[web]", "rich>=13.0", "playwright>=1.40"]
 
 [project.urls]
 Homepage = "https://github.com/a-attia/argo-anywhere"
