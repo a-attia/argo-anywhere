@@ -276,9 +276,27 @@ def _cmd_app(args: Sequence[str]) -> int:
 
     if not ns.browser:
         try:
+            import webbrowser
+
             import webview
 
-            webview.create_window("argo-anywhere", url, width=1200, height=820, min_size=(900, 600))
+            # JS<->Python bridge (window.pywebview.api). Cross-platform: lets the
+            # in-app About's repo link open the user's REAL browser instead of
+            # being trapped inside the app webview.
+            class _AppBridge:
+                def open_link(self, target: str) -> str:
+                    if isinstance(target, str) and target.startswith(("http://", "https://")):
+                        webbrowser.open(target)
+                        return "opened"
+                    return "rejected"
+
+            # `title` names the window (and, on macOS, the menu-bar app when not
+            # launched from the .app bundle). The .app bundle's Info.plist
+            # (install-launcher) supplies the richer native "About" on macOS.
+            webview.create_window(
+                "argo-anywhere", url, js_api=_AppBridge(),
+                width=1200, height=820, min_size=(900, 600),
+            )
             print(f"argo-anywhere: native window on {url}")
             webview.start()  # blocks on the main thread until the window closes
             server.should_exit = True

@@ -185,6 +185,11 @@ def _build_macos_app(dest: Path | None, home: Path) -> Path:
         f"  <key>CFBundleIdentifier</key><string>{_BUNDLE_ID}</string>\n"
         f"  <key>CFBundleVersion</key><string>{__version__}</string>\n"
         f"  <key>CFBundleShortVersionString</key><string>{__version__}</string>\n"
+        # Populate the standard macOS "About argo-anywhere" panel.
+        f"  <key>CFBundleGetInfoString</key><string>argo-anywhere {__version__}, "
+        "github.com/a-attia/argo-anywhere</string>\n"
+        "  <key>NSHumanReadableCopyright</key><string>MIT-licensed. "
+        "github.com/a-attia/argo-anywhere</string>\n"
         "  <key>CFBundlePackageType</key><string>APPL</string>\n"
         f"  <key>CFBundleExecutable</key><string>{_APP_NAME}</string>\n"
         + icon_line

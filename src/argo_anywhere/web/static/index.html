@@ -54,6 +54,21 @@
                 border-color: color-mix(in srgb, var(--link) 35%, transparent); padding: 6px 13px; font-weight: 500; }
     .btn-soft:hover:not(:disabled) { background: color-mix(in srgb, var(--link) 22%, transparent); }
     .btn-soft:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-danger { background: transparent; color: var(--down); padding: 6px 12px;
+                  border-color: color-mix(in srgb, var(--down) 42%, transparent); font-weight: 500; }
+    .btn-danger:hover { background: color-mix(in srgb, var(--down) 16%, transparent); color: var(--down); }
+    .btn-icon { background: transparent; color: var(--ink-dim); border-color: var(--line);
+                padding: 6px 10px; font-size: 13px; line-height: 1; }
+    .btn-icon:hover { color: var(--ink); border-color: var(--ink-faint); }
+    /* shared modal content bits (About + Disconnect reuse .popover) */
+    .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px;
+          font-family: var(--mono); font-size: 12px; margin: 4px 0 14px; }
+    .kv dt { color: var(--ink-dim); } .kv dd { color: var(--ink); margin: 0; }
+    .kv dd a { color: var(--link); text-decoration: none; } .kv dd a:hover { text-decoration: underline; }
+    .warnbox { border: 1px solid color-mix(in srgb, var(--down) 40%, transparent);
+               background: color-mix(in srgb, var(--down) 12%, transparent); color: var(--ink);
+               border-radius: 8px; padding: 10px 12px; font-size: 12.5px; margin: 4px 0 14px; }
+    .warnbox b { color: var(--down); }
     .tdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); display: inline-block; }
     .tdot.on { background: var(--up); }
 
@@ -170,6 +185,7 @@
       <button id="toggleTerm" class="btn btn-ghost" aria-pressed="false">
         <span class="tdot" id="termDot"></span> Terminal
       </button>
+      <button id="openAbout" class="btn btn-icon" title="About argo-anywhere" aria-label="About argo-anywhere">&#9432;</button>
     </header>
 
     <main class="monitor">
@@ -227,7 +243,7 @@
         <span class="thlabel">Terminal</span>
         <span id="tstatus">idle</span>
         <span class="spacer" style="margin-left:auto"></span>
-        <button id="sigint" class="btn btn-ghost" title="Send Ctrl-C">Ctrl-C</button>
+        <button id="disconnectBtn" class="btn btn-danger" title="Interrupt what's running here (Ctrl-C). If it's the channel, reconnecting needs Duo.">Disconnect</button>
         <button id="closeTerm" class="btn btn-ghost" title="Hide the terminal">Hide</button>
       </div>
       <div id="term"></div>
@@ -274,6 +290,29 @@
         <button id="doLaunch" class="btn btn-primary">Launch</button>
         <button id="cancelLaunch" class="btn btn-ghost">Cancel</button>
         <span class="pop-note" id="popNote"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="backdrop" id="aboutBackdrop" hidden>
+    <div class="popover" role="dialog" aria-modal="true" aria-label="About argo-anywhere">
+      <h2>argo-anywhere</h2>
+      <div class="lede">Run AI coding CLIs against the ANL Argo gateway from anywhere.</div>
+      <dl class="kv" id="aboutKv"><dt>loading…</dt><dd></dd></dl>
+      <div class="pop-actions">
+        <button id="closeAbout" class="btn btn-primary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="backdrop" id="disconnectBackdrop" hidden>
+    <div class="popover" role="dialog" aria-modal="true" aria-label="Disconnect">
+      <h2>Disconnect</h2>
+      <div class="lede" id="dcLede">Interrupt what the embedded terminal is running.</div>
+      <div class="warnbox" id="dcWarn"></div>
+      <div class="pop-actions">
+        <button id="doDisconnect" class="btn btn-danger">Disconnect</button>
+        <button id="cancelDisconnect" class="btn btn-ghost">Cancel</button>
       </div>
     </div>
   </div>
@@ -328,12 +367,13 @@
     term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
     window.addEventListener('resize', () => { if (!el('termwrap').hasAttribute('hidden')) { fit.fit(); sendResize(); } });
     term.onResize(() => sendResize());
-    el('sigint').addEventListener('click', () => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' })); term.focus(); });
+    function sendInterrupt() { if (ws && ws.readyState === WebSocket.OPEN) ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' })); }
+    el('disconnectBtn').addEventListener('click', openDisconnect);
     el('closeTerm').addEventListener('click', () => showTerminal(false));
     el('toggleTerm').addEventListener('click', () => showTerminal(el('termwrap').hasAttribute('hidden')));
 
     // ---- monitor: local status auto-refresh ------------------------------
-    let cachedPort = null, tunnelUp = false, lastSessions = [];
+    let cachedPort = null, tunnelUp = false, lastSessions = [], lastStatus = {};
     let prevTunnelUp = false;                                  // for edge-triggered probe
     let liveHealth = true, healthInFlight = false, lastHealthTs = 0;
     const HEALTH_POLL_MS = 10000;
@@ -343,6 +383,7 @@
 
     async function refreshStatus() {
       let data; try { data = await (await fetch('/api/status', { cache: 'no-store' })).json(); } catch (e) { return; }
+      lastStatus = data;
       const p = data.package || {};
       el('meta').innerHTML = `pkg <b>${p.package_version || '?'}</b> · engine <b>${p.engine_version || '?'}</b>`;
       const st = data.cached || {}; cachedPort = st.port || null;
@@ -504,7 +545,63 @@
     el('openLaunch').addEventListener('click', openLaunch);
     el('cancelLaunch').addEventListener('click', closeLaunch);
     el('launchBackdrop').addEventListener('click', (e) => { if (e.target === el('launchBackdrop')) closeLaunch(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el('launchBackdrop').hasAttribute('hidden')) closeLaunch(); });
+    document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') return;
+      if (!el('launchBackdrop').hasAttribute('hidden')) closeLaunch();
+      if (!el('aboutBackdrop').hasAttribute('hidden')) closeAbout();
+      if (!el('disconnectBackdrop').hasAttribute('hidden')) closeDisconnect(); });
+
+    // ---- About + Disconnect modals --------------------------------------
+    const nodeShort = () => { const n = (lastStatus.cached && lastStatus.cached.node) || ''; return n ? n.split('.')[0] : ''; };
+    function openAbout() {
+      const p = lastStatus.package || {};
+      const repo = 'https://github.com/a-attia/argo-anywhere';
+      el('aboutKv').innerHTML =
+        `<dt>package</dt><dd>${p.package_version || '?'}</dd>` +
+        `<dt>engine</dt><dd>${p.engine_version || '?'} <span style="color:var(--ink-dim)">(${p.engine_sha256_short || '—'})</span></dd>` +
+        `<dt>python</dt><dd>${p.python_version || '?'}</dd>` +
+        `<dt>platform</dt><dd>${p.platform || '?'}</dd>` +
+        `<dt>project</dt><dd><a href="${repo}" data-ext>${repo.replace('https://', '')}</a></dd>`;
+      el('aboutBackdrop').removeAttribute('hidden');
+    }
+    function closeAbout() { el('aboutBackdrop').setAttribute('hidden', ''); }
+    el('openAbout').addEventListener('click', openAbout);
+    el('closeAbout').addEventListener('click', closeAbout);
+    el('aboutBackdrop').addEventListener('click', (e) => { if (e.target === el('aboutBackdrop')) closeAbout(); });
+
+    // External links open in the real browser under a native window (pywebview),
+    // otherwise a normal new tab -- never trapped inside the app webview.
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a[data-ext]'); if (!a) return;
+      if (window.pywebview && window.pywebview.api && window.pywebview.api.open_link) {
+        e.preventDefault(); window.pywebview.api.open_link(a.href);
+      } else { a.target = '_blank'; a.rel = 'noopener'; }
+    });
+
+    function openDisconnect() {
+      const running = ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+      const owner = lastSessions.find((s) => s.alive && s.owns_channel);
+      let warn;
+      if (!running) {
+        el('dcLede').textContent = 'The embedded terminal isn’t running anything right now.';
+        warn = 'Nothing to disconnect here.';
+      } else if (owner) {
+        el('dcLede').textContent = `This UI holds the channel on :${cachedPort || '—'}${nodeShort() ? ' · ' + nodeShort() : ''}.`;
+        warn = 'Disconnecting sends Ctrl-C and <b>drops the tunnel</b>. Reconnecting needs a new Duo prompt.';
+      } else if (tunnelUp) {
+        el('dcLede').textContent = 'The channel is held by an external terminal.';
+        warn = 'This only interrupts the embedded session here; it won’t drop the external channel.';
+      } else {
+        el('dcLede').textContent = 'Interrupt what the embedded terminal is running.';
+        warn = 'Sends Ctrl-C to the embedded session.';
+      }
+      el('dcWarn').innerHTML = warn;
+      el('doDisconnect').disabled = !running;
+      el('disconnectBackdrop').removeAttribute('hidden');
+    }
+    function closeDisconnect() { el('disconnectBackdrop').setAttribute('hidden', ''); }
+    el('cancelDisconnect').addEventListener('click', closeDisconnect);
+    el('disconnectBackdrop').addEventListener('click', (e) => { if (e.target === el('disconnectBackdrop')) closeDisconnect(); });
+    el('doDisconnect').addEventListener('click', () => { sendInterrupt(); closeDisconnect(); term.focus(); setTimeout(refreshStatus, 400); });
 
     el('doLaunch').addEventListener('click', async () => {
       const verb = el('lVerb').value, tool = el('lTool').value, scope = el('lScope').value.trim(), target = el('lTarget').value;

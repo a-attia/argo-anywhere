@@ -32,7 +32,6 @@ import enum
 import fcntl
 import os
 import pty
-import signal
 import struct
 import subprocess
 import termios
@@ -243,9 +242,19 @@ class PtySession:
 
     # -- lifecycle ---------------------------------------------------------
     def interrupt(self) -> None:
-        """Send SIGINT to the child (Ctrl-C)."""
+        """Deliver a Ctrl-C, exactly like typing it in the terminal.
+
+        The child runs in its own session with the PTY as controlling terminal
+        (``start_new_session=True``), and it spawns its own foreground children
+        (ssh, the monitor loop). Sending ``SIGINT`` to the session *leader* alone
+        does not reach that foreground child, which is why the button felt dead.
+        Writing the terminal's INTR byte (``\\x03``) to the PTY master instead
+        makes the line discipline raise ``SIGINT`` on the whole foreground
+        process group -- identical to a real keystroke.
+        """
         if self._proc.poll() is None:
-            self._proc.send_signal(signal.SIGINT)
+            with contextlib.suppress(OSError):
+                os.write(self._master, b"\x03")
 
     def isalive(self) -> bool:
         return self._proc.poll() is None
