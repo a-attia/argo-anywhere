@@ -627,6 +627,15 @@ test-first → merge → polish order). None touch the engine/connect path.
   explicitly. Full decoupling (`setsid` the master; ws **re-attach** to a
   detached session) remains future work. Original note below.
 
+- **"Run in background" — first cut (DONE 2026-07-12).** A header **Background**
+  button (native app only — revealed on `pywebviewready`, hidden in the browser)
+  calls a new `_AppBridge.to_background()` that **minimises** the window; the
+  server + SSH channel keep running, so the user reopens from the Dock/taskbar
+  without a re-connect/Duo. Quit (X / Cmd-Q) still shuts down cleanly via
+  `_shutdown_web`. Refinements deferred: macOS `NSApp.hide` (cleaner Dock
+  auto-reopen) and/or a menu-bar (`LSUIElement`/`NSStatusItem`) mode; both are
+  GUI-specific and want live testing.
+
 - **Embedded terminal kills the channel master on ws-close → repeated Duo
   (surfaced 2026-07-12).** argo-anywhere multiplexes with its own
   `ControlMaster` + `ControlPersist=3600`, but the master's lifetime is coupled

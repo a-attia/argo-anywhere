@@ -427,15 +427,31 @@ def _cmd_app(args: Sequence[str]) -> int:
 
             import webview
 
-            # JS<->Python bridge (window.pywebview.api). Cross-platform: lets the
-            # in-app About's repo link open the user's REAL browser instead of
-            # being trapped inside the app webview.
+            # JS<->Python bridge (window.pywebview.api). Cross-platform.
             class _AppBridge:
+                def __init__(self) -> None:
+                    self.window = None  # set after the window is created
+
                 def open_link(self, target: str) -> str:
+                    # Open external links (the repo) in the user's REAL browser
+                    # instead of trapping them in the app webview.
                     if isinstance(target, str) and target.startswith(("http://", "https://")):
                         webbrowser.open(target)
                         return "opened"
                     return "rejected"
+
+                def to_background(self) -> str:
+                    # "Run in background": keep the app (server + SSH channel)
+                    # running but out of the way -- minimise the window instead
+                    # of quitting. Reopen from the Dock / taskbar. Quit (X /
+                    # Cmd-Q) still shuts down cleanly.
+                    try:
+                        if self.window is not None:
+                            self.window.minimize()
+                            return "backgrounded"
+                    except Exception:
+                        pass
+                    return "unavailable"
 
             # On macOS a non-bundled Python process shows "Python" in the menu
             # bar with an empty About and the generic icon; brand it before the
@@ -443,10 +459,12 @@ def _cmd_app(args: Sequence[str]) -> int:
             # window title) and when run from the .app bundle (Info.plist wins).
             _brand_macos_app()
 
-            webview.create_window(
-                "argo-anywhere", url, js_api=_AppBridge(),
+            _bridge = _AppBridge()
+            _window = webview.create_window(
+                "argo-anywhere", url, js_api=_bridge,
                 width=1200, height=820, min_size=(900, 600),
             )
+            _bridge.window = _window
             print(f"argo-anywhere: native window on {url}")
             # func runs after the Cocoa app is up -> Dock icon + About panel stick.
             webview.start(_install_macos_app_chrome)  # blocks until window closes

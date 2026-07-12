@@ -187,6 +187,7 @@
       <button id="toggleTerm" class="btn btn-ghost" aria-pressed="false">
         <span class="tdot" id="termDot"></span> Terminal
       </button>
+      <button id="toBackground" class="btn btn-ghost" hidden title="Keep argo-anywhere running in the background — the server and SSH channel stay alive; reopen from the Dock / taskbar">Background</button>
       <button id="openAbout" class="btn btn-icon" title="About argo-anywhere" aria-label="About argo-anywhere">&#9432;</button>
     </header>
 
@@ -687,6 +688,18 @@
       } catch (e) { note.textContent = 'request failed'; note.classList.add('err'); }
       finally { el('doLaunch').disabled = false; }
     });
+
+    // ---- "Run in background": native app only (pywebview bridge present) --
+    function _enableBackground() {
+      const api = window.pywebview && window.pywebview.api;
+      if (!api || !api.to_background) return;
+      const b = el('toBackground');
+      if (!b.hasAttribute('hidden')) return;          // already wired
+      b.removeAttribute('hidden');
+      b.addEventListener('click', () => { try { api.to_background(); } catch (e) {} });
+    }
+    window.addEventListener('pywebviewready', _enableBackground);
+    _enableBackground();  // in case the API was injected before this ran
 
     // ---- boot: monitor only; no auto-connect ----------------------------
     setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
