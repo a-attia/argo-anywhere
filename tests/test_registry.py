@@ -74,6 +74,17 @@ def test_snapshot_shape_and_verb() -> None:
     assert snap["exitstatus"] is None
     assert snap["owns_channel"] is True
     assert snap["uptime_s"] >= 0
+    assert snap["detached"] is False
+
+
+def test_detached_flag_flows_into_snapshot() -> None:
+    # A channel owner whose ws closed is kept running + marked detached (the app
+    # layer sets this instead of force-killing it, so the SSH master survives).
+    reg = SessionRegistry()
+    m = reg.register(FakePty(["connect"]))
+    assert m.detached is False
+    m.detached = True
+    assert reg.snapshots()[0]["detached"] is True
 
 
 def test_unregister_removes() -> None:

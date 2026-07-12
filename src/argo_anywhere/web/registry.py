@@ -40,6 +40,7 @@ class SessionInfo:
     alive: bool
     exitstatus: int | None
     owns_channel: bool
+    detached: bool
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -56,6 +57,10 @@ class ManagedSession:
         self.owns_channel = owns_channel(self.argv)
         self.pid = session.pid
         self.started_at = time.time()
+        # Set True when the session's ws closed but we KEPT it running because it
+        # owns the SSH channel (so the master/tunnel survives). Drained + reaped
+        # by the app layer; still explicitly stoppable via /api/sessions/<id>/stop.
+        self.detached = False
 
     def snapshot(self, *, now: float | None = None) -> SessionInfo:
         now = time.time() if now is None else now
@@ -69,6 +74,7 @@ class ManagedSession:
             alive=self.session.isalive(),
             exitstatus=self.session.exitstatus,
             owns_channel=self.owns_channel,
+            detached=self.detached,
         )
 
 

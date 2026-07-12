@@ -447,7 +447,9 @@
       box.innerHTML = '';
       for (const s of sessions) {
         const row = document.createElement('div'); row.className = 'row ' + (s.alive ? 'up' : 'down');
-        const state = s.alive ? ('up ' + fmtUptime(s.uptime_s)) : `exited (${s.exitstatus})`;
+        const state = !s.alive ? `exited (${s.exitstatus})`
+                    : s.detached ? `detached · holding channel · ${fmtUptime(s.uptime_s)}`
+                    : 'up ' + fmtUptime(s.uptime_s);
         row.innerHTML = `<span class="rdot"></span><span class="rid">${s.id}</span><span class="rverb">${s.verb}</span>` +
           `<span class="rmuted">${state}</span><span class="rgrow"></span>` +
           (s.owns_channel ? `<span class="own" title="holds the SSH channel">channel</span>` : '');

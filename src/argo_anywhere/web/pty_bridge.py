@@ -26,8 +26,16 @@ CTRL_PREFIX = "\x00CTRL"
 EXIT_PREFIX = "\x00EXIT"
 
 
-async def run_pty_bridge(ws: WebSocket, session: PtySession) -> None:
-    """Pump bytes between ``ws`` and ``session`` until either side closes."""
+async def run_pty_bridge(
+    ws: WebSocket, session: PtySession, *, terminate_on_close: bool = True
+) -> None:
+    """Pump bytes between ``ws`` and ``session`` until either side closes.
+
+    ``terminate_on_close`` (default True) kills the child when the ws closes. Pass
+    False to LEAVE a still-alive session running (the caller then owns draining +
+    reaping it) -- used for channel-owning sessions so the SSH master survives a
+    ws-close instead of dropping the tunnel and forcing a fresh Duo.
+    """
     loop = asyncio.get_running_loop()
     fd = session.fileno()
     closed = asyncio.Event()
@@ -88,12 +96,17 @@ async def run_pty_bridge(ws: WebSocket, session: PtySession) -> None:
 
     await closed.wait()
 
-    # Teardown: stop reading, reap the child, report exit status to the client.
+    # Teardown: stop reading + cancel the pump.
     try:
         loop.remove_reader(fd)
     except Exception:
         pass
     pump.cancel()
+
+    # Detach path: a still-alive session the caller wants to keep (channel owner).
+    # Leave it running -- the caller drains + reaps it -- and don't report an exit.
+    if session.isalive() and not terminate_on_close:
+        return
 
     exit_status = session.exitstatus
     if session.isalive():

@@ -612,7 +612,20 @@ test-first → merge → polish order). None touch the engine/connect path.
   `open_external` (native download / print) — we have no download/print surface
   yet. Revisit those if/when the web UI grows file export or print.
 
-## Web-session hardening backlog
+## Web-session hardening
+
+- **Detach channel owners on ws-close + graceful app shutdown — DONE
+  (2026-07-12).** `pty_bridge.run_pty_bridge` gained `terminate_on_close`; the
+  `/ws` handler passes `False` for channel owners, so when their ws closes the
+  session is **kept running** (registry marks it `detached`; a PTY drainer keeps
+  it from blocking and reaps it on exit) — the SSH master survives, so reusing the
+  embedded terminal / navigating away no longer forces a fresh Duo. And
+  `argo-anywhere app` now runs `_shutdown_web` when the window closes / Ctrl-C:
+  it stops every managed session (no orphaned `connect`/`ssh`) and lets the
+  daemon server thread unwind, instead of being killed mid-flight (which macOS
+  reported as "quit unexpectedly"). Stop/Disconnect still end a detached session
+  explicitly. Full decoupling (`setsid` the master; ws **re-attach** to a
+  detached session) remains future work. Original note below.
 
 - **Embedded terminal kills the channel master on ws-close → repeated Duo
   (surfaced 2026-07-12).** argo-anywhere multiplexes with its own

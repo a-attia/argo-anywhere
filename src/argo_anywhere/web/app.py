@@ -13,6 +13,7 @@ the browser terminal via :func:`argo_anywhere.web.pty_bridge.run_pty_bridge`.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import subprocess
 import sys
@@ -311,11 +312,50 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         await ws.accept()
         session = PtySession(argv, dimensions=(24, 80))
         managed = registry.register(session)
+        detached = False
         try:
-            await run_pty_bridge(ws, session)
+            # Channel owners aren't force-killed on ws-close: keep them running so
+            # the SSH master (and the tunnel) survives -> no repeat Duo.
+            await run_pty_bridge(ws, session, terminate_on_close=not managed.owns_channel)
+            if managed.owns_channel and session.isalive():
+                detached = True
+                _drain_detached(managed)
         finally:
+            if not detached:
+                registry.unregister(managed.id)
+                session.close()
+
+    def _drain_detached(managed) -> None:
+        """Keep a detached channel-owning session alive after its ws closed.
+
+        Its ``connect`` keeps printing to the PTY; with no reader the buffer fills
+        and the process blocks. So we drain (discard) the PTY on the event loop,
+        and reap + unregister the session when it finally exits (or is stopped via
+        ``/api/sessions/<id>/stop``, which closes the pty and triggers EOF here).
+        """
+        session = managed.session
+        fd = session.fileno()
+        loop = asyncio.get_running_loop()
+        managed.detached = True
+
+        def _drain() -> None:
+            try:
+                data = session.read()
+            except OSError:
+                data = b""
+            if data:
+                return
+            try:  # EOF -> the child exited (or was stopped): clean up.
+                loop.remove_reader(fd)
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
             registry.unregister(managed.id)
-            session.close()
+
+        loop.add_reader(fd, _drain)
 
     return app
 

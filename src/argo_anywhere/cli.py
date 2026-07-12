@@ -450,7 +450,7 @@ def _cmd_app(args: Sequence[str]) -> int:
             print(f"argo-anywhere: native window on {url}")
             # func runs after the Cocoa app is up -> Dock icon + About panel stick.
             webview.start(_install_macos_app_chrome)  # blocks until window closes
-            server.should_exit = True
+            _shutdown_web(app, server, thread)
             return 0
         except ModuleNotFoundError:
             print(
@@ -468,8 +468,35 @@ def _cmd_app(args: Sequence[str]) -> int:
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
-    server.should_exit = True
+    _shutdown_web(app, server, thread)
     return 0
+
+
+def _shutdown_web(app, server, thread) -> None:
+    """Shut the app down cleanly when the window closes / Ctrl-C.
+
+    Closing the native window returns from ``webview.start``; without this the
+    daemon server thread and any managed PTY children (a held ``connect`` + its
+    SSH master, kept alive by the ws-detach) would be killed mid-flight as the
+    process exits -- which orphans the ssh master and macOS reports as "quit
+    unexpectedly". So we first stop every managed session (tearing the channel
+    down cleanly), then let the server thread unwind.
+    """
+    try:
+        reg = getattr(app.state, "registry", None)
+        if reg is not None:
+            for m in reg.list():
+                try:
+                    m.session.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    server.should_exit = True
+    try:
+        thread.join(timeout=4)
+    except Exception:
+        pass
 
 
 def _cmd_install_launcher(args: Sequence[str]) -> int:
