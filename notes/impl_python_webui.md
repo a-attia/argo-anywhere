@@ -586,19 +586,31 @@ test-first → merge → polish order). None touch the engine/connect path.
      External links open in the real browser via the existing `_AppBridge`
      bridge (scrollback's pattern — don't trap `target=_blank` in the webview).
 
-## Copy / UX polish backlog
+## Copy / UX polish
 
-- **Mux-handoff monitor messages read as alarms (surfaced 2026-07-12).** In the
+- **Mux-handoff monitor messages — softened (DONE 2026-07-12).** In the
   `monitor_tunnel_loop` steady state under SSH multiplexing (D-003), the
   foreground `ssh -N -L` is *expected* to exit once the mux master owns the
-  forward; the loop prints `[warn] SSH tunnel process exited` + `[warn] Health
-  monitor exited; checking forward state` then `mux master owns the forward. No
-  reconnect needed`. These are **healthy** but yellow-`warn`-styled, and in the
-  web UI they batch up while the terminal drawer is hidden and look scary on
-  hide→show. Polish: demote the expected mux-handoff lines from `warn` to `log`
-  (reserve `warn` for an actual reconnect), and consider reducing the
-  monitor exit/respawn churn so the pair isn't reprinted every cycle. Benign;
-  pre-existing (not v3-introduced).
+  forward. The two lines that fire before the `/health` check
+  (`SSH tunnel process exited`, `Health monitor exited`) were yellow `[warn]`
+  and looked alarming (worse in the web UI, where they batch up while the drawer
+  is hidden and appear all at once on hide→show). Demoted both to `[log]` and
+  reworded ("Foreground ssh exited … checking forward state", "Health monitor
+  cycle ended … re-checking"); the real-reconnect path keeps its `warn`s. Benign;
+  pre-existing.
+- **Native macOS app branding — compared to scrollback (2026-07-12).** Scrollback
+  parity check (`../scrollback/src/scrollback/cli.py`). **Borrowed:** patch the
+  main-bundle info dict so the standard macOS "About" panel is populated
+  (`CFBundleShortVersionString`/`Version` + `NSHumanReadableCopyright` = desc +
+  repo) and set the **Dock icon** from our packaged `.icns` via
+  `NSApplication.setApplicationIconImage_` — so `argo-anywhere app` shows the
+  constellation icon + a real About even unbundled (`_brand_macos_app`).
+  **Skipped by choice:** scrollback's `_install_macos_about_link` (an Obj-C
+  subclass re-pointing the About item to a clickable-link panel via
+  `webview.start(func=…)`) — higher-risk and our in-app **ⓘ** modal already gives
+  a clickable repo link cross-platform; and its `_AppBridge.save_file` /
+  `open_external` (native download / print) — we have no download/print surface
+  yet. Revisit those if/when the web UI grows file export or print.
 
 ## Engine hardening backlog
 

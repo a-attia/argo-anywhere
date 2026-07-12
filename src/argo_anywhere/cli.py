@@ -227,17 +227,22 @@ def _cmd_web(args: Sequence[str]) -> int:
     return 0
 
 
-def _set_macos_app_name(name: str) -> None:
-    """Make the macOS menu-bar app name ``name`` instead of "Python".
+def _brand_macos_app() -> None:
+    """Brand the macOS app for ``argo-anywhere app`` when run unbundled.
 
-    A non-bundled Python process shows "Python" in the menu bar because Cocoa
-    reads the name from the main bundle's ``CFBundleName``. Overriding the info
-    dict before the ``NSApplication`` menu is built fixes it. No-op off macOS and
-    if pyobjc (pulled in by pywebview's Cocoa backend) isn't importable. When run
-    from the install-launcher ``.app`` bundle, ``CFBundleName`` is already right.
+    Cocoa reads the menu-bar name, the standard "About" panel, and the Dock icon
+    from the running process's bundle info dict — which for an unbundled Python
+    process is "Python", an empty About, and the generic icon. We patch the main
+    bundle's info dict (via pyobjc, a pywebview dep on macOS) so pywebview's
+    default app menu gets the right name + a populated About, and set the Dock
+    icon from our packaged ``.icns``. No-op off macOS and if pyobjc isn't
+    importable; best-effort, never blocks the window. When launched from the
+    install-launcher ``.app`` bundle these come from Info.plist instead. Modeled
+    on scrollback's ``_brand_macos_app``.
     """
     if sys.platform != "darwin":
         return
+    repo = "https://github.com/a-attia/argo-anywhere"
     try:
         from Foundation import NSBundle  # provided by pyobjc on macOS
 
@@ -245,9 +250,29 @@ def _set_macos_app_name(name: str) -> None:
         if bundle is not None:
             info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
             if info is not None:
-                info["CFBundleName"] = name
+                info["CFBundleName"] = "argo-anywhere"
+                info["CFBundleDisplayName"] = "argo-anywhere"
+                # Fields the standard "About argo-anywhere" panel reads:
+                info["CFBundleShortVersionString"] = __version__
+                info["CFBundleVersion"] = __version__
+                info["NSHumanReadableCopyright"] = (
+                    "Run AI coding CLIs against the ANL Argo gateway from anywhere.\n"
+                    + repo.replace("https://", "")
+                )
     except Exception:
-        pass  # best-effort cosmetic; never block the app from opening
+        pass
+    # Dock icon (the constellation .icns), independent of the menu name.
+    try:
+        from importlib.resources import as_file, files
+
+        from AppKit import NSApplication, NSImage  # type: ignore
+
+        with as_file(files("argo_anywhere").joinpath("assets/icon.icns")) as icon:
+            img = NSImage.alloc().initWithContentsOfFile_(str(icon))
+        if img is not None:
+            NSApplication.sharedApplication().setApplicationIconImage_(img)
+    except Exception:
+        pass
 
 
 def _cmd_app(args: Sequence[str]) -> int:
@@ -314,10 +339,10 @@ def _cmd_app(args: Sequence[str]) -> int:
                     return "rejected"
 
             # On macOS a non-bundled Python process shows "Python" in the menu
-            # bar; name it before the Cocoa app/menu is built. No-op elsewhere
-            # (Windows/Linux use the window title) and when run from the .app
-            # bundle (CFBundleName is already correct there).
-            _set_macos_app_name("argo-anywhere")
+            # bar with an empty About and the generic icon; brand it before the
+            # Cocoa app/menu is built. No-op elsewhere (Windows/Linux use the
+            # window title) and when run from the .app bundle (Info.plist wins).
+            _brand_macos_app()
 
             webview.create_window(
                 "argo-anywhere", url, js_api=_AppBridge(),

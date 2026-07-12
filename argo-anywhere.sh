@@ -4442,14 +4442,20 @@ monitor_tunnel_loop() {
   while true; do
     if [ -n "$SSH_TUNNEL_PID" ]; then
       wait "$SSH_TUNNEL_PID" || true
-      warn "SSH tunnel process exited (pid=${SSH_TUNNEL_PID})."
+      # Info, not a warning: under SSH multiplexing the foreground `ssh -N -L`
+      # is EXPECTED to exit once the mux master owns the forward (D-003). The
+      # /health check just below decides severity -- a real drop escalates to
+      # warn via the reconnect block; the benign mux-handoff stays quiet.
+      log "Foreground ssh exited (pid=${SSH_TUNNEL_PID}); checking forward state..."
     else
       # No foreground tunnel pid; wait on the health monitor instead so
       # Ctrl-C still works. If the monitor exits (e.g. it detected the
       # forward died), fall through to the reconnect-attempt block below.
       if [ -n "${MONITOR_PID:-}" ]; then
         wait "$MONITOR_PID" 2>/dev/null || true
-        warn "Health monitor exited; checking forward state."
+        # Info, not a warning: the monitor cycle ending is routine; the /health
+        # check below decides whether anything is actually wrong.
+        log "Health monitor cycle ended; re-checking forward state..."
       else
         # No monitor either -- shouldn't happen. Bail safely.
         warn "No tunnel pid and no monitor pid; nothing to wait on."
