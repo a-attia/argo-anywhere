@@ -6,7 +6,17 @@
   <title>argo-anywhere</title>
   <link rel="stylesheet" href="/static/xterm.css" />
   <style>
+    /* D-031 Task 5.5: light/dark theme via `data-theme` attribute on <html>.
+       Every UI color MUST live in a CSS custom property so both palettes
+       cover it (AGENTS.md rule). Never introduce hex literals in downstream
+       styles -- the toggle would then miss those surfaces silently. */
     :root {
+      --radius: 8px;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    /* Dark palette (the pre-D-031 default). */
+    :root, :root[data-theme="dark"] {
       color-scheme: dark;
       --bg: #131720;
       --panel: #1a1f2b;
@@ -21,9 +31,53 @@
       --down: #f2685f;
       --link: #4fd1cf;
       --link-soft: rgba(79, 209, 207, 0.13);
-      --radius: 8px;
-      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-      --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --term-bg: #0f131b;
+      --term-fg: #cdd3de;
+      --term-cursor: #4fd1cf;
+    }
+    /* Light palette. Sibling `scrollback` project's palette shape as prior art.
+       Contrast targets: WCAG AA for body text on background. */
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-raised: #f0f2f5;
+      --line: #d5d9e0;
+      --line-soft: #e2e5ea;
+      --ink: #1c2230;
+      --ink-dim: #5a6377;
+      --ink-faint: #8a92a4;
+      --up: #1f8a3b;
+      --warn: #a06400;
+      --down: #c93a2f;
+      --link: #0678a3;
+      --link-soft: rgba(6, 120, 163, 0.10);
+      --term-bg: #fafbfc;
+      --term-fg: #1c2230;
+      --term-cursor: #0678a3;
+    }
+    /* auto follows the OS preference until the user picks explicitly. Applied
+       via JS by leaving data-theme unset when the choice is "auto". */
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme]) {
+        color-scheme: light;
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --panel-raised: #f0f2f5;
+        --line: #d5d9e0;
+        --line-soft: #e2e5ea;
+        --ink: #1c2230;
+        --ink-dim: #5a6377;
+        --ink-faint: #8a92a4;
+        --up: #1f8a3b;
+        --warn: #a06400;
+        --down: #c93a2f;
+        --link: #0678a3;
+        --link-soft: rgba(6, 120, 163, 0.10);
+        --term-bg: #fafbfc;
+        --term-fg: #1c2230;
+        --term-cursor: #0678a3;
+      }
     }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }  /* beat class display rules (e.g. .connect-cta) */
@@ -139,9 +193,33 @@
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--panel-raised);
             border: 1px solid var(--line); border-radius: 20px; padding: 2px 10px; }
-    .models-list { margin-top: 10px; max-height: 150px; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
-    .model { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); padding: 2px 6px; }
-    .model:hover { color: var(--ink); background: var(--panel-raised); border-radius: 4px; }
+    .models-list { margin-top: 10px; max-height: 260px; overflow: auto;
+                   display: flex; flex-direction: column; gap: 4px; padding-right: 4px; }
+    /* Each model rendered as a row: id (mono, primary) + provider chip +
+       modalities chip + optional "in opencode config" chip. Grid-based so
+       long ids don't push the badges off screen. */
+    .model { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px;
+             align-items: center; padding: 6px 8px; border-radius: 4px;
+             border: 1px solid transparent; }
+    .model:hover { background: var(--panel-raised); border-color: var(--line-soft); }
+    .model .m-id { font-family: var(--mono); font-size: 12px; color: var(--ink); font-weight: 500; }
+    .model .m-internal { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint);
+                         margin-left: 6px; }
+    .model .m-badges { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+    /* Badge styling: small caps-adjacent uppercase, per-provider tint. */
+    .m-badge { font-family: var(--mono); font-size: 9.5px; padding: 1px 6px;
+               border-radius: 3px; border: 1px solid var(--line);
+               color: var(--ink-dim); background: var(--panel-raised);
+               text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; }
+    .m-badge.prov-openai   { color: #10a37f; border-color: color-mix(in srgb, #10a37f 40%, transparent); }
+    .m-badge.prov-claude   { color: #c96442; border-color: color-mix(in srgb, #c96442 40%, transparent); }
+    .m-badge.prov-gemini   { color: #4285f4; border-color: color-mix(in srgb, #4285f4 40%, transparent); }
+    .m-badge.oc-yes  { color: var(--up); border-color: color-mix(in srgb, var(--up) 45%, transparent); }
+    .m-badge.oc-orph { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+    .models-note { font-size: 10.5px; color: var(--ink-faint); padding: 4px 6px 2px;
+                   border-left: 2px solid var(--line); margin: 6px 0; }
+    .models-counts { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim);
+                     padding: 2px 6px; }
     .subhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-faint);
                font-weight: 600; margin: 12px 0 7px; }
 
@@ -149,12 +227,24 @@
     .termwrap { display: flex; flex-direction: column; height: 42vh; min-height: 200px;
                 border-top: 1px solid var(--line); }
     .termwrap[hidden] { display: none; }
+    /* D-031: dual-panel split. termwrap grows two child panels side-by-side
+       with a draggable divider; both share the container's show/hide state. */
+    .termsplit { display: flex; flex: 1; min-height: 0; }
+    .termpanel { display: flex; flex-direction: column; min-height: 0; min-width: 0;
+                 background: var(--panel); border-right: 1px solid var(--line); }
+    .termpanel:last-child { border-right: none; }
     .term-head { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: var(--panel); font-size: 12px; }
     .term-head .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-faint); }
     .term-head .dot.up { background: var(--up); } .term-head .dot.down { background: var(--down); }
     .term-head .thlabel { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.13em; color: var(--ink-faint); font-weight: 600; }
-    .term-head #tstatus { font-family: var(--mono); color: var(--ink-dim); }
-    #term { flex: 1; padding: 6px 8px; background: #0f131b; min-height: 0; }
+    .term-head .tstatus { font-family: var(--mono); color: var(--ink-dim); }
+    .term-head .role { font-size: 10.5px; color: var(--ink-faint); font-family: var(--mono); }
+    .termbody { flex: 1; padding: 6px 8px; background: var(--term-bg); min-height: 0; min-width: 0; }
+    .termpanel[hidden] { display: none; }
+    /* Draggable divider between Channel + Utility. Min/max widths enforced in JS. */
+    .termdivider { flex: 0 0 5px; background: var(--line); cursor: col-resize;
+                   transition: background 0.15s ease; }
+    .termdivider:hover, .termdivider.dragging { background: var(--link); }
 
     /* ---- launch popover ---- */
     .backdrop { position: fixed; inset: 0; background: rgba(8, 10, 14, 0.55); display: flex;
@@ -162,6 +252,9 @@
     .backdrop[hidden] { display: none; }
     .popover { width: min(440px, 92vw); background: var(--panel); border: 1px solid var(--line);
                border-radius: 10px; padding: 16px 18px 18px; box-shadow: 0 18px 50px rgba(0,0,0,0.5); }
+    /* The Actions popover carries more fields (cwd + Browse + hint) than the
+       small confirm/about sheets, so give it more room to breathe (D-031). */
+    #launchBackdrop .popover { width: min(620px, 94vw); }
     .popover h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
     .popover .lede { color: var(--ink-dim); font-size: 12px; margin-bottom: 14px; }
     .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
@@ -182,12 +275,20 @@
     <header class="topbar">
       <div class="brand"><span class="mark"></span> argo-anywhere <span class="tag">web</span></div>
       <div class="meta" id="meta">…</div>
+      <!-- D-031 D3a: app-cwd status strip -- shows where the argo-anywhere
+           process itself is running (distinct from where a launched tool
+           will start; the launcher's cwd field controls that per-launch). -->
+      <div class="meta" id="appCwd" title="argo-anywhere itself is running from this directory (spawned tools use the per-launch cwd field instead)">app cwd: <b>…</b></div>
       <span class="spacer"></span>
       <button id="openLaunch" class="btn btn-primary">Actions</button>
       <button id="toggleTerm" class="btn btn-ghost" aria-pressed="false">
         <span class="tdot" id="termDot"></span> Terminal
       </button>
       <button id="toBackground" class="btn btn-ghost" hidden title="Keep argo-anywhere running in the background — the server and SSH channel stay alive; reopen from the Dock / taskbar">Background</button>
+      <!-- D-031 Task 5.5: theme toggle cycles auto -> dark -> light -> auto.
+           Icon reflects the CURRENT rendered theme (◐ auto / ☾ dark / ☀ light).
+           Persisted in ~/.argo_anywhere/web_state.json via /api/state. -->
+      <button id="themeToggle" class="btn btn-icon" title="Theme: auto (click to cycle)" aria-label="Toggle theme">◐</button>
       <button id="openAbout" class="btn btn-icon" title="About argo-anywhere" aria-label="About argo-anywhere">&#9432;</button>
     </header>
 
@@ -231,38 +332,66 @@
         </section>
         <section class="card">
           <div class="eyebrow">Tools &amp; models</div>
+          <!-- D-031 clarification 2026-07-13: name what the chips mean. -->
+          <div class="subhead" title="AI CLI tools argo-anywhere knows how to install + configure against the tunnel">Supported CLI tools</div>
           <div class="chips" id="toolChips"><span class="empty">loading…</span></div>
-          <div class="subhead">Models
-            <button id="loadModels" class="stop-btn" style="margin-left:8px">Load (ANL)</button>
+          <div class="subhead" style="display:flex; align-items:center; gap:8px;">
+            <span title="Models served by argo-proxy on the compute node, fetched via the tunnel">Models served by argo-proxy</span>
+            <button id="loadModels" class="stop-btn">Load (ANL)</button>
+            <span id="modelsCounts" class="models-counts" hidden></span>
           </div>
-          <div class="models-list" id="modelsList"><span class="empty">not loaded</span></div>
+          <div class="models-note" id="modelsNote" hidden></div>
+          <div class="models-list" id="modelsList"><span class="empty">not loaded — click "Load (ANL)" to fetch via the tunnel</span></div>
         </section>
       </div>
     </main>
 
     <section class="termwrap" id="termwrap" hidden>
       <div class="term-head">
-        <span class="dot" id="conn"></span>
-        <span class="thlabel">Terminal</span>
-        <span id="tstatus">idle</span>
+        <span class="thlabel">Terminals</span>
+        <span class="role">Channel · connect  ·  Utility · configure / setup / tunnel</span>
         <span class="spacer" style="margin-left:auto"></span>
-        <button id="disconnectBtn" class="btn btn-danger" title="Interrupt what's running here (Ctrl-C). If it's the channel, reconnecting needs Duo.">Disconnect</button>
-        <button id="closeTerm" class="btn btn-ghost" title="Hide the terminal">Hide</button>
+        <button id="disconnectBtn" class="btn btn-danger" title="Interrupt what's running in the focused panel (Ctrl-C). If it's the channel, reconnecting needs Duo.">Disconnect</button>
+        <button id="closeTerm" class="btn btn-ghost" title="Hide both terminals">Hide</button>
       </div>
-      <div id="term"></div>
+      <div class="termsplit" id="termsplit">
+        <!-- D-031 Channel panel (left): persistent; owns the `connect` verb;
+             ws-close does NOT terminate (SSH master survives -> no repeat Duo). -->
+        <section class="termpanel" id="panel-channel">
+          <div class="term-head" style="border-bottom:1px solid var(--line-soft)">
+            <span class="dot" id="dot-channel"></span>
+            <span class="thlabel">Channel</span>
+            <span class="tstatus" id="tstatus-channel">idle</span>
+          </div>
+          <div class="termbody" id="term-channel"></div>
+        </section>
+        <div class="termdivider" id="termdivider" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize"></div>
+        <!-- D-031 Utility panel (right): ephemeral; runs configure/setup/tunnel;
+             ws-close terminates cleanly. Replaceable. -->
+        <section class="termpanel" id="panel-utility">
+          <div class="term-head" style="border-bottom:1px solid var(--line-soft)">
+            <span class="dot" id="dot-utility"></span>
+            <span class="thlabel">Utility</span>
+            <span class="tstatus" id="tstatus-utility">idle</span>
+          </div>
+          <div class="termbody" id="term-utility"></div>
+        </section>
+      </div>
     </section>
   </div>
 
   <div class="backdrop" id="launchBackdrop" hidden>
     <div class="popover" role="dialog" aria-modal="true" aria-label="Launch">
       <h2>Actions</h2>
-      <div class="lede">Pick what to do. Coding tools open in a new native window by default; connecting runs in the embedded terminal.</div>
+      <div class="lede">Pick what to do. Coding tools (<code>run</code>) always open in a new native window. <code>connect</code> runs in the in-browser Channel panel; <code>configure</code>/<code>setup</code>/<code>tunnel</code> in the Utility panel.</div>
       <div class="two">
         <div class="field">
           <label for="lVerb">command</label>
+          <!-- D-031 A2: `client` is REMOVED from the web-UI verb dropdown.
+               The web UI teaches the split-verb story (connect + configure +
+               run). CLI users keep the `client` verb unchanged. -->
           <select id="lVerb">
             <option value="run">Launch a coding tool · run</option>
-            <option value="client">Connect + launch a tool · client</option>
             <option value="configure">Configure a tool · configure</option>
             <option value="setup">Set up a tool (choose which) · setup</option>
             <option value="connect">Connect to Argo — channel only · connect</option>
@@ -281,13 +410,35 @@
       </div>
       <div class="two">
         <div class="field">
-          <label for="lScope">scope (optional)</label>
-          <input id="lScope" type="text" placeholder="e.g. project" autocomplete="off" />
+          <!-- D-031 Task 6: scope dropdown (was a free-text input pre-D-031;
+               typos surfaced as opaque engine `die` errors). Closed vocabulary
+               matches the per-tool <name>_scope_values() in the engine; keep
+               the two in lockstep per AGENTS.md coupling rule. -->
+          <label for="lScope">scope</label>
+          <select id="lScope" title="Where the tool's argo-proxy pointer is written.  auto = per-tool default (hybrid for claudecode)  ·  global = ~/.config or ~ (applies from any dir)  ·  project = <cwd>/opencode.json etc (applies only from this project)">
+            <option value="">— auto —</option>
+            <option value="global">global</option>
+            <option value="project">project</option>
+          </select>
         </div>
         <div class="field">
           <label for="lTarget">where to run</label>
           <select id="lTarget"><option value="embedded">Embedded terminal</option></select>
         </div>
+      </div>
+      <!-- D-031 Task 3: working-directory field. Absolute path required
+           (client-side + server-side). Browse button shows only in pywebview
+           (bridge sniff); browser mode hides it. Datalist for MRU history
+           populates in Task 5. -->
+      <div class="field">
+        <label for="lCwd">working directory</label>
+        <div style="display:flex; gap:8px; align-items:stretch;">
+          <input id="lCwd" type="text" placeholder="/absolute/path/to/project" autocomplete="off"
+                 list="cwdHistory" style="flex:1" />
+          <button id="browseCwd" class="btn btn-ghost" type="button" hidden title="Pick a folder (native dialog)">Browse…</button>
+        </div>
+        <datalist id="cwdHistory"></datalist>
+        <span class="pop-note" style="margin-top:4px">the tool will start in this directory (absolute path)</span>
       </div>
       <div class="pop-actions">
         <button id="doLaunch" class="btn btn-primary">Launch</button>
@@ -341,56 +492,241 @@
   <script src="/static/xterm-addon-fit.js"></script>
   <script>
     const el = (id) => document.getElementById(id);
-
-    // ---- terminal (reconnectable; revealed on demand) --------------------
-    const term = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                                fontSize: 13, theme: { background: '#0f131b' } });
-    const fit = new FitAddon.FitAddon();
-    term.loadAddon(fit); term.open(el('term'));
-    const conn = el('conn'); const tstatus = el('tstatus'); const termDot = el('termDot');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const CTRL = '\x00CTRL', EXIT = '\x00EXIT', dec = new TextDecoder();
-    let ws = null;
 
-    function showTerminal(show) {
+    // ---- D-031: dual terminal panels (Channel + Utility) -----------------
+    // Each panel owns one xterm instance + one WebSocket. Channel is persistent
+    // (owns `connect`; ws-close does NOT terminate on the server side), Utility
+    // is ephemeral (runs configure/setup/tunnel; freely replaceable).
+    class TerminalPanel {
+      constructor(name, bodyId, dotId, statusId) {
+        this.name = name;                       // "channel" | "utility"
+        // D-031 Task 5.5: initial theme is read from CSS variables so light /
+        // dark start in the right palette; the theme controller retints on
+        // every toggle via setOption('theme', ...).
+        const getVar = (n, fallback) =>
+          (getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fallback);
+        this.term = new Terminal({ cursorBlink: true,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          fontSize: 13,
+          theme: {
+            background: getVar('--term-bg', '#0f131b'),
+            foreground: getVar('--term-fg', '#cdd3de'),
+            cursor: getVar('--term-cursor', '#4fd1cf'),
+          },
+        });
+        this.fit = new FitAddon.FitAddon();
+        this.term.loadAddon(this.fit);
+        this.term.open(el(bodyId));
+        this.dot = el(dotId);
+        this.tstatus = el(statusId);
+        this.ws = null;
+        this.term.onData((d) => { if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(d); });
+        this.term.onResize(() => this._sendResize());
+      }
+      _sendResize() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(CTRL + JSON.stringify({ op: 'resize', rows: this.term.rows, cols: this.term.cols }));
+        }
+      }
+      refit() { try { this.fit.fit(); } catch (e) {} this._sendResize(); }
+      focus() { this.term.focus(); }
+      isRunning() { return this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING); }
+      sendInterrupt() { if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' })); }
+      open(query, label) {
+        showTerminals(true);
+        if (this.isRunning()) { try { this.ws.close(); } catch (e) {} }
+        this.term.reset();
+        this.tstatus.textContent = 'connecting…';
+        const sock = new WebSocket(`${proto}://${location.host}/ws` + (query ? '?' + query : ''));
+        sock.binaryType = 'arraybuffer';
+        sock.onopen = () => {
+          this.dot.classList.remove('down'); this.dot.classList.add('up');
+          this.tstatus.textContent = 'running' + (label ? ' · ' + label : '');
+          requestAnimationFrame(() => { this.refit(); this.focus(); });
+          refreshStatus();
+        };
+        sock.onmessage = (ev) => {
+          if (typeof ev.data === 'string') {
+            if (ev.data.startsWith(EXIT)) {
+              let info = {}; try { info = JSON.parse(ev.data.slice(EXIT.length)); } catch (e) {}
+              this.term.write(`\r\n\x1b[33m[process exited: status=${info.exitstatus}]\x1b[0m\r\n`);
+              this.tstatus.textContent = `exited (status=${info.exitstatus})`;
+              this.dot.classList.remove('up'); refreshStatus();
+              return;
+            }
+            this.term.write(ev.data);
+          } else {
+            this.term.write(dec.decode(new Uint8Array(ev.data)));
+          }
+        };
+        sock.onclose = () => {
+          if (sock !== this.ws) return;
+          this.dot.classList.remove('up'); this.dot.classList.add('down');
+          this.tstatus.textContent = 'disconnected';
+        };
+        sock.onerror = (e) => {
+          // Server side rejects with 1008 for D-031 policy violations (channel
+          // already up; run/client hard-block). Give the user something to see
+          // instead of a silent disconnect.
+          this.tstatus.textContent = 'ws error (rejected by server)';
+        };
+        this.ws = sock;
+      }
+    }
+
+    const channelPanel = new TerminalPanel('channel', 'term-channel', 'dot-channel', 'tstatus-channel');
+    const utilityPanel = new TerminalPanel('utility', 'term-utility', 'dot-utility', 'tstatus-utility');
+
+    // ---- D-031 Task 5.5: light/dark theme toggle -------------------------
+    // Cycles auto -> dark -> light -> auto. `auto` means "follow OS via
+    // prefers-color-scheme" (no data-theme attribute; CSS's @media block
+    // applies). Explicit choices set data-theme=<value> which the palette
+    // blocks pick up. Persisted via /api/state (loadState() applies on boot).
+    const THEME_CYCLE = ['auto', 'dark', 'light'];
+    const THEME_ICONS = { auto: '◐', dark: '☾', light: '☀' };
+    let currentTheme = 'auto';
+
+    function _resolveEffectiveTheme(pick) {
+      // Which palette is actually being rendered right now (for xterm.js retinting).
+      if (pick !== 'auto') return pick;
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+        ? 'light' : 'dark';
+    }
+    function _cssVar(name) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+    function _retintTerminals() {
+      // Read the resolved CSS variables and hand them to xterm.js so the
+      // panels match the rest of the UI on every toggle (including auto's
+      // OS-preference flip). Both panels share the same theme.
+      const theme = {
+        background: _cssVar('--term-bg') || '#0f131b',
+        foreground: _cssVar('--term-fg') || '#cdd3de',
+        cursor: _cssVar('--term-cursor') || '#4fd1cf',
+      };
+      try { channelPanel.term.setOption('theme', theme); } catch (e) {}
+      try { utilityPanel.term.setOption('theme', theme); } catch (e) {}
+    }
+    function applyTheme(pick) {
+      currentTheme = THEME_CYCLE.includes(pick) ? pick : 'auto';
+      if (currentTheme === 'auto') {
+        document.documentElement.removeAttribute('data-theme');
+      } else {
+        document.documentElement.setAttribute('data-theme', currentTheme);
+      }
+      const btn = el('themeToggle');
+      const effective = _resolveEffectiveTheme(currentTheme);
+      btn.textContent = THEME_ICONS[currentTheme];
+      btn.title = `Theme: ${currentTheme}${currentTheme === 'auto' ? ' (currently ' + effective + ')' : ''} — click to cycle`;
+      _retintTerminals();
+    }
+    function _cycleTheme() {
+      const i = THEME_CYCLE.indexOf(currentTheme);
+      const next = THEME_CYCLE[(i + 1) % THEME_CYCLE.length];
+      applyTheme(next);
+      // Persist (best-effort; UI applies immediately regardless of write outcome).
+      fetch('/api/state', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: next }),
+      }).catch(() => {});
+    }
+    el('themeToggle').addEventListener('click', _cycleTheme);
+    // Re-tint when the OS preference flips under `auto`.
+    if (window.matchMedia) {
+      const m = window.matchMedia('(prefers-color-scheme: light)');
+      const onFlip = () => { if (currentTheme === 'auto') applyTheme('auto'); };
+      if (m.addEventListener) m.addEventListener('change', onFlip);
+      else if (m.addListener) m.addListener(onFlip);  // Safari <14
+    }
+    // Boot with the CSS default (`auto`) so the terminal renders correctly
+    // even before /api/state resolves.
+    applyTheme('auto');
+    // The panel a launcher verb routes to (matches server-side _panel_for_verb).
+    function panelForVerb(verb) {
+      if (verb === 'connect') return channelPanel;
+      if (verb === 'configure' || verb === 'setup' || verb === 'tunnel') return utilityPanel;
+      return null;  // run/client are hard-blocked from embedded
+    }
+
+    function showTerminals(show) {
       const w = el('termwrap');
       if (show) w.removeAttribute('hidden'); else w.setAttribute('hidden', '');
       el('toggleTerm').setAttribute('aria-pressed', String(show));
       el('toggleTerm').classList.toggle('on', show);
-      if (show) requestAnimationFrame(() => { fit.fit(); sendResize(); term.focus(); });
+      if (show) requestAnimationFrame(() => { channelPanel.refit(); utilityPanel.refit(); });
     }
-    function sendResize() {
-      if (ws && ws.readyState === WebSocket.OPEN)
-        ws.send(CTRL + JSON.stringify({ op: 'resize', rows: term.rows, cols: term.cols }));
-    }
+    // Backwards-compat shim used by pre-D-031 callers still in this file.
     function openTerminal(query, label) {
-      showTerminal(true);
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) { try { ws.close(); } catch (e) {} }
-      term.reset(); tstatus.textContent = 'connecting…';
-      const sock = new WebSocket(`${proto}://${location.host}/ws` + (query ? '?' + query : ''));
-      sock.binaryType = 'arraybuffer';
-      sock.onopen = () => { conn.classList.remove('down'); conn.classList.add('up'); termDot.classList.add('on');
-        tstatus.textContent = 'running' + (label ? ' · ' + label : ''); requestAnimationFrame(() => { fit.fit(); sendResize(); term.focus(); }); refreshStatus(); };
-      sock.onmessage = (ev) => {
-        if (typeof ev.data === 'string') {
-          if (ev.data.startsWith(EXIT)) { let info = {}; try { info = JSON.parse(ev.data.slice(EXIT.length)); } catch (e) {}
-            term.write(`\r\n\x1b[33m[process exited: status=${info.exitstatus}]\x1b[0m\r\n`);
-            tstatus.textContent = `exited (status=${info.exitstatus})`; termDot.classList.remove('on'); refreshStatus(); return; }
-          term.write(ev.data);
-        } else { term.write(dec.decode(new Uint8Array(ev.data))); }
-      };
-      sock.onclose = () => { if (sock !== ws) return; conn.classList.remove('up'); conn.classList.add('down');
-        termDot.classList.remove('on'); tstatus.textContent = 'disconnected'; };
-      sock.onerror = () => { tstatus.textContent = 'ws error'; };
-      ws = sock;
+      // Sniff the verb out of the query string to pick the right panel.
+      let verb = 'connect';
+      try { verb = new URLSearchParams(query).get('verb') || 'connect'; } catch (e) {}
+      const panel = panelForVerb(verb) || channelPanel;
+      panel.open(query, label);
     }
-    term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
-    window.addEventListener('resize', () => { if (!el('termwrap').hasAttribute('hidden')) { fit.fit(); sendResize(); } });
-    term.onResize(() => sendResize());
-    function sendInterrupt() { if (ws && ws.readyState === WebSocket.OPEN) ws.send(CTRL + JSON.stringify({ op: 'signal', sig: 'INT' })); }
+    // The Disconnect button acts on whichever panel is currently running:
+    // Utility takes precedence (ephemeral; safer to interrupt) then Channel.
+    function sendInterrupt() {
+      if (utilityPanel.isRunning()) return utilityPanel.sendInterrupt();
+      if (channelPanel.isRunning()) return channelPanel.sendInterrupt();
+    }
+    window.addEventListener('resize', () => {
+      if (!el('termwrap').hasAttribute('hidden')) {
+        channelPanel.refit(); utilityPanel.refit();
+      }
+    });
     el('disconnectBtn').addEventListener('click', openDisconnect);
-    el('closeTerm').addEventListener('click', () => showTerminal(false));
-    el('toggleTerm').addEventListener('click', () => showTerminal(el('termwrap').hasAttribute('hidden')));
+    el('closeTerm').addEventListener('click', () => showTerminals(false));
+    el('toggleTerm').addEventListener('click', () => showTerminals(el('termwrap').hasAttribute('hidden')));
+
+    // ---- D-031: draggable divider between Channel + Utility -------------
+    // Min/max panel widths: 25% / 75%. Divider position persists across
+    // reloads via `divider_pct` in web_state.json (added in a later task).
+    (function initDivider() {
+      const divider = el('termdivider');
+      const split = el('termsplit');
+      const chP = el('panel-channel');
+      const utP = el('panel-utility');
+      // Baseline: 50/50. Later task loads persisted `divider_pct` from state.
+      let pct = 50;
+      const applyPct = (p) => {
+        pct = Math.max(25, Math.min(75, p));
+        chP.style.flex = `0 0 ${pct}%`;
+        utP.style.flex = `0 0 ${100 - pct - 0.5}%`;  // -0.5 for divider width
+        // Re-fit both terminals after the layout changes.
+        requestAnimationFrame(() => { channelPanel.refit(); utilityPanel.refit(); });
+      };
+      applyPct(50);
+      let dragging = false;
+      divider.addEventListener('mousedown', (e) => {
+        dragging = true; divider.classList.add('dragging');
+        e.preventDefault();
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const rect = split.getBoundingClientRect();
+        const p = ((e.clientX - rect.left) / rect.width) * 100;
+        applyPct(p);
+      });
+      window.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false; divider.classList.remove('dragging');
+        // D-031 Task 5: persist the new divider position atomically.
+        persistDividerPct(pct);
+      });
+      // Keyboard accessibility: arrow keys nudge the divider by 5%.
+      divider.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowLeft') { applyPct(pct - 5); e.preventDefault(); persistDividerPct(pct); }
+        else if (e.key === 'ArrowRight') { applyPct(pct + 5); e.preventDefault(); persistDividerPct(pct); }
+      });
+      // Called by state loader after /api/state resolves; restores the last
+      // divider position from ~/.argo_anywhere/web_state.json.
+      window.addEventListener('argo:setDividerPct', (ev) => {
+        const p = ev.detail && ev.detail.pct;
+        if (typeof p === 'number') applyPct(p);
+      });
+    })();
 
     // ---- monitor: local status auto-refresh ------------------------------
     let cachedPort = null, tunnelUp = false, lastSessions = [], lastStatus = {};
@@ -406,6 +742,10 @@
       lastStatus = data;
       const p = data.package || {};
       el('meta').innerHTML = `pkg <b>${p.package_version || '?'}</b> · engine <b>${p.engine_version || '?'}</b>`;
+      // D-031 D3a: app-cwd indicator; short (~-collapsed) form fits in the top bar.
+      if (p.app_cwd_short) {
+        el('appCwd').innerHTML = `app cwd: <b>${p.app_cwd_short}</b>`;
+      }
       const st = data.cached || {}; cachedPort = st.port || null;
       const listeners = data.listeners || []; lastSessions = data.sessions || [];
       tunnelUp = !!(cachedPort && listeners.some((l) => l.port === cachedPort));
@@ -517,7 +857,7 @@
         const s = lastSessions.find((x) => x.id === id) || {};
         const ok = await confirmSheet({
           title: 'Stop session',
-          lede: `Session ${id}${s.verb ? ' (' + s.verb + ')' : ''} is holding the channel on :${cachedPort || '—'}.`,
+          lede: `Session ${_escHtml(id)}${s.verb ? ' (' + _escHtml(s.verb) + ')' : ''} is holding the channel on :${_escHtml(cachedPort || '—')}.`,
           warn: 'Stopping it <b>tears down the tunnel</b>. Reconnecting needs a new Duo prompt.',
           okLabel: 'Stop it',
         });
@@ -532,18 +872,91 @@
       try { const d = await (await fetch('/api/run/list-tools', { method: 'POST' })).json();
         const tools = (d.stdout || '').split('\n').map((l) => l.trim().split(/\s+/)[0])
           .filter((w) => /^(opencode|claudecode|aider|codex|cursor)$/.test(w));
-        el('toolChips').innerHTML = tools.length ? tools.map((t) => `<span class="chip">${t}</span>`).join('') : '<span class="empty">none</span>';
+        el('toolChips').innerHTML = tools.length ? tools.map((t) => `<span class="chip">${_escHtml(t)}</span>`).join('') : '<span class="empty">none</span>';
       } catch (e) { el('toolChips').innerHTML = '<span class="empty">unavailable</span>'; }
     }
+
+    // Render one model row: primary id + secondary internal name, plus
+    // provider / modalities badges and (only when a valid opencode config
+    // is present) an "in opencode config" flag. Wording is deliberately
+    // per-tool-explicit so users don't read "not configured" as "broken
+    // for Claude Code" (bug 2026-07-13; the "configured" column was
+    // opencode-only but labelled ambiguously).
+    function _renderModelRow(m, opencode_present) {
+      const badges = [];
+      if (m.provider) {
+        const prov = String(m.provider).toLowerCase();
+        badges.push(`<span class="m-badge prov-${_escHtml(prov)}" title="Upstream provider">${_escHtml(prov)}</span>`);
+      }
+      if (m.modalities) {
+        badges.push(`<span class="m-badge" title="Model modalities (inputs -> outputs)">${_escHtml(m.modalities)}</span>`);
+      }
+      if (opencode_present) {
+        if (m.is_orphan) {
+          badges.push(`<span class="m-badge oc-orph" title="Listed in your OpenCode config, but the upstream doesn't serve it (probably renamed/retired)">orphan in opencode config</span>`);
+        } else if (m.in_opencode_config) {
+          badges.push(`<span class="m-badge oc-yes" title="Listed in ~/.config/opencode/config.json's models array (OpenCode's picker will show it)">in opencode config</span>`);
+        }
+        // Absent means "not in the OpenCode picker" -- deliberately NOT
+        // shown as a red/negative badge; not-in-OpenCode's-list is the
+        // default state for most models + is unrelated to whether the
+        // model works with Claude Code / aider / other tools.
+      }
+      return `
+        <div class="model">
+          <div>
+            <span class="m-id">${_escHtml(m.id || '?')}</span>
+            <span class="m-internal">${_escHtml(m.internal_name || '')}</span>
+          </div>
+          <div class="m-badges">${badges.join('')}</div>
+        </div>`;
+    }
+
     el('loadModels').addEventListener('click', async () => {
-      const box = el('modelsList'); box.innerHTML = '<span class="empty">loading… (reaches ANL)</span>';
+      const box = el('modelsList');
+      const noteEl = el('modelsNote'), countsEl = el('modelsCounts');
+      box.innerHTML = '<span class="empty">loading… (reaches ANL through the tunnel)</span>';
+      noteEl.setAttribute('hidden', ''); countsEl.setAttribute('hidden', '');
+      el('loadModels').disabled = true;
       try {
-        const d = await (await fetch('/api/run/list-models', { method: 'POST' })).json();
-        if (d.error) { box.innerHTML = `<span class="empty">error: ${d.error}</span>`; return; }
-        const lines = (d.stdout || '').split('\n').map((l) => l.trim()).filter((l) => l && !/^[-=]+$/.test(l));
-        box.innerHTML = lines.length ? lines.map((l) => `<div class="model">${l.replace(/</g, '&lt;')}</div>`).join('')
-                                     : '<span class="empty">no output</span>';
-      } catch (e) { box.innerHTML = '<span class="empty">request failed</span>'; }
+        const r = await fetch('/api/models');
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          box.innerHTML = `<span class="empty">could not load (HTTP ${r.status}): ${_escHtml(body.error || r.statusText)}</span>`;
+          return;
+        }
+        const d = await r.json();
+        const models = d.models || [];
+        if (!models.length) {
+          box.innerHTML = '<span class="empty">no models returned</span>';
+          return;
+        }
+        // Sort: provider group first, then id lexically -- keeps related
+        // models visually together (all claude, all openai, all gemini).
+        models.sort((a, b) => (a.provider || '').localeCompare(b.provider || '') ||
+                              (a.id || '').localeCompare(b.id || ''));
+        box.innerHTML = models.map((m) => _renderModelRow(m, d.opencode_config_present)).join('');
+        // Counts strip: total + how many are in the OpenCode config (only
+        // shown when an OpenCode config exists to consult).
+        const c = d.counts || {};
+        if (d.opencode_config_present) {
+          countsEl.textContent = `${c.total} served · ${c.in_config} in opencode config` +
+                                 (c.orphan ? ` · ${c.orphan} orphan` : '');
+        } else {
+          countsEl.textContent = `${c.total} served`;
+        }
+        countsEl.removeAttribute('hidden');
+        // Explanatory note ONLY when we're showing per-tool state, so
+        // users understand what "in opencode config" does + doesn't mean.
+        if (d.opencode_config_present && d.note) {
+          noteEl.textContent = d.note;
+          noteEl.removeAttribute('hidden');
+        }
+      } catch (e) {
+        box.innerHTML = `<span class="empty">request failed: ${_escHtml(String(e && e.message ? e.message : e))}</span>`;
+      } finally {
+        el('loadModels').disabled = false;
+      }
     });
 
     // ---- launch popover --------------------------------------------------
@@ -553,28 +966,128 @@
       catch (e) { nativeTerminals = []; }
       rebuildTargets();
     }
+    // D-031: hard-block set on the client side too (server enforces as well).
+    const EMBEDDED_BLOCKED_VERBS = new Set(['run', 'client']);
     function rebuildTargets() {
+      const verb = el('lVerb').value;
+      const embeddedAllowed = !EMBEDDED_BLOCKED_VERBS.has(verb);
       const sel = el('lTarget'); sel.innerHTML = '';
-      nativeTerminals.forEach((t) => { const o = document.createElement('option'); o.value = 'win:' + t.id;
-        o.textContent = 'New window · ' + t.label; sel.appendChild(o); });
-      const emb = document.createElement('option'); emb.value = 'embedded'; emb.textContent = 'Embedded terminal';
-      sel.appendChild(emb);
+      nativeTerminals.forEach((t) => {
+        const o = document.createElement('option'); o.value = 'win:' + t.id;
+        // Recommend external for run/client (per D-031); embedded for others.
+        const rec = EMBEDDED_BLOCKED_VERBS.has(verb) ? ' (recommended for ' + verb + ')' : '';
+        o.textContent = 'New window · ' + t.label + rec;
+        sel.appendChild(o);
+      });
+      if (embeddedAllowed) {
+        const emb = document.createElement('option'); emb.value = 'embedded';
+        emb.textContent = 'In-browser terminal (Channel / Utility)';
+        sel.appendChild(emb);
+      }
       applyTargetDefault();
     }
-    // Per the model: cli-tool commands default to a new window; connect/tunnel to embedded.
+    // Per the model (D-031):
+    //   * connect/configure/setup/tunnel default to embedded (they route to
+    //     the Channel or Utility panel);
+    //   * run/client can only go to a new native window (hard-blocked from
+    //     embedded so a browser-tab close doesn't kill the tool session).
     function applyTargetDefault() {
       const verb = el('lVerb').value;
-      const wantEmbedded = (verb === 'connect' || verb === 'tunnel') || nativeTerminals.length === 0;
       const sel = el('lTarget');
+      if (EMBEDDED_BLOCKED_VERBS.has(verb)) {
+        sel.value = nativeTerminals.length ? 'win:' + nativeTerminals[0].id : '';
+        return;
+      }
+      const wantEmbedded = (verb === 'connect' || verb === 'tunnel' || verb === 'configure' || verb === 'setup')
+                          || nativeTerminals.length === 0;
       sel.value = wantEmbedded ? 'embedded' : (nativeTerminals.length ? 'win:' + nativeTerminals[0].id : 'embedded');
     }
-    el('lVerb').addEventListener('change', applyTargetDefault);
+    // Any verb change may flip which target options are legal, so rebuild.
+    el('lVerb').addEventListener('change', rebuildTargets);
 
-    function openLaunch() { el('popNote').textContent = ''; el('popNote').className = 'pop-note';
-      el('launchBackdrop').removeAttribute('hidden'); el('lVerb').focus(); }
+    function openLaunch() {
+      el('popNote').textContent = ''; el('popNote').className = 'pop-note';
+      // D-031 D3b: pre-fill cwd with a visible default so the field is never
+      // blank at open time. Priority: MRU top entry (Task 5) > $HOME (first
+      // run). The field is always editable + the datalist shows the full MRU
+      // for one-click reuse.
+      if (!el('lCwd').value) {
+        const mruTop = (persistedState.mru && persistedState.mru[0]) || '';
+        if (mruTop) {
+          el('lCwd').value = mruTop;
+        } else {
+          // Fall back to $HOME (or the short form of the app's cwd).
+          el('lCwd').value = '~';
+        }
+      }
+      // D-031 D6c: one-directional nudge -- cwd == $HOME -> pre-select `global`
+      // so beginners chatting with the agent from ~ don't accidentally land in
+      // `project` (which would write config into ~). Project markers do NOT
+      // auto-switch to `project` (safer to leave user's explicit choice alone).
+      applyScopeDefault();
+      el('launchBackdrop').removeAttribute('hidden');
+      el('lVerb').focus();
+    }
+
+    // D-031 D6c: helper used on open + when the cwd field changes.
+    function _cwdIsHome(raw) {
+      if (!raw) return false;
+      const s = raw.trim();
+      // Accept both the collapsed ~ form and the absolute $HOME. app_cwd_short
+      // comes back as '~' when the app is running from $HOME itself.
+      if (s === '~' || s === '~/') return true;
+      // Compare against the server-reported app_cwd (which resolves ~).
+      // Best effort: if we know the app's absolute cwd AND it equals $HOME
+      // (short form '~'), then the user typing that literal absolute is home.
+      // We can't cheaply learn $HOME otherwise from the browser.
+      const short = (lastStatus.package && lastStatus.package.app_cwd_short) || '';
+      const abs = (lastStatus.package && lastStatus.package.app_cwd) || '';
+      if (short === '~' && abs && s === abs) return true;
+      return false;
+    }
+    function applyScopeDefault() {
+      // Only auto-nudge if the user hasn't already picked something explicit
+      // this session (leave a manual choice alone).
+      const sel = el('lScope');
+      if (sel.dataset.userPicked === '1') return;
+      const cwd = el('lCwd').value;
+      sel.value = _cwdIsHome(cwd) ? 'global' : '';
+    }
+    // Track explicit user picks so subsequent cwd edits don't clobber them.
+    // Elements exist at script-execution time (script is at the end of body).
+    el('lScope').addEventListener('change', () => { el('lScope').dataset.userPicked = '1'; });
+    el('lCwd').addEventListener('input', applyScopeDefault);
     function closeLaunch() { el('launchBackdrop').setAttribute('hidden', ''); }
     el('openLaunch').addEventListener('click', openLaunch);
     el('cancelLaunch').addEventListener('click', closeLaunch);
+
+    // D-031 D2b: Browse button shows only when pywebview's browse_folder
+    // bridge is present (native app). In browser mode we can't open a folder
+    // picker so the button stays hidden and users type/paste a path.
+    function _wireBrowseIfAvailable() {
+      const api = window.pywebview && window.pywebview.api;
+      if (!api || !api.browse_folder) return;
+      const btn = el('browseCwd');
+      btn.removeAttribute('hidden');
+      btn.addEventListener('click', async () => {
+        try {
+          const start = el('lCwd').value || '';
+          const chosen = await api.browse_folder(start);
+          if (chosen) { el('lCwd').value = chosen; }
+        } catch (e) { /* swallow: user cancelled or bridge issue */ }
+      });
+    }
+    window.addEventListener('pywebviewready', _wireBrowseIfAvailable);
+    _wireBrowseIfAvailable();  // in case pywebview injected the API pre-load
+
+    // D-031 D2a: client-side absolute-path check. Server enforces the same;
+    // this one just gives faster feedback + a clearer error before the
+    // request even flies. `~` counts as absolute (expanded server-side).
+    function _cwdIsAbsolute(raw) {
+      if (!raw || !raw.trim()) return false;
+      const s = raw.trim();
+      return s.startsWith('/') || s.startsWith('~');
+    }
     el('launchBackdrop').addEventListener('click', (e) => { if (e.target === el('launchBackdrop')) closeLaunch(); });
     document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') return;
       if (!el('launchBackdrop').hasAttribute('hidden')) closeLaunch();
@@ -592,6 +1105,9 @@
         `<dt>engine</dt><dd>${p.engine_version || '?'} <span style="color:var(--ink-dim)">(${p.engine_sha256_short || '—'})</span></dd>` +
         `<dt>python</dt><dd>${p.python_version || '?'}</dd>` +
         `<dt>platform</dt><dd>${p.platform || '?'}</dd>` +
+        // D-031 D3a: mirror the top-bar app-cwd indicator so both surfaces
+        // agree; the popover has room for the full absolute path.
+        `<dt>app cwd</dt><dd><code>${p.app_cwd || '?'}</code> <span style="color:var(--ink-dim)">(${p.app_cwd_short || '—'})</span></dd>` +
         `<dt>project</dt><dd><a href="${repo}" data-ext>${repo.replace('https://', '')}</a></dd>`;
       el('aboutBackdrop').removeAttribute('hidden');
     }
@@ -610,14 +1126,22 @@
     });
 
     function openDisconnect() {
-      const running = ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+      // D-031: Utility is checked first (ephemeral; safer to interrupt);
+      // then Channel (would drop the tunnel).
+      const utilRunning = utilityPanel.isRunning();
+      const chRunning = channelPanel.isRunning();
+      const running = utilRunning || chRunning;
       const owner = lastSessions.find((s) => s.alive && s.owns_channel);
       let warn;
       if (!running) {
-        el('dcLede').textContent = 'The embedded terminal isn’t running anything right now.';
+        el('dcLede').textContent = 'Neither Channel nor Utility is running anything right now.';
         warn = 'Nothing to disconnect here.';
-      } else if (owner) {
-        el('dcLede').textContent = `This UI holds the channel on :${cachedPort || '—'}${nodeShort() ? ' · ' + nodeShort() : ''}.`;
+      } else if (utilRunning) {
+        // Utility takes precedence when both are alive.
+        el('dcLede').textContent = 'The Utility panel is running a task.';
+        warn = 'Sends Ctrl-C to the Utility session. The Channel (if held here) stays up.';
+      } else if (chRunning && owner) {
+        el('dcLede').textContent = `The Channel panel holds the channel on :${cachedPort || '—'}${nodeShort() ? ' · ' + nodeShort() : ''}.`;
         warn = 'Disconnecting sends Ctrl-C and <b>drops the tunnel</b>. Reconnecting needs a new Duo prompt.';
       } else if (tunnelUp) {
         el('dcLede').textContent = 'The channel is held by an external terminal.';
@@ -637,10 +1161,20 @@
 
     // Reusable in-app confirm sheet (replaces native confirm(): no app-icon, no
     // backend-speak, consistent styling). Returns a Promise<boolean>.
+    //
+    // `title` is treated as plain text (safe).
+    // `lede` and `warn` are treated as HTML so callers can use <code>/<b>/<br>
+    //   for readability; callers are responsible for escaping any dynamic
+    //   substrings via _escHtml() below (paths, error text, etc.).
     let _confirmResolve = null;
+    function _escHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
     function confirmSheet({ title = 'Confirm', lede = '', warn = '', okLabel = 'Confirm' }) {
       el('confirmTitle').textContent = title;
-      el('confirmLede').textContent = lede;
+      el('confirmLede').innerHTML = lede;                            // HTML by contract
       const w = el('confirmWarn');
       if (warn) { w.innerHTML = warn; w.removeAttribute('hidden'); } else { w.setAttribute('hidden', ''); }
       el('confirmOk').textContent = okLabel;
@@ -656,25 +1190,163 @@
     el('confirmCancel').addEventListener('click', () => _closeConfirm(false));
     el('confirmBackdrop').addEventListener('click', (e) => { if (e.target === el('confirmBackdrop')) _closeConfirm(false); });
 
+    // D-031 Task 7: consult the scope-conditional forbid-list. Returns true
+    // if the launch should proceed, false to cancel. Hard-blocks show a
+    // non-confirmable error; soft-warns pop a confirm modal that offers to
+    // switch to global scope instead.
+    async function _checkForbidAndConfirm(cwd, scope) {
+      let r;
+      try {
+        r = await fetch('/api/check-forbid?path=' + encodeURIComponent(cwd) +
+                        '&scope=' + encodeURIComponent(scope));
+      } catch (e) {
+        const note = el('popNote'); note.className = 'pop-note err';
+        note.textContent = 'forbid-list check request failed';
+        return false;
+      }
+      if (r.status === 403) {
+        // Hard-block: no override.
+        const body = await r.json().catch(() => ({}));
+        const note = el('popNote'); note.className = 'pop-note err';
+        note.textContent = body.reason || 'this directory is not allowed for --scope project';
+        return false;
+      }
+      if (!r.ok) {
+        const note = el('popNote'); note.className = 'pop-note err';
+        note.textContent = 'forbid-list check failed: ' + r.statusText;
+        return false;
+      }
+      const body = await r.json();
+      if (body.verdict === 'soft_warn') {
+        const ok = await confirmSheet({
+          title: 'No project marker detected',
+          lede: 'This directory has no <code>.git</code> and no obvious project marker.',
+          warn: _escHtml(body.reason || ''),  // server text; escape defensively
+          okLabel: 'Continue with project',
+        });
+        return ok;
+      }
+      // ALLOW
+      return true;
+    }
+
+    // D-031 D2c: after a launch endpoint returns 409 (missing directory),
+    // offer to create it via POST /api/mkdir. Returns true if the dir is
+    // present after the call (created NOW, or already existed by the time
+    // we called -- e.g. a concurrent process or a doubled UI action), so
+    // the launch retry can proceed. Returns false only on cancel or a
+    // real filesystem error. No silent mkdir per D4.
+    async function _confirmAndMkdir(cwdRaw) {
+      const ok = await confirmSheet({
+        title: 'Directory does not exist',
+        lede: `Create <code>${_escHtml(cwdRaw)}</code> and start the tool there?`,
+        warn: 'This will <b>mkdir -p</b> the path (its parents too if needed).',
+        okLabel: 'Create + Launch',
+      });
+      if (!ok) return false;
+      let r;
+      try {
+        r = await fetch('/api/mkdir?path=' + encodeURIComponent(cwdRaw),
+                        { method: 'POST' });
+      } catch (e) {
+        const note = el('popNote'); note.className = 'pop-note err';
+        note.textContent = 'mkdir request failed (network/server unreachable)';
+        return false;
+      }
+      // 201 = created just now; the endpoint also returns 409 "already exists"
+      // if the path materialised between the launch's validation and our POST
+      // (a doubled UI action, a concurrent instance, etc.). Treat both as
+      // "dir is present now, proceed with retry". Only a genuine failure
+      // (400 bad_input / 400 not_directory / 500 mkdir failed) cancels.
+      if (r.status === 201) return true;
+      const body = await r.json().catch(() => ({}));
+      if (r.status === 409 && /already exists/i.test(body.error || '')) return true;
+      const note = el('popNote'); note.className = 'pop-note err';
+      note.textContent = `mkdir failed (HTTP ${r.status}): ` +
+        (body.error || body.detail || r.statusText || 'unknown error');
+      return false;
+    }
+
     el('doLaunch').addEventListener('click', async () => {
       const verb = el('lVerb').value, tool = el('lTool').value, scope = el('lScope').value.trim(), target = el('lTarget').value;
+      let cwd = el('lCwd').value.trim();
+
+      // D-031 D2a: client-side absolute-path check. Blank rejected too.
+      if (!_cwdIsAbsolute(cwd)) {
+        const note = el('popNote'); note.className = 'pop-note err';
+        note.textContent = 'working directory must be an absolute path (starts with / or ~).';
+        el('lCwd').focus();
+        return;
+      }
+
       const params = new URLSearchParams({ verb });
       if (tool) params.set('cli_tool', tool);
       if (scope) params.set('scope', scope);
+      params.set('cwd', cwd);
 
       if (target === 'embedded') {
-        const owner = lastSessions.find((s) => s.alive && s.owns_channel);
-        if (owner && tunnelUp) {
+        // D-031: pick the right panel based on the verb.
+        // run/client are hard-blocked from embedded (server side too).
+        const panel = panelForVerb(verb);
+        if (panel === null) {
+          const note = el('popNote'); note.className = 'pop-note err';
+          note.textContent = `${verb} must run in a native terminal (browser tab close would kill it).`;
+          return;
+        }
+        // D-031 D2c: pre-flight the cwd so we can offer create-if-missing
+        // BEFORE opening the ws (which closes opaquely with 1008 on bad cwd).
+        try {
+          const vr = await fetch('/api/validate-cwd?path=' + encodeURIComponent(cwd));
+          if (vr.status === 409) {
+            // missing dir -> offer to create
+            const proceed = await _confirmAndMkdir(cwd);
+            if (!proceed) { el('popNote').textContent = 'cancelled'; el('popNote').className = 'pop-note'; return; }
+          } else if (!vr.ok) {
+            const body = await vr.json().catch(() => ({}));
+            const note = el('popNote'); note.className = 'pop-note err';
+            note.textContent = body.detail || body.error || 'cwd validation failed';
+            return;
+          }
+        } catch (e) {
+          const note = el('popNote'); note.className = 'pop-note err';
+          note.textContent = 'cwd validation request failed';
+          return;
+        }
+        // D-031 Task 7: scope-conditional forbid-list. Only fires for
+        // scope=project (server short-circuits ALLOW for global/auto).
+        if (scope === 'project') {
+          const proceed = await _checkForbidAndConfirm(cwd, scope);
+          if (!proceed) return;
+        }
+        // Channel panel: if a live channel is already up, offer "stop + replace".
+        if (panel === channelPanel && tunnelUp) {
+          const owner = lastSessions.find((s) => s.alive && s.owns_channel);
           const ok = await confirmSheet({
             title: 'Replace the channel?',
-            lede: `The embedded terminal is holding the channel on :${cachedPort} (${owner.verb}).`,
-            warn: `Running ${verb} replaces it and <b>drops the tunnel</b>. Reconnecting needs a new Duo prompt.`,
+            lede: `The Channel panel is holding the channel on :${_escHtml(cachedPort)}${owner ? ' (' + _escHtml(owner.verb) + ')' : ''}.`,
+            warn: `Running ${_escHtml(verb)} again replaces it and <b>drops the tunnel</b>. Reconnecting needs a new Duo prompt.`,
             okLabel: 'Replace',
           });
           if (!ok) return;
+          // Stop the existing channel session before launching a new one; the
+          // server-side check refuses to spawn a second channel while one is alive.
+          if (owner) {
+            try { await fetch(`/api/sessions/${owner.id}/stop?force=true`, { method: 'POST' }); } catch (e) {}
+          }
         }
-        closeLaunch(); openTerminal(params.toString(), verb + (tool ? ' · ' + tool : ''));
+        closeLaunch();
+        panel.open(params.toString(), verb + (tool ? ' · ' + tool : ''));
+        // D-031 Task 5: refresh MRU + datalist after the server records the
+        // launch cwd (fire-and-forget; the next launcher open reflects it).
+        loadState();
         return;
+      }
+      // D-031 Task 7: forbid-list also gates external launches (scope=project).
+      // Pre-flight before the request so soft-warn / hard-block get the same UX
+      // as the embedded path.
+      if (scope === 'project') {
+        const proceed = await _checkForbidAndConfirm(cwd, scope);
+        if (!proceed) return;
       }
       // New native window.
       const termId = target.slice(4);
@@ -682,10 +1354,50 @@
       const note = el('popNote'); note.className = 'pop-note'; note.textContent = 'opening…';
       el('doLaunch').disabled = true;
       try {
-        const d = await (await fetch('/api/launch-external?' + params.toString(), { method: 'POST' })).json();
-        if (d.ok) { note.textContent = `opened in ${d.terminal}`; note.classList.add('ok'); setTimeout(closeLaunch, 900); }
+        const doRequest = () => fetch('/api/launch-external?' + params.toString(), { method: 'POST' });
+        let r = await doRequest();
+        // D-031 D2c: missing cwd -> confirm + mkdir + retry (once). The
+        // retry unconditionally re-issues the POST with the SAME params, so
+        // a successful mkdir (or a "dir already exists" resolution) always
+        // reaches the launch path -- never silently dropped.
+        if (r.status === 409) {
+          const body409 = await r.json().catch(() => ({}));
+          if (body409.verdict === 'missing') {
+            el('doLaunch').disabled = false;  // let the modal own the focus
+            const proceed = await _confirmAndMkdir(cwd);
+            if (!proceed) { note.textContent = 'cancelled'; note.className = 'pop-note'; return; }
+            el('doLaunch').disabled = true; note.textContent = 'opening…'; note.className = 'pop-note';
+            r = await doRequest();
+          } else {
+            // A 409 that ISN'T "missing" is unexpected (forbid-list hard-
+            // blocks are 403, not 409). Surface it instead of falling
+            // through the `!r.ok` branch silently.
+            note.textContent = 'could not open (HTTP 409): ' +
+              (body409.error || body409.detail || 'conflict');
+            note.className = 'pop-note err';
+            return;
+          }
+        }
+        // Handle non-2xx errors (bad_input, not_directory, forbid, ...).
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          note.textContent = `could not open (HTTP ${r.status}): ` +
+            (body.error || body.detail || r.statusText || 'unknown');
+          note.className = 'pop-note err';
+          return;
+        }
+        const d = await r.json();
+        if (d.ok) {
+          note.textContent = `opened in ${d.terminal}`;
+          note.classList.add('ok');
+          setTimeout(closeLaunch, 900);
+          loadState();  // D-031 Task 5: refresh MRU after external launch too.
+        }
         else { note.textContent = 'could not open: ' + (d.error || 'unknown'); note.classList.add('err'); }
-      } catch (e) { note.textContent = 'request failed'; note.classList.add('err'); }
+      } catch (e) {
+        note.textContent = 'request failed: ' + (e && e.message ? e.message : e);
+        note.classList.add('err');
+      }
       finally { el('doLaunch').disabled = false; }
     });
 
@@ -701,10 +1413,50 @@
     window.addEventListener('pywebviewready', _enableBackground);
     _enableBackground();  // in case the API was injected before this ran
 
+    // ---- D-031 Task 5: persisted UI state (MRU cwd + divider + theme) ---
+    // Loaded on boot from /api/state; small patches (divider position, theme)
+    // are POSTed back atomically. MRU is filled server-side on successful launch.
+    let persistedState = { mru: [], divider_pct: 50, theme: 'auto' };
+    async function loadState() {
+      try {
+        const r = await fetch('/api/state', { cache: 'no-store' });
+        if (r.ok) {
+          persistedState = await r.json();
+          _applyMruToDatalist(persistedState.mru || []);
+          _applyPersistedDivider(persistedState.divider_pct || 50);
+          // D-031 Task 5.5: apply persisted theme (defaults to 'auto' on
+          // fresh install; explicit choice survives across sessions).
+          if (persistedState.theme) applyTheme(persistedState.theme);
+        }
+      } catch (e) { /* keep defaults */ }
+    }
+    function _applyMruToDatalist(mru) {
+      const dl = el('cwdHistory');
+      dl.innerHTML = '';
+      for (const p of mru) {
+        const opt = document.createElement('option');
+        opt.value = p; dl.appendChild(opt);
+      }
+    }
+    // Divider apply hook -- initDivider() defined applyPct in a closure so we
+    // expose it via a data attribute the state loader can find.
+    function _applyPersistedDivider(pct) {
+      const evt = new CustomEvent('argo:setDividerPct', { detail: { pct } });
+      window.dispatchEvent(evt);
+    }
+    async function persistDividerPct(pct) {
+      try {
+        await fetch('/api/state', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ divider_pct: pct }),
+        });
+      } catch (e) { /* best-effort */ }
+    }
+
     // ---- boot: monitor only; no auto-connect ----------------------------
     setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
-    refreshStatus(); loadTools(); loadTerminals();
+    refreshStatus(); loadTools(); loadTerminals(); loadState();
   </script>
 </body>
 </html>

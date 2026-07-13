@@ -193,6 +193,79 @@ def _sweep_launcher_residue(*, dry_run: bool) -> None:
             print(f"could not remove {path}: {exc}", file=sys.stderr)
 
 
+def _probe_peer_web(host: str, port: int, timeout: float = 1.0) -> dict | None:
+    """Return a description of what's already listening on ``host:port``, or None.
+
+    D-031 multi-instance guard. Result shapes:
+
+    - ``None`` -- nothing answering; safe to bind.
+    - ``{"kind": "sibling", "pid": int, "package_version": str, "app_cwd_short": str}``
+      -- another argo-anywhere web server is on this port. The caller should
+      refuse to start (default) or --force through.
+    - ``{"kind": "foreign", "status": int|None}`` -- something answered on
+      the port but it's not us (no argo-anywhere marker in /healthz). Caller
+      should refuse to avoid stomping an unrelated local service.
+
+    Never raises. Uses stdlib urllib + a 1s timeout so it never blocks startup.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{host}:{port}/healthz"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 (loopback)
+            body = resp.read(4096)
+            try:
+                data = _json.loads(body)
+            except ValueError:
+                return {"kind": "foreign", "status": resp.status}
+            if isinstance(data, dict) and data.get("app") == "argo-anywhere":
+                return {
+                    "kind": "sibling",
+                    "pid": data.get("pid"),
+                    "package_version": data.get("package_version"),
+                    "app_cwd_short": data.get("app_cwd_short"),
+                }
+            return {"kind": "foreign", "status": resp.status}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        # Connection refused / no listener / timeout -> nothing there.
+        return None
+
+
+def _report_peer_and_refuse(peer: dict, host: str, port: int, command: str) -> int:
+    """Print a helpful message when a peer is on the port + return exit code 1.
+
+    Shared by ``_cmd_web`` and ``_cmd_app`` so the wording stays consistent.
+    """
+    if peer["kind"] == "sibling":
+        pid = peer.get("pid") or "?"
+        ver = peer.get("package_version") or "?"
+        cwd = peer.get("app_cwd_short") or "?"
+        print(
+            f"argo-anywhere {command}: another argo-anywhere is already on "
+            f"http://{host}:{port} (pid {pid}, package {ver}, app cwd {cwd}).\n"
+            f"  Open it in your browser, OR start me on a different port:\n"
+            f"    argo-anywhere {command} --port {port + 1}\n"
+            f"  If you know what you're doing and really want two instances, "
+            f"pass --force to bypass this check (they share "
+            f"~/.argo_anywhere/web_state.json -- last write wins).",
+            file=sys.stderr,
+        )
+    else:
+        status = peer.get("status") or "?"
+        print(
+            f"argo-anywhere {command}: something (not argo-anywhere) is "
+            f"already listening on http://{host}:{port} (HTTP {status}).\n"
+            f"  Refusing to bind. Start me on a different port:\n"
+            f"    argo-anywhere {command} --port {port + 1}\n"
+            f"  Or pass --force to try anyway (uvicorn will fail if the port "
+            f"is really busy).",
+            file=sys.stderr,
+        )
+    return 1
+
+
 def _cmd_web(args: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="argo-anywhere web",
@@ -211,6 +284,19 @@ def _cmd_web(args: Sequence[str]) -> int:
         default=os.environ.get("ARGO_ANYWHERE_WEB_ENGINE", "connect"),
         help="engine invocation the browser terminal runs (shell-split; default: connect).",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="bypass the single-instance guard (a peer on the same port will "
+             "make uvicorn fail to bind; two instances share ~/.argo_anywhere/"
+             "web_state.json with last-write-wins semantics).",
+    )
+    parser.add_argument(
+        "--reload", action="store_true",
+        help="dev-mode: watch src/argo_anywhere/ + restart uvicorn on file "
+             "changes. Requires ``watchfiles``. Do NOT use for a normal "
+             "install -- editing package files under pipx invalidates the "
+             "install. This is for source-checkout iteration only.",
+    )
     ns = parser.parse_args(list(args))
 
     try:
@@ -223,7 +309,32 @@ def _cmd_web(args: Sequence[str]) -> int:
         )
         return 1
 
-    serve(host=ns.host, port=ns.port, engine_argv=tuple(shlex.split(ns.engine)))
+    # D-031 multi-instance guard: refuse if another argo-anywhere (or any
+    # other service) is already on this loopback port. --force bypasses.
+    if not ns.force:
+        peer = _probe_peer_web(ns.host, ns.port)
+        if peer is not None:
+            return _report_peer_and_refuse(peer, ns.host, ns.port, "web")
+
+    # D-031 D3a + A5: same cwd contract as `app` -- chdir to ~/.argo_anywhere/
+    # so any accidental cwd-inheriting code path lands in argo's own dir. The
+    # per-launch cwd field (Task 3) is what users use to target a project.
+    from .status import ensure_app_home
+
+    try:
+        os.chdir(ensure_app_home())
+    except OSError as exc:
+        print(
+            f"argo-anywhere web: could not chdir to ~/.argo_anywhere ({exc}); "
+            "continuing with the inherited cwd.",
+            file=sys.stderr,
+        )
+
+    serve(
+        host=ns.host, port=ns.port,
+        engine_argv=tuple(shlex.split(ns.engine)),
+        reload=ns.reload,
+    )
     return 0
 
 
@@ -389,6 +500,10 @@ def _cmd_app(args: Sequence[str]) -> int:
     parser.add_argument("--port", type=int, default=int(os.environ.get("ARGO_ANYWHERE_WEB_PORT", "8799")))
     parser.add_argument("--engine", default=os.environ.get("ARGO_ANYWHERE_WEB_ENGINE", "connect"))
     parser.add_argument("--browser", action="store_true", help="use the default browser instead of a native window")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="bypass the single-instance guard (see `argo-anywhere web --help`).",
+    )
     ns = parser.parse_args(list(args))
 
     try:
@@ -400,6 +515,45 @@ def _cmd_app(args: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # D-031 multi-instance guard: refuse if another argo-anywhere (or any
+    # other service) is already on this loopback port. --force bypasses.
+    if not ns.force:
+        peer = _probe_peer_web(ns.host, ns.port)
+        if peer is not None:
+            # For `app` we ALSO offer to just open the peer's URL rather than
+            # refuse -- for a native-window user, "another argo-anywhere is
+            # running" almost always means "open that one". But we still
+            # exit non-zero so scripts see the refusal.
+            rc = _report_peer_and_refuse(peer, ns.host, ns.port, "app")
+            if peer["kind"] == "sibling":
+                try:
+                    import webbrowser
+                    webbrowser.open(f"http://{ns.host}:{ns.port}")
+                    print(
+                        f"  Opened http://{ns.host}:{ns.port} in your default "
+                        "browser (the running instance).",
+                        file=sys.stderr,
+                    )
+                except Exception:
+                    pass
+            return rc
+
+    # D-031 D3a + A5: pywebview starts in ~/.argo_anywhere/ instead of $HOME so
+    # any code path that forgets to pass a per-launch cwd lands somewhere the
+    # user can identify as ours. mkdir before chdir -- the canonical install
+    # may not have been bootstrapped yet (D-023's first-run bootstrap fires
+    # from mode_client; the web UI doesn't go through that).
+    from .status import ensure_app_home
+
+    try:
+        os.chdir(ensure_app_home())
+    except OSError as exc:  # e.g. read-only $HOME on hardened installs
+        print(
+            f"argo-anywhere app: could not chdir to ~/.argo_anywhere ({exc}); "
+            "continuing with the inherited cwd.",
+            file=sys.stderr,
+        )
 
     import threading
     import time
@@ -452,6 +606,27 @@ def _cmd_app(args: Sequence[str]) -> int:
                     except Exception:
                         pass
                     return "unavailable"
+
+                def browse_folder(self, start: str | None = None) -> str:
+                    # D-031 D2b: native folder picker for the launcher's cwd
+                    # field. Returns the chosen absolute path (empty string on
+                    # cancel). Only exists in pywebview; the browser build
+                    # never sees this method (the JS sniff hides the Browse
+                    # button when window.pywebview.api.browse_folder is absent).
+                    try:
+                        if self.window is None:
+                            return ""
+                        directory = start if (start and os.path.isdir(start)) else os.path.expanduser("~")
+                        result = self.window.create_file_dialog(
+                            webview.FOLDER_DIALOG, directory=directory
+                        )
+                        # pywebview returns a tuple/list of paths, or None on cancel.
+                        if not result:
+                            return ""
+                        chosen = result[0] if isinstance(result, (list, tuple)) else result
+                        return str(chosen) if chosen else ""
+                    except Exception:
+                        return ""
 
             # On macOS a non-bundled Python process shows "Python" in the menu
             # bar with an empty About and the generic icon; brand it before the

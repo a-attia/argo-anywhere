@@ -191,8 +191,19 @@ class PtySession:
         *,
         env: dict[str, str] | None = None,
         dimensions: tuple[int, int] = (24, 80),
+        cwd: str | os.PathLike[str] | None = None,
     ) -> None:
+        """Spawn the engine on a PTY.
+
+        ``cwd`` (D-031 Task 4): if given, chdir the child to this directory
+        before ``exec``. Blank / ``None`` inherits the parent's cwd (preserves
+        today's behavior for direct programmatic callers; the web UI enforces
+        its own "cwd required" policy above the driver). The web layer's
+        :mod:`argo_anywhere.web.validation` runs before this constructor is
+        reached, so the value here is trusted to be absolute + existing.
+        """
         self.argv = list(argv)
+        self.cwd = str(cwd) if cwd is not None else None
         self._stack = contextlib.ExitStack()
         # Keep the vendored-engine temp path alive for the child's whole life.
         script = self._stack.enter_context(engine_path())
@@ -214,6 +225,7 @@ class PtySession:
                 start_new_session=True,  # own session -> the PTY is controlling
                 env=full_env,
                 close_fds=True,
+                cwd=self.cwd,
             )
         finally:
             os.close(slave)  # the child holds it now; parent only needs master

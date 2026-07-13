@@ -95,6 +95,69 @@ def test_unregister_removes() -> None:
     assert reg.snapshots() == []
 
 
+# -- D-031: named panel slots (Channel + Utility) ----------------------------
+
+def test_register_panel_places_in_named_slot() -> None:
+    reg = SessionRegistry()
+    m, evicted = reg.register_panel(FakePty(["connect"]), "channel")
+    assert evicted is None
+    assert reg.get_panel("channel") is m
+    assert reg.get_panel("utility") is None
+    assert m.panel == "channel"
+
+
+def test_register_panel_evicts_previous_slot_occupant() -> None:
+    # Utility panel is ephemeral: relaunching evicts the prior session from
+    # the slot mapping and returns it so the caller can stop + reap it.
+    reg = SessionRegistry()
+    first, _ = reg.register_panel(FakePty(["configure"]), "utility")
+    second, evicted = reg.register_panel(FakePty(["setup"]), "utility")
+    assert evicted is first
+    # Evicted session lost its panel affinity (so subsequent snapshots don't
+    # mis-report it as still occupying utility).
+    assert first.panel is None
+    # New session holds the slot.
+    assert reg.get_panel("utility") is second
+    assert second.panel == "utility"
+    # Both are still in the id-keyed map (caller decides eviction cleanup).
+    assert reg.get(first.id) is first
+    assert reg.get(second.id) is second
+
+
+def test_panel_alive_reflects_liveness() -> None:
+    reg = SessionRegistry()
+    fake = FakePty(["connect"])
+    m, _ = reg.register_panel(fake, "channel")
+    assert reg.panel_alive("channel") is True
+    fake._alive = False
+    assert reg.panel_alive("channel") is False
+
+
+def test_unregister_clears_panel_slot() -> None:
+    reg = SessionRegistry()
+    m, _ = reg.register_panel(FakePty(["connect"]), "channel")
+    reg.unregister(m.id)
+    assert reg.get(m.id) is None
+    assert reg.get_panel("channel") is None
+
+
+def test_register_panel_rejects_unknown_slot() -> None:
+    import pytest as _pytest
+    reg = SessionRegistry()
+    with _pytest.raises(ValueError):
+        reg.register_panel(FakePty(["connect"]), "external")  # type: ignore[arg-type]
+
+
+def test_snapshot_includes_panel_field() -> None:
+    reg = SessionRegistry()
+    m, _ = reg.register_panel(FakePty(["connect"]), "channel")
+    snap = m.snapshot().as_dict()
+    assert snap["panel"] == "channel"
+    # Legacy slot-less register: panel is None.
+    m2 = reg.register(FakePty(["help"]))
+    assert m2.snapshot().as_dict()["panel"] is None
+
+
 # -- endpoints --------------------------------------------------------------
 
 @pytest.fixture()

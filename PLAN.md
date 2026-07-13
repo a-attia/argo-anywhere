@@ -151,6 +151,7 @@ Flag surface (all optional):
 | `--auto-port` | Auto-pick the next free port instead of prompting on collision |
 | `--port-range LO-HI` | Override the auto-port range |
 | `--scope project\|global` | Per-tool config scope (consumed by client/setup/configure/run) |
+| `--cwd PATH` | Change to PATH before mode dispatch; absolute path required, `~` expanded (D-031). Applies scope-conditional forbid-list when combined with `--scope project` (`$HOME` + system dirs hard-blocked; missing project markers soft-warned in the interactive path). Web UI's launcher-cwd field lowers to this flag. |
 | `--ensure` | For `configure`/`run`: bring the shared channel up if it isn't already, instead of failing with the "run connect first" hint |
 | `--force-reinstall` | Wipe the server-side venv + rebuild from scratch |
 | `--keep-orphans` / `--drop-orphans` | `update-models` orphan handling |
@@ -1802,6 +1803,181 @@ state dir).
 self-update "becomes a no-op that points at pipx"; D-030a is the mechanism).
 Not a publish blocker — a first `v3.0.0` can document "remove with `pipx
 uninstall`; full config-restore + `~/.argo_anywhere` teardown lands in 3.0.x."
+
+### D-031 — Web-UI launcher: explicit cwd, dual embedded terminals, scope-aware forbid-list, engine `--cwd` parity (2026-07-13 [v3.1.0])
+
+**Context.** Two footguns in the web-UI launcher, both surfaced
+2026-07-13:
+
+1. **Blind cwd inheritance.** `PtySession` spawned the engine via
+   `subprocess.Popen(...)` with no `cwd=`; the engine (and any AI
+   CLI tool it launched) ran in whatever cwd the FastAPI server
+   or pywebview app had inherited from Finder / launchd (typically
+   `$HOME`). Combined with `--scope project` — which uses
+   `$(_git_root_or_cwd)` inside the engine to place the config —
+   clicking "Launch → run → opencode → scope: project" from the
+   web UI wrote `opencode.json` into the user's home directory
+   instead of the project they meant. Users had no way to say
+   "start this tool in `/path/to/my-project/`".
+2. **Free-text scope field invites typos.** The scope input
+   (`web/static/index.html:284`) was a bare `<input type="text">`;
+   typos surfaced as opaque engine `die` errors from
+   `_validate_scope_for_tool`.
+
+Because the web UI teaches the split-verb story (connect + configure
++ run) and the embedded terminal already differentiates
+channel-owning sessions (`terminate_on_close=False`) from ephemeral
+ones, the fix naturally couples with a UX cleanup: split the
+embedded container into two named panels (Channel + Utility) so
+verb → panel routing is explicit, and hard-block long-running
+tool sessions from the browser (which cannot survive a tab close
+without losing user state).
+
+**Decision.**
+
+1. **Launcher requires an explicit, absolute cwd.** The launcher
+   popover grows a `working directory` row (text input + Browse
+   button — Browse visible only in the pywebview build). The field
+   is always visible with a pre-filled default (MRU top entry
+   from `~/.argo_anywhere/web_state.json`, else `$HOME` on first
+   run). Blank is rejected. `~` expands via `.expanduser()` and
+   counts as absolute; symlinks resolved via `.resolve()`. Client
+   AND server enforce absolute-path (defense in depth). Missing
+   directory → HTTP 409 from launch → confirm modal → OK triggers
+   an explicit `POST /api/mkdir` (never silent; per D4).
+
+2. **`project` scope has a forbid-list; `global` scope does not.**
+   Beginners who launch a client from `$HOME` just to chat with the
+   agent (no file writes) get the happy path via `global` scope.
+   `project` scope hard-blocks `$HOME` exact + system dirs (`/`,
+   `/bin`, `/sbin`, `/usr`, `/etc`, `/var`, `/opt`, `/tmp`,
+   `/var/tmp`; macOS additions: `/System`, `/Library`, `/private`).
+   No override. Forbid-list is scope-conditional so we don't
+   restrict beginners' cwd choices for `global`. Soft-warn +
+   confirm modal fires when `project` scope + cwd has no `.git`
+   AND no project marker (`pyproject.toml` / `package.json` /
+   `Cargo.toml` / `Makefile` / `go.mod` / ...) AND no existing tool
+   config. Wording in `notes/impl_launcher_cwd.md` §5.2.
+
+3. **Cwd-aware scope default (one-directional nudge).** When cwd
+   == `$HOME`, the scope `<select>` pre-selects `global`. Project-
+   marker directories do NOT auto-nudge toward `project`; the
+   nudge only fires in the dangerous direction (avoiding `$HOME`
+   → `project`).
+
+4. **Scope field = `<select>`, not free-text.** Values: `— auto —`,
+   `global`, `project`. Removes the typo class of failure. Adds a
+   coupling rule to AGENTS.md: any change to a tool's
+   `<name>_scope_values()` in the engine MUST update the web UI's
+   `lScope` select in the same commit.
+
+5. **Embedded terminal splits horizontally into two panels
+   (Channel + Utility).** Channel (left) is persistent, owns
+   `connect`; ws-close does not terminate (SSH master survives
+   → no repeat Duo). Utility (right) is ephemeral; runs
+   `configure` / `setup` / `tunnel`; ws-close terminates cleanly.
+   Info verbs (`status` / `list-models` / `list-tools`) continue
+   using `/api/run` (Lane-1 captured; not streamed to a panel).
+   Draggable divider with 25%/75% min/max width limits; position
+   persisted as `divider_pct` in `web_state.json`. Existing
+   `Terminal` / `Hide` buttons act on the container (both panels
+   show / hide together — no per-panel toggle in v1).
+
+6. **`run` and `client` hard-blocked from embedded panels.**
+   Browser tab close would kill the tool session; external
+   terminals own their own window and lifecycle. The "where to
+   run" `<select>` disables the embedded option for these verbs;
+   server also refuses if bypassed. `client` is REMOVED from the
+   web-UI verb dropdown entirely (the split-verb story is what the
+   web UI teaches); CLI users see no change.
+
+7. **`configure` (Utility) refuses to launch if no Channel active.**
+   Clear error directs user to start Channel via `connect` first.
+   No auto-launch (explicit > magic).
+
+8. **pywebview app itself starts in `~/.argo_anywhere/`.**
+   `mkdir -p` before `os.chdir` in `cli._cmd_app` / `launcher.py`
+   scripts (canonical install may not have been bootstrapped yet
+   per D-023). App cwd shown in launcher header strip + About
+   popover row so users know where argo-anywhere itself is
+   running (distinct from where the tool will start).
+
+9. **Engine `--cwd <path>` flag for CLI parity.** Parsed early;
+   `cd -- "$path" || die` before mode dispatch. Applies the same
+   forbid-list (bash is the authoritative source; Python has a
+   parallel implementation for speed, tested against the bash
+   list). CLI users get identical protection whether they use the
+   web UI or invoke the engine directly (important for users on
+   remote nodes via screen / tmux who never see the web UI).
+
+10. **`web_state.json` is versioned + atomic.** Schema
+    `{"version": 1, "mru": [...], "divider_pct": 50, "theme": "auto"}`;
+    atomic writes via `tempfile + os.replace`; MRU capped at 10
+    entries (LIFO, dedupe on insert). Non-existent paths pruned
+    lazily on read. `theme` value in `{"auto", "dark", "light"}`.
+
+11. **Light/dark theme toggle** (bundled in-PR). The web UI is
+    currently hardcoded dark (`color-scheme: dark` + hex-literal
+    CSS variables at `web/static/index.html:9-27`). Added a
+    light-mode CSS palette gated on `:root[data-theme="light"]`,
+    a top-bar toggle cycling `auto → dark → light → auto`
+    (default `auto` reads `prefers-color-scheme`), and a
+    `theme` key in `web_state.json` so the choice persists. The
+    two xterm.js panels (Channel + Utility) re-color on toggle
+    via `setOption('theme', ...)`. Design borrows the same
+    pattern the sibling `scrollback` project uses. Small,
+    self-contained, no engine coupling.
+
+12. **Multi-instance guard** (added mid-execution 2026-07-13). Concurrent
+    `argo-anywhere web` / `app` instances would collide destructively:
+    same-port → uvicorn `bind()` fails with a stack trace; different
+    ports → both write to the same `~/.argo_anywhere/web_state.json`
+    (last-write-wins) AND each keeps a private `SessionRegistry` so
+    Channel-panel deduplication is per-instance only. Fix: extend
+    `/healthz` to identify as argo-anywhere (`app` + `pid` +
+    `package_version` + `app_cwd_short`); add a pre-bind probe
+    (`_probe_peer_web` in `src/argo_anywhere/cli.py`) that refuses
+    to start when a peer is on the port, with a helpful message
+    (sibling: "pid X, package Y, try --port Z"; foreign: "not us,
+    refusing to bind"). `--force` bypasses. `_cmd_app` also opens
+    the incumbent's URL in the browser (the natural response to
+    "someone else is already running"). Pre-D-031 servers classify
+    as `foreign` → refuse safely without coordination during an
+    incremental upgrade. Not a mutex (two instances on different
+    ports still race the state file); it's a UX safety-net.
+
+**Consequences.**
+
+- **Behavior change**: web UI's launcher REQUIRES a cwd (previously
+  silently inherited server cwd). Documented in
+  `docs/UPGRADING.md`.
+- **Behavior change**: `client` removed from web-UI verb dropdown.
+  CLI unchanged.
+- **Behavior change**: pywebview app cwd is now
+  `~/.argo_anywhere/`, not `$HOME`. Visible in header + About.
+- **New engine flag**: `--cwd <path>`. Optional. Existing CLI
+  invocations unaffected.
+- **New state file**: `~/.argo_anywhere/web_state.json`
+  (small; auto-created; safe to delete). Persists MRU cwd
+  list, divider position, and theme choice.
+- **No new dependencies**: stdlib (`pathlib`, `tempfile`,
+  `os.replace`).
+- **Closes** two footgun classes (blind cwd inheritance +
+  scope typos).
+- **Opens** the door to per-panel refinements in future PRs
+  (per-panel show/hide, streaming info verbs to Utility, folder
+  picker in browser mode via a native-file-system-access polyfill).
+
+**Design record.** Full implementation plan +
+contract diffs + test plan + task order in
+[`notes/impl_launcher_cwd.md`](../notes/impl_launcher_cwd.md).
+Ready to execute (status: designing → executing 2026-07-13).
+
+**Related decisions.** D-017 / D-018 / D-019 (scope framework);
+D-020 (port-as-transport-state); D-021 (cross-client coherence);
+D-024 (connect/configure/run split — this decision is the
+web-UI teaching of that split); D-026..D-030 (Python package
++ web UI foundation — this decision is the natural next step).
 
 ---
 

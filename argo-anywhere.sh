@@ -253,7 +253,7 @@ _legacy_CLAUDECODE_SCOPE="${CLAUDECODE_SCOPE:-}"
 # release process). Format: "<major>.<minor>.<patch>" with optional
 # "-rc<N>" / "-dev" suffix for pre-release builds; _extract_version
 # normalizes both forms.
-SCRIPT_VERSION="2.2.1-dev"
+SCRIPT_VERSION="2.3.0"
 
 # Canonical install root for the script itself (managed by the
 # bootstrap helper triggered on first 'client' / 'setup' run, and by
@@ -2537,6 +2537,156 @@ _validate_scope_for_tool() {
   die "--scope value '${scope}' is not valid for --cli-tool ${tool}. Accepted values: ${allowed}."
 }
 
+# _check_env_shadow_and_warn: 2026-07-13 fix. Some AI CLI tools honor
+# shell env vars at runtime that override the values written to their
+# config files. If the user has one of those vars set in their shell rc
+# (~/.bashrc / ~/.zshrc / a keychain helper / an old export from a
+# previous test), our config is silently shadowed and the tool ends up
+# using the wrong endpoint or the wrong credential. This helper warns
+# loudly BEFORE the tool is invoked so the user isn't confused by
+# "argo-anywhere set up but the tool went somewhere else" behavior.
+#
+# Args:
+#   $1 tool  -- lowercase tool name (matches CLI_TOOLS_AVAILABLE)
+#
+# The per-tool contract: each tool declares its own list via
+# <name>_shadowing_env_vars() (space-separated list of env var names
+# whose SHELL values, if non-empty, would shadow our written config).
+# Tools with no shadowing exposure omit the function and this helper
+# no-ops on them.
+#
+# Returns 0 always (warn-only; doesn't fail the invocation).
+_check_env_shadow_and_warn() {
+  local tool="$1"
+  local vars_fn="${tool}_shadowing_env_vars"
+  command -v "$vars_fn" >/dev/null 2>&1 || return 0
+  local vars; vars="$("$vars_fn")"
+  local var val
+  local _hits=0
+  for var in $vars; do
+    val="$(printenv "$var" 2>/dev/null || true)"
+    if [ -n "$val" ]; then
+      if [ "$_hits" -eq 0 ]; then
+        warn ""
+        warn "Environment-shadowing check (${tool}):"
+        warn "  Your shell has variables set that ${tool} honors AT RUNTIME"
+        warn "  and that TAKE PRECEDENCE over the values we just wrote to"
+        warn "  your config file. Unless you unset them, ${tool} will use"
+        warn "  the shell values, not our config."
+        warn ""
+      fi
+      # Mask the value if it looks like a credential; show only length.
+      case "$var" in
+        *KEY*|*TOKEN*|*SECRET*|*PASSWORD*)
+          warn "  * ${var} is set (value hidden; ${#val} chars)"
+          ;;
+        *)
+          # For non-credential vars (e.g. BASE_URL), showing the value
+          # helps the user see if it matches our config or something
+          # else. Truncate very long values.
+          if [ "${#val}" -gt 80 ]; then
+            warn "  * ${var} = ${val:0:77}..."
+          else
+            warn "  * ${var} = ${val}"
+          fi
+          ;;
+      esac
+      _hits=$((_hits + 1))
+    fi
+  done
+  if [ "$_hits" -gt 0 ]; then
+    warn ""
+    warn "  To make ${tool} use our config instead, unset the offending"
+    warn "  variable(s) in your current shell:"
+    for var in $vars; do
+      val="$(printenv "$var" 2>/dev/null || true)"
+      [ -n "$val" ] && warn "      unset ${var}"
+    done
+    warn "  ...and remove them from your ~/.bashrc / ~/.zshrc if they"
+    warn "  came from there."
+    warn ""
+  fi
+  return 0
+}
+
+# _scope_project_forbid_dirs: D-031 (v3.1.0) authoritative list of
+# directories where `--scope project` is refused outright. Space-separated
+# for easy iteration; matched by EXACT path (post-cd -P), so /tmp is
+# forbidden but /tmp/foo is not.
+#
+# The Python side (src/argo_anywhere/web/forbid.py, PROJECT_SCOPE_FORBID)
+# MUST mirror this list. When either changes, update both in the same
+# commit (AGENTS.md scope-coupling rule).
+#
+# macOS symlinks: /etc -> /private/etc, /var -> /private/var, /tmp ->
+# /private/tmp. Include the targets so post-`cd -P` exact-match catches
+# them on Darwin too.
+_scope_project_forbid_dirs() {
+  printf '%s' "/ /bin /sbin /usr /etc /var /opt /tmp /var/tmp /System /Library /private /private/etc /private/var /private/tmp /private/var/tmp"
+}
+
+# _scope_project_forbid_dir_p: return 0 if the given absolute path is on
+# the hard-block list OR is $HOME exact. Non-zero otherwise. Callers use
+# this before writing a project-scope config to refuse writing to
+# system dirs / $HOME (which would litter dotfiles).
+#
+# Args:
+#   $1 abspath -- absolute path (should already be resolved to physical)
+_scope_project_forbid_dir_p() {
+  local p="$1" d
+  # $HOME exact match: refuse to project-configure the user's home dir.
+  if [ "$p" = "$HOME" ]; then
+    return 0
+  fi
+  for d in $(_scope_project_forbid_dirs); do
+    if [ "$p" = "$d" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _apply_cwd_flag: D-031 (v3.1.0) `cd -- "$ARGO_ANYWHERE_CWD" || die`
+# before mode dispatch. Applies the shared forbid-list when combined
+# with `--scope project` so CLI users on remote nodes via screen/tmux
+# get identical protection to web-UI users.
+#
+# Called ONCE from main() right after argv parsing settles. Idempotent
+# (bails silently if ARGO_ANYWHERE_CWD is empty).
+_apply_cwd_flag() {
+  [ -n "${ARGO_ANYWHERE_CWD:-}" ] || return 0
+  local target="$ARGO_ANYWHERE_CWD"
+  # Expand ~ / ~user via bash eval on the leading token. We do this
+  # ourselves rather than trusting the caller's shell to have done it
+  # because a launcher may pass the literal string.
+  case "$target" in
+    "~"|"~/"*|"~"*/*)
+      # eval-based ~ expansion; the value came from an argv token we
+      # already restricted to a single argument.
+      target="$(bash -c "printf '%s' $target")"
+      ;;
+  esac
+  # Absolute path required (mirrors the web-side validator).
+  case "$target" in
+    /*) : ok ;;
+    *)  die "--cwd requires an absolute path (starts with / or ~). Got: ${ARGO_ANYWHERE_CWD}" ;;
+  esac
+  [ -d "$target" ] || die "--cwd: directory does not exist: ${target}"
+  [ -r "$target" ] && [ -x "$target" ] || die "--cwd: directory not readable/traversable: ${target}"
+  # Resolve to a physical path (follow symlinks) so forbid-list exact-
+  # match works on macOS (/etc -> /private/etc).
+  local resolved
+  resolved="$(cd -P "$target" 2>/dev/null && pwd -P)" || die "--cwd: cd failed for ${target}"
+  # Scope-conditional hard-block. Only fires for `--scope project` (D6a);
+  # `--scope global` is unrestricted (beginner happy path).
+  if [ "${_SCOPE_OVERRIDE:-}" = "project" ] || [ "${ARGO_ANYWHERE_SCOPE:-}" = "project" ]; then
+    if _scope_project_forbid_dir_p "$resolved"; then
+      die "--cwd ${resolved} is forbidden with --scope project (system dir or \$HOME exact). Use --scope global instead, or pick a project subdirectory."
+    fi
+  fi
+  cd -- "$resolved" || die "--cwd: cd failed for ${resolved}"
+}
+
 # prompt_scope_switch: D-017 scope-switch prompt. Fires from per-tool
 # <name>_pick_scope() when a conflict is detected between the user's
 # chosen scope and the system state (existing files, OAuth state, etc.).
@@ -2725,6 +2875,17 @@ ensure_opencode_installed() {
 # ----------------------------------------------------------------------------
 # OpenCode end-to-end client setup (subsection of 12)
 # ----------------------------------------------------------------------------
+
+# opencode_shadowing_env_vars: 2026-07-13. Env vars whose SHELL values
+# (if set) would override the argo provider config we write. OpenCode's
+# provider config is JSON (not env-driven), so the exposure is smaller
+# than claudecode's -- but a user with OPENAI_API_KEY / OPENAI_BASE_URL
+# exported globally could still confuse a provider that we haven't
+# explicitly gated. Listed here for parity + so future OpenCode versions
+# that grow env overrides get flagged automatically.
+opencode_shadowing_env_vars() {
+  printf 'OPENAI_API_KEY OPENAI_BASE_URL OPENAI_API_BASE OPENCODE_MODEL OPENCODE_API_KEY'
+}
 
 # opencode_scope_values: D-018 per-tool scope vocabulary. OpenCode
 # supports both global (~/.config/opencode/config.json) and project
@@ -2990,6 +3151,16 @@ ensure_claudecode_installed() {
 # default by Claude Code itself, so it's the right place for per-machine
 # overrides.
 
+# claudecode_shadowing_env_vars: 2026-07-13. Env vars whose SHELL
+# values (if set) would override the config we write. Claude Code reads
+# ANTHROPIC_* from the process env at runtime; a value already exported
+# in the user's shell replaces whatever settings.json says. Kept in
+# sync with the writer above -- add/remove here whenever we start/stop
+# owning a new env key.
+claudecode_shadowing_env_vars() {
+  printf 'ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX'
+}
+
 # claudecode_scope_values: declare the legal values for --scope when
 # --cli-tool=claudecode. Used by _validate_scope_for_tool. Space-separated
 # tokens; the validator splits on whitespace.
@@ -3083,7 +3254,7 @@ _claudecode_check_conflicts() {
     # A.2 first (OAuth-state detected) -- highest-stakes because it's the
     # silent-shadowing landmine H6 was designed to prevent.
     if [ -f "${HOME}/.claude.json" ]; then
-      conflict_desc="You have an active Claude Code OAuth session (~/.claude.json detected). Writing global proxy config may interact with OAuth precedence: ANTHROPIC_AUTH_TOKEN should win per Anthropic's docs, but we observed shadowing in real-world tests (see audit H6)."
+      conflict_desc="You have an active Claude Code OAuth session (~/.claude.json detected). The env.ANTHROPIC_API_KEY we write reliably overrides the OAuth session's routing at either scope. Project scope is still recommended: it keeps our config out of your global tree so directories that DON'T have a project-scope override can still reach your personal subscription unchanged."
     # A.1 -- existing global file with content; we'd be overwriting (or
     # merging via handle_config_file's [k/b/d/m/a] prompt later).
     elif [ -f "$CLAUDECODE_GLOBAL_CONFIG" ]; then
@@ -3162,15 +3333,39 @@ PYEOF
 # points env.ANTHROPIC_BASE_URL at our proxy and uses the ANL username as
 # the bearer token. Preserves any pre-existing top-level keys in the
 # target file (model, permissions, hooks, etc.) and any pre-existing env
-# entries OTHER than ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
-# ANTHROPIC_MODEL (which we own).
+# entries OTHER than ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY (which we
+# own; ANTHROPIC_AUTH_TOKEN written by pre-2026-07-13 versions is
+# stripped-if-ours as a migration step).
 #
 # Per Claude Code docs, `env` is REPLACED across scope files, not
 # deep-merged -- so when we write the project scope, anything in the
 # global env that we don't carry forward is silently shadowed for that
-# project. We only own three env keys here; everything else in the
+# project. We only own two env keys here; everything else in the
 # target file's env survives our write. The user's global env is
 # untouched as long as we're writing to project scope.
+#
+# WHY ANTHROPIC_API_KEY, NOT ANTHROPIC_AUTH_TOKEN (adopted 2026-07-13):
+# Both env vars are honored by Claude Code + both route requests to
+# ANTHROPIC_BASE_URL correctly (live-tested 2026-07-13 against v2.1.207
+# by pointing the base URL at a dead port -- Claude Code hung waiting
+# on that port under BOTH env vars, confirming the routing works).
+# ANTHROPIC_API_KEY is Anthropic's canonical name for this variable in
+# their public docs; ANTHROPIC_AUTH_TOKEN is documented as an
+# equivalent-but-legacy alias. Adopting API_KEY is future-proof if
+# Anthropic ever deprecates AUTH_TOKEN, and it aligns with what users
+# see referenced in Anthropic's own examples.
+#
+# The 2026-07-13 investigation that surfaced this change ALSO surfaced
+# a real user-visible UX issue: Claude Code's TUI welcome banner + the
+# "Select model" picker are rendered from ~/.claude.json OAuth account
+# state (plan tier, subscription-served model catalog with $/Mtok
+# prices) regardless of the actual routing. Users see "Opus 4.8 · API
+# Usage Billing" and reasonably conclude they're on their personal
+# subscription -- even when requests are correctly reaching argo. The
+# post-configure output block in do_post_tunnel_for_cli_tool (claudecode
+# arm) prints a "how to verify routing" hint for exactly this reason.
+# See docs/LIMITATIONS.md "Claude Code TUI is misleading" for the full
+# story.
 #
 # IMPORTANT: ANTHROPIC_BASE_URL has NO trailing /v1. Claude Code appends
 # /v1/messages itself; including /v1 here would produce /v1/v1/messages
@@ -3232,9 +3427,20 @@ env = data.get("env") or {}
 if not isinstance(env, dict):
     env = {}
 
-# Keys we own:
-env["ANTHROPIC_BASE_URL"]  = f"http://localhost:{port}"
-env["ANTHROPIC_AUTH_TOKEN"] = user
+# Keys we own (adopted 2026-07-13; see comment above the function):
+env["ANTHROPIC_BASE_URL"] = f"http://localhost:{port}"
+env["ANTHROPIC_API_KEY"]  = user
+
+# Migration: pre-2026-07-13 versions wrote ANTHROPIC_AUTH_TOKEN as the
+# auth env key. Both AUTH_TOKEN and API_KEY are honored by Claude Code
+# and both route requests correctly; API_KEY is Anthropic's canonical
+# name in their public docs. When we detect a stale AUTH_TOKEN whose
+# value matches OUR username (the fingerprint of a value we wrote),
+# strip it so the file converges on the canonical shape. A user-set
+# AUTH_TOKEN with any other value (e.g. a personal OAuth token) is
+# preserved untouched -- it's not ours to remove.
+if env.get("ANTHROPIC_AUTH_TOKEN") == user:
+    del env["ANTHROPIC_AUTH_TOKEN"]
 
 data["env"] = env
 
@@ -3276,9 +3482,88 @@ PYEOF
 setup_claudecode_cli_tool() {
   claudecode_pick_scope
   ensure_claudecode_installed
+  # 2026-07-13 auto-migration (see _migrate_claudecode_config_in_place
+  # below): silently upgrade a pre-fix config's ANTHROPIC_AUTH_TOKEN to
+  # ANTHROPIC_API_KEY before handle_config_file diffs it. Without this,
+  # a non-TTY caller (web UI's `configure` verb, `run --ensure`, `-y`
+  # runs) would auto-answer `k` (keep) at the "differs from proposed"
+  # prompt and skip the migration silently -- leaving Claude Code with
+  # the ignored auth-var and still routing to the personal subscription.
+  _migrate_claudecode_config_in_place "$_CLAUDECODE_SCOPE_PATH"
   handle_config_file "$_CLAUDECODE_SCOPE_PATH" \
     "Claude Code config (${_CLAUDECODE_SCOPE_NAME})" \
     write_claudecode_config
+}
+
+# _migrate_claudecode_config_in_place: 2026-07-13. Pre-fix configs
+# have env.ANTHROPIC_AUTH_TOKEN set to the ANL username (our
+# fingerprint). Claude Code v2.1.x silently ignores that key when a
+# personal OAuth session exists; the fix (see write_claudecode_config)
+# is to emit ANTHROPIC_API_KEY instead. This helper upgrades an
+# existing pre-fix config IN PLACE so handle_config_file's cmp -s
+# check sees the migrated file as already-up-to-date and no
+# k/b/d/m/a prompt fires.
+#
+# Preserves top-level user keys + user-owned env keys (only rewrites
+# the auth-token pair, and only when the AUTH_TOKEN value matches our
+# ANL username -- a user-set AUTH_TOKEN with any other value is left
+# alone).
+#
+# No-op when: file doesn't exist; file is unparseable JSON (we'd have
+# to overwrite to fix, which is exactly what the k/b/d/m/a prompt is
+# for); file already uses API_KEY with our username (correct shape).
+#
+# Args: $1 -- target settings.json path.
+_migrate_claudecode_config_in_place() {
+  local target="$1"
+  [ -f "$target" ] || return 0
+  local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
+  [ -n "$user" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$target" "$user" <<'PYEOF' || return 0
+import json, sys
+target, user = sys.argv[1], sys.argv[2]
+try:
+    with open(target) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)  # unparseable -> defer to handle_config_file
+if not isinstance(data, dict):
+    sys.exit(0)
+env = data.get("env")
+if not isinstance(env, dict):
+    sys.exit(0)
+# Only migrate when our fingerprint is present: AUTH_TOKEN value ==
+# the ANL username we would have written pre-fix.
+if env.get("ANTHROPIC_AUTH_TOKEN") != user:
+    sys.exit(0)
+# Perform the migration: strip AUTH_TOKEN, set API_KEY (if not
+# already ours; a user-owned API_KEY with a different value survives
+# by being left in place -- we don't overwrite it here because that's
+# a policy question the writer answers, not the migrator).
+del env["ANTHROPIC_AUTH_TOKEN"]
+if env.get("ANTHROPIC_API_KEY") is None:
+    env["ANTHROPIC_API_KEY"] = user
+data["env"] = env
+# Atomic write: temp + rename, so a reader mid-open never sees a
+# half-written file.
+import os, tempfile
+d = os.path.dirname(target) or "."
+fd, tmp = tempfile.mkstemp(prefix=".argo-migrate.", dir=d)
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, target)
+except Exception:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
+# Print a compact confirmation so users see the migration happened;
+# stdout is fine because handle_config_file's own log lines follow.
+print(f"[migrated] {target}: env.ANTHROPIC_AUTH_TOKEN -> env.ANTHROPIC_API_KEY (2026-07-13 canonical-name adoption; see docs/LIMITATIONS.md 'Claude Code TUI is misleading')")
+PYEOF
+  return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -3306,6 +3591,15 @@ setup_claudecode_cli_tool() {
 # (<git-root>/.aider.conf.yml, cwd fallback) scopes.
 aider_scope_values() {
   printf 'global project'
+}
+
+# aider_shadowing_env_vars: 2026-07-13. aider is OpenAI-Chat-compatible
+# and reads OPENAI_* + ANTHROPIC_* at runtime. Same shadowing exposure
+# as opencode + claudecode combined -- any of these set in the shell
+# will override the openai-api-base / openai-api-key we wrote to
+# ~/.aider.conf.yml (or the project variant).
+aider_shadowing_env_vars() {
+  printf 'OPENAI_API_KEY OPENAI_BASE_URL OPENAI_API_BASE ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL'
 }
 
 _AIDER_SCOPE_PATH=""
@@ -5375,6 +5669,7 @@ do_post_tunnel_for_cli_tool() {
       log "OpenCode is installed and configured for this proxy.  Run: opencode"
       log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
       log "  with Authorization: Bearer ${ANL_USERNAME}"
+      _check_env_shadow_and_warn opencode
       ;;
     claudecode)
       setup_claudecode_cli_tool
@@ -5387,18 +5682,38 @@ do_post_tunnel_for_cli_tool() {
         log "  Run from any directory:"
       fi
       log "    claude"
+      _check_env_shadow_and_warn claudecode
       log "  Models default to whatever Claude Code's --model flag resolves;"
       log "  the proxy advertises Anthropic's models at /v1/messages."
+      # UX clarifier (2026-07-13): the Claude Code TUI shows welcome-
+      # banner text ("Opus 4.8 · API Usage Billing") + a Select-model
+      # picker (Fable 5 / Sonnet 5 / Haiku 4.5 ...) that come from
+      # ~/.claude.json's OAuth account state -- NOT from what's being
+      # served. Users see the picker + assume Claude Code is talking to
+      # api.anthropic.com even when routing is correctly going through
+      # argo. Give them a concrete way to verify.
+      log ""
+      log "  Note: Claude Code's welcome banner + model picker show text"
+      log "  from your \$HOME OAuth account (Fable 5 / Opus 4.8 / \$/Mtok"
+      log "  prices, etc.) -- that's TUI content only; it does NOT reflect"
+      log "  the actual routing. To verify claude is using argo:"
+      log "    claude --print --model claude-4.5-haiku 'reply ok'"
+      log "  If that succeeds, requests are reaching argo-proxy (haiku 4.5"
+      log "  is served by argo; personal-subscription tiers do not offer"
+      log "  that exact id). See '$(basename "$0") list-models' for the"
+      log "  full list of argo-served models."
       # H7 fix (audit Phase 2b Batch 4): privacy warning. The config
       # written above contains the user's ANL username in clear text
-      # under env.ANTHROPIC_AUTH_TOKEN (the proxy uses the username as
+      # under env.ANTHROPIC_API_KEY (the proxy uses the username as
       # the bearer token; argo-proxy attributes calls by it). The
+      # env key name changed 2026-07-13 from ANTHROPIC_AUTH_TOKEN to
+      # ANTHROPIC_API_KEY -- see write_claudecode_config for why. The
       # username is not cryptographically a secret but IS personally-
       # identifying -- leaking it into a public dotfile repo or a
       # shared machine image is a privacy regression. Warn the user
       # explicitly and remind them to gitignore the file.
       warn "Privacy note: ${_CLAUDECODE_SCOPE_PATH} now contains your ANL username"
-      warn "  ('${ANL_USERNAME}') in env.ANTHROPIC_AUTH_TOKEN. Don't commit it to a"
+      warn "  ('${ANL_USERNAME}') in env.ANTHROPIC_API_KEY. Don't commit it to a"
       warn "  public dotfile repo or share it widely."
       if [ "$_CLAUDECODE_SCOPE_PATH" = "$CLAUDECODE_PROJECT_CONFIG" ]; then
         log "  (Project scope -- Claude Code's defaults gitignore"
@@ -5420,6 +5735,7 @@ do_post_tunnel_for_cli_tool() {
         log "  Run from any directory:"
       fi
       log "    aider"
+      _check_env_shadow_and_warn aider
       log "  Default model: openai/argo:gpt-4o. To use another, pass the EXACT"
       log "  id from /v1/models with the 'openai/' + 'argo:' prefixes, e.g.:"
       log "    aider --model openai/argo:claude-opus-4.8"
@@ -9760,8 +10076,19 @@ Options:
                        [k]eep / [s]witch / [a]bort when applicable.
                        Canonical env: ARGO_ANYWHERE_SCOPE. Legacy CLAUDECODE_SCOPE
                        is honored once per session with a deprecation WARN
-                       (planned removal: v3.0.0).
-  --verbose-server     Enable argo-proxy verbose logging on the compute
+                        (planned removal: v3.0.0).
+   --cwd PATH           Change to PATH before mode dispatch (D-031, v3.1.0).
+                        Absolute path required; ~ and ~user expanded. The
+                        engine (and any AI CLI tool it launches) then starts
+                        in this directory. Combined with --scope project it
+                        enforces the shared forbid-list: refuses \$HOME
+                        exact and the usual system dirs (/, /etc, /usr,
+                        /tmp, /var, /opt; macOS's /System /Library /private
+                        + their /etc /var /tmp symlink targets). --scope
+                        global is unrestricted. CLI parity with the web-UI
+                        launcher's cwd field so remote-node users on
+                        screen/tmux get identical protection.
+   --verbose-server     Enable argo-proxy verbose logging on the compute
                        node. By default (since v2.0) the script writes
                        \`verbose: false\` in the argo-proxy config to
                        prevent prompt+response bodies from being logged
@@ -10309,6 +10636,16 @@ main() {
         # one-time WARN (Section 6).
         [ -n "${2:-}" ] || die "--scope expects a value (e.g. 'project' or 'global'; per-tool vocabulary varies)."
         _SCOPE_OVERRIDE="$2"; shift 2 ;;
+      --cwd)
+        # D-031 (v3.1.0): change to PATH before mode dispatch. CLI parity
+        # with the web-UI launcher's cwd field so users on remote nodes via
+        # screen/tmux get the same "which directory should the tool start in"
+        # control. Absolute path required (~/... is expanded server-side by
+        # bash's tilde expansion). Applied AFTER argument parsing so all
+        # verbs benefit; combined with --scope project it triggers the
+        # shared forbid-list check (function _scope_project_forbid_dir_p).
+        [ -n "${2:-}" ] || die "--cwd expects a directory path (absolute)."
+        ARGO_ANYWHERE_CWD="$2"; shift 2 ;;
       --keep-orphans)
         KEEP_ORPHANS=1; shift ;;
       --drop-orphans)
@@ -10376,6 +10713,11 @@ main() {
     esac
   done
   [ -n "$mode" ] || mode="client"
+
+  # D-031: apply --cwd early -- before the legacy-state gate, the port
+  # resolver, or any mode dispatch. Combined with --scope project it
+  # enforces the shared forbid-list. No-op if --cwd wasn't passed.
+  _apply_cwd_flag
 
   # --keep-orphans and --drop-orphans are mutually exclusive (and both
   # only meaningful for update-models). Reject the combination early so

@@ -34,6 +34,45 @@ _SCRIPT_VERSION_RE = re.compile(rb'^SCRIPT_VERSION="?([^"\n]+)"?', re.MULTILINE)
 #: The engine's state dir (matches argo-anywhere.sh STATE_DIR); local only.
 STATE_DIR = Path(os.path.expanduser("~/.config/argo_anywhere"))
 
+#: The canonical install dir (D-023; matches argo-anywhere.sh CANONICAL_HOME).
+#: Also the cwd the ``app`` / ``web`` subcommands chdir to on startup (D-031
+#: §2.2 D3a): the pywebview window (or the browser-hosted server) starts here
+#: instead of ``$HOME``, so any code path that forgets to pass a per-launch cwd
+#: lands somewhere the user can identify as argo-anywhere's, not their home.
+APP_HOME = Path(os.path.expanduser("~/.argo_anywhere"))
+
+#: The web UI's persisted state (MRU cwd list, divider position, theme).
+#: Written atomically; schema-versioned. Populated by Tasks 5 + 5.5.
+WEB_STATE_FILE = APP_HOME / "web_state.json"
+
+
+def ensure_app_home() -> Path:
+    """Create :data:`APP_HOME` if it doesn't exist yet.
+
+    D-031 §2.3 A5: ``~/.argo_anywhere/`` may not have been bootstrapped yet
+    (D-023 first-run bootstrap fires from ``mode_client``; the web UI doesn't
+    go through that). Call this before ``os.chdir(APP_HOME)`` to ensure the
+    dir is present. Safe to call repeatedly.
+    """
+    APP_HOME.mkdir(parents=True, exist_ok=True)
+    return APP_HOME
+
+
+def app_cwd_display() -> str:
+    """A human-readable rendering of the app's cwd for the UI status strip.
+
+    Collapses ``$HOME`` to ``~`` for compactness (``/Users/attia/.argo_anywhere``
+    -> ``~/.argo_anywhere``). Called by ``/api/status`` (via ``package_info``)
+    and surfaced in the web UI's launcher header + About popover (D-031 D3a).
+    """
+    cwd = Path(os.getcwd()).resolve()
+    try:
+        home = Path.home().resolve()
+        rel = cwd.relative_to(home)
+        return f"~/{rel}" if str(rel) != "." else "~"
+    except (ValueError, RuntimeError):
+        return str(cwd)
+
 
 def cached_state(state_dir: Path | None = None) -> dict:
     """Read the engine's cached identity (user / node / port) -- local files.
@@ -69,13 +108,20 @@ def engine_sha256() -> str:
 
 def package_info() -> dict:
     """Versions + runtime facts. Package version is authoritative (D-029); the
-    engine version is an internal component tag."""
+    engine version is an internal component tag.
+
+    D-031 D3a: ``app_cwd`` + ``app_cwd_short`` report where the web-UI process
+    itself is running (distinct from where a spawned tool will start; that's
+    controlled per-launch via the launcher's cwd field, Task 3).
+    """
     return {
         "package_version": __version__,
         "engine_version": engine_version(),
         "engine_sha256_short": engine_sha256()[:12],
         "python_version": platform.python_version(),
         "platform": platform.platform(),
+        "app_cwd": str(Path(os.getcwd()).resolve()),
+        "app_cwd_short": app_cwd_display(),
     }
 
 

@@ -16,19 +16,31 @@ the browser terminal via :func:`argo_anywhere.web.pty_bridge.run_pty_bridge`.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
+import sys
 from contextlib import ExitStack, asynccontextmanager
 from importlib.resources import as_file, files
 from typing import Sequence
 
-from fastapi import FastAPI, WebSocket
+import argo_anywhere
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..driver import KNOWN_VERBS, PtySession, run_engine
 from .pty_bridge import run_pty_bridge
-from .registry import SessionRegistry
+from .registry import (
+    CHANNEL_PANEL_VERBS,
+    UTILITY_PANEL_VERBS,
+    PanelSlot,
+    SessionRegistry,
+)
+from . import state as _state
+from .forbid import Verdict as ForbidVerdict
+from .forbid import check as check_forbid
+from .validation import STATUS_FOR_VERDICT, CwdVerdict, validate_cwd
 
 #: Host header values (hostname part, port stripped) accepted by the guard.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -46,6 +58,32 @@ INFO_VERBS: dict[str, dict] = {
     "status": {"anl": True},        # polls the tunnel + /v1/models when up
     "list-models": {"anl": True},   # fetches models from argo-proxy
 }
+
+#: Verbs the web UI HARD-BLOCKS from spawning into an embedded panel (D-031).
+#: ``run`` and ``client`` launch a user-facing tool whose lifecycle should not
+#: be tied to a browser tab; closing the tab would kill the tool session. Both
+#: verbs must go through /api/launch-external (or the CLI). ``client`` is also
+#: removed from the web UI's verb dropdown entirely (the split-verb story
+#: connect+configure+run is what the web UI teaches); CLI keeps ``client``.
+EMBEDDED_BLOCKED_VERBS: frozenset[str] = frozenset({"run", "client"})
+
+
+def _panel_for_verb(verb: str) -> PanelSlot | None:
+    """Return the named panel a verb routes to, or ``None`` if not embedded.
+
+    D-031 routing rules:
+      * ``connect`` -> Channel (persistent, owns SSH master).
+      * ``configure`` / ``setup`` / ``tunnel`` -> Utility (ephemeral).
+      * ``run`` / ``client`` -> None (hard-blocked from embedded; must go
+        external).
+      * Info verbs (``status`` / ``list-models`` / ``list-tools``) go through
+        /api/run (Lane-1 captured), not the ws endpoint at all.
+    """
+    if verb in CHANNEL_PANEL_VERBS:
+        return "channel"
+    if verb in UTILITY_PANEL_VERBS:
+        return "utility"
+    return None
 
 
 def build_launch_argv(
@@ -154,7 +192,19 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+        # D-031 multi-instance guard: include a package marker + pid + app cwd
+        # so a second argo-anywhere trying to bind the same port can identify
+        # the incumbent as a sibling (vs. some unrelated service on that port)
+        # and produce a helpful error. Also useful for `pgrep`-style ops.
+        from ..status import app_cwd_display
+
+        return JSONResponse({
+            "status": "ok",
+            "app": "argo-anywhere",  # marker other argo instances key off
+            "package_version": argo_anywhere.__version__,
+            "pid": os.getpid(),
+            "app_cwd_short": app_cwd_display(),
+        })
 
     # NOTE: /api/status and /api/health run blocking work (lsof, a loopback HTTP
     # GET). They are defined as plain `def` so FastAPI runs them in a threadpool
@@ -252,6 +302,101 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             "reaches_anl": spec["anl"],
         })
 
+    @app.get("/api/models")
+    def api_models() -> JSONResponse:
+        """Structured model catalog from ``list-models --format json``.
+
+        This reaches ANL through the tunnel (same as
+        ``POST /api/run/list-models``) and is only called on an explicit
+        user action in the dashboard's Models panel. Returns a shape the
+        UI can render directly -- no client-side text parsing:
+
+        .. code-block:: json
+
+            {
+              "models": [
+                {"internal_name": "gpt4o", "id": "gpt-4o",
+                 "provider": "openai", "modalities": "text+image->text",
+                 "in_opencode_config": true},
+                ...
+              ],
+              "opencode_config_present": true,
+              "counts": {"total": 30, "in_config": 5, "orphan": 0},
+              "note": "The 'in_opencode_config' flag is per-tool: it "
+                      "reflects the OpenCode config's models array, "
+                      "not whether the model works with other CLI tools "
+                      "(Claude Code, aider, ...)."
+            }
+
+        The rewording from ``configured`` -> ``in_opencode_config`` +
+        the explicit ``note`` fixes a user-facing ambiguity (bug
+        2026-07-13): the raw column just said "no", making Claude 4.8
+        look mis-configured for Claude Code when it's really just
+        absent from the OpenCode picker's model list -- which is
+        irrelevant to Claude Code / aider / others.
+        """
+        import json as _json
+
+        try:
+            result = run_engine(
+                ["list-models", "--format", "json"], timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            return JSONResponse(
+                {"error": "list-models timed out (channel down?)"},
+                status_code=504,
+            )
+        if result.returncode != 0:
+            return JSONResponse(
+                {
+                    "error": (result.stderr or result.stdout or "").strip()
+                             or f"list-models exited {result.returncode}",
+                    "returncode": result.returncode,
+                },
+                status_code=502,
+            )
+        try:
+            raw = _json.loads(result.stdout or "[]")
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": f"malformed JSON from list-models: {exc}"},
+                status_code=502,
+            )
+        # Whether the OpenCode config was consulted at all: the engine
+        # includes the ``configured`` key on every row iff a config was
+        # present; when absent it's silently dropped from the JSON rows.
+        opencode_present = bool(raw) and "configured" in raw[0]
+        models: list[dict] = []
+        counts = {"total": 0, "in_config": 0, "orphan": 0}
+        for row in raw:
+            entry = {
+                "internal_name": row.get("internal_name"),
+                "id": row.get("id"),
+                "provider": row.get("provider"),
+                "modalities": row.get("modalities"),
+            }
+            if opencode_present:
+                cfg = row.get("configured")
+                entry["in_opencode_config"] = (cfg == "yes")
+                entry["is_orphan"] = (cfg == "orphan")
+                if cfg == "yes":
+                    counts["in_config"] += 1
+                elif cfg == "orphan":
+                    counts["orphan"] += 1
+            models.append(entry)
+            counts["total"] += 1
+        return JSONResponse({
+            "models": models,
+            "opencode_config_present": opencode_present,
+            "counts": counts,
+            "note": (
+                "'in_opencode_config' reflects the OpenCode config's "
+                "models array only. It does NOT indicate whether a "
+                "model works with Claude Code, aider, or other tools -- "
+                "those consult argo-proxy directly."
+            ),
+        })
+
     @app.get("/api/terminals")
     def api_terminals() -> JSONResponse:
         # Native terminals detected on this machine + the default id, so the
@@ -270,20 +415,184 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         scope: str | None = None,
         port: int | None = None,
         terminal: str | None = None,
+        cwd: str | None = None,
     ) -> JSONResponse:
         # Open the chosen verb in a NEW native terminal window the user owns
         # (independent of the web server; not tracked in the registry). The
         # window runs the console script on a real TTY -- full-fidelity Duo /
         # monitor / prompts.
-        from ..external_terminal import console_command, open_external_terminal
+        from ..external_terminal import (
+            console_command_verified,
+            open_external_terminal,
+        )
+
+        # D-031 Task 3: validate the launcher-supplied cwd (defense in depth).
+        # For external launches an existing dir is required now -- there's no
+        # window in which the UI can offer to create it (that flow is ws-only
+        # via the 409-then-confirm dance).
+        resolved_cwd: str | None = None
+        if cwd is not None and cwd.strip():
+            cv = validate_cwd(cwd)
+            if not cv.ok:
+                return JSONResponse(
+                    {"error": cv.detail, "verdict": cv.verdict.value},
+                    status_code=STATUS_FOR_VERDICT[cv.verdict],
+                )
+            resolved_cwd = str(cv.resolved)
+            # D-031 Task 7: hard-block enforcement server-side (defense in depth).
+            fr = check_forbid(resolved_cwd, scope)
+            if fr.verdict is ForbidVerdict.HARD_BLOCK:
+                return JSONResponse(
+                    {"error": fr.reason, "verdict": "hard_block"},
+                    status_code=403,
+                )
 
         try:
             engine_argv = build_launch_argv(verb, cli_tool=cli_tool, scope=scope, port=port)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
-        result = open_external_terminal(console_command() + engine_argv, terminal=terminal)
+        # Fixed 2026-07-13: with the server running under a Python that has
+        # neither argo-anywhere installed nor an ``argo-anywhere`` script next
+        # to it (e.g. a dev-mode run from PYTHONPATH=src under miniconda while
+        # the user's pipx install lives elsewhere), console_command() would
+        # previously fall back to ``<sys.executable> -m argo_anywhere`` which
+        # then failed in the spawned terminal with ``No module named
+        # argo_anywhere``. Now: console_command_verified() runs a
+        # ``<prefix> --version`` probe with a scrubbed env so an invocation
+        # that would only succeed with our PYTHONPATH gets caught HERE
+        # rather than in a terminal window the user can't inspect.
+        prefix, probe_error = console_command_verified()
+        if probe_error is not None:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": (
+                        "cannot spawn an argo-anywhere CLI in the new terminal: "
+                        f"{probe_error}. Install with ``pipx install "
+                        "argo-anywhere`` OR run the web server from an "
+                        "interpreter where the package is importable "
+                        "WITHOUT PYTHONPATH (a proper install)."
+                    ),
+                },
+                status_code=500,
+            )
+
+        result = open_external_terminal(
+            prefix + engine_argv,
+            terminal=terminal,
+            cwd=resolved_cwd,
+        )
+        # D-031 Task 5: touch MRU on a successful external launch. Best-effort.
+        if result.get("ok") and resolved_cwd is not None:
+            try:
+                _state.touch_mru(resolved_cwd)
+            except OSError:
+                pass
         return JSONResponse(result, status_code=200 if result.get("ok") else 502)
+
+    @app.get("/api/check-forbid")
+    def api_check_forbid(path: str, scope: str | None = None) -> JSONResponse:
+        """Pre-flight the scope-conditional forbid-list without spawning.
+
+        D-031 Task 7: the UI calls this on every launch when scope == "project"
+        so it can show the soft-warn confirm modal (or refuse hard-blocks
+        cleanly) before opening the ws. Returns:
+          - 200 + ``verdict: allow`` on ok;
+          - 200 + ``verdict: soft_warn`` (UI shows confirm modal);
+          - 403 + ``verdict: hard_block`` (UI shows an unrecoverable error).
+        For scope != "project" always returns 200 + ``allow`` (short-circuit).
+        """
+        result = check_forbid(path, scope)
+        status_code = 403 if result.verdict is ForbidVerdict.HARD_BLOCK else 200
+        return JSONResponse(
+            {"verdict": result.verdict.value, "reason": result.reason},
+            status_code=status_code,
+        )
+
+    @app.get("/api/validate-cwd")
+    def api_validate_cwd(path: str) -> JSONResponse:
+        """Pre-flight the launcher-cwd validator without spawning anything.
+
+        D-031 Task 3: the ws endpoint closes with an opaque 1008 on a bad cwd
+        (WebSockets can't reasonably return a JSON error). The UI's embedded
+        launch path calls this first so it can show the same 400 / 409 UX as
+        the external-terminal path (which gets structured JSON directly).
+        Read-only; never touches disk.
+        """
+        cv = validate_cwd(path)
+        return JSONResponse(
+            {
+                "ok": cv.ok,
+                "verdict": cv.verdict.value,
+                "detail": cv.detail,
+                "resolved": str(cv.resolved) if cv.resolved else None,
+            },
+            status_code=STATUS_FOR_VERDICT[cv.verdict],
+        )
+
+    @app.post("/api/mkdir")
+    def api_mkdir(path: str) -> JSONResponse:
+        """Create a missing directory the launcher wants to spawn into (D-031 D2c).
+
+        Called by the UI's confirm modal after the launch endpoint returned
+        409 (verdict ``missing``). The path goes through the same validator
+        (must be absolute, must NOT exist as anything else) before creation.
+        On success returns 201 + the resolved path; on any failure returns
+        the matching 4xx from :data:`STATUS_FOR_VERDICT`.
+        """
+        cv = validate_cwd(path)
+        # A path we can create must be MISSING (absolute, syntactically valid,
+        # nothing on disk yet). Every other verdict is a rejection.
+        if cv.verdict is CwdVerdict.OK:
+            return JSONResponse(
+                {"error": "already exists", "path": str(cv.resolved)},
+                status_code=409,
+            )
+        if cv.verdict is not CwdVerdict.MISSING:
+            return JSONResponse(
+                {"error": cv.detail, "verdict": cv.verdict.value},
+                status_code=STATUS_FOR_VERDICT[cv.verdict],
+            )
+        assert cv.resolved is not None  # MISSING guarantees a resolved path
+        try:
+            cv.resolved.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"mkdir failed: {exc}", "path": str(cv.resolved)},
+                status_code=500,
+            )
+        return JSONResponse({"created": str(cv.resolved)}, status_code=201)
+
+    @app.get("/api/state")
+    def api_get_state() -> JSONResponse:
+        """Return the persisted web-UI state (MRU cwd list, divider, theme).
+
+        Called on page load so the launcher can pre-fill the cwd datalist +
+        restore the divider position + apply the saved theme (D-031 Task 5 + 5.5).
+        Never fails: read errors return the default state.
+        """
+        return JSONResponse(_state.load_state())
+
+    @app.post("/api/state")
+    async def api_set_state(request: Request) -> JSONResponse:
+        """Merge a small patch into the persisted state (D-031 Task 5 + 5.5).
+
+        Body: JSON object with any of ``divider_pct`` / ``theme`` / ``mru``.
+        Unknown keys are silently dropped (see :func:`state.update_state`).
+        Returns the new full state on success; 400 for non-JSON.
+        """
+        try:
+            patch = await request.json()
+        except Exception:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        if not isinstance(patch, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        try:
+            new_state = _state.update_state(patch)
+        except OSError as exc:
+            return JSONResponse({"error": f"write failed: {exc}"}, status_code=500)
+        return JSONResponse(new_state)
 
     app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
@@ -297,10 +606,40 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         # verb (the launcher); with no params we run the server's configured
         # default (unchanged P0/P1 behavior).
         q = ws.query_params
+        resolved_cwd = None  # populated when the caller supplied a valid cwd
         if q.get("verb"):
+            verb = q["verb"]
+            # D-031 hard-block: run/client can't spawn in an embedded panel;
+            # browser tab close would kill the tool session.
+            if verb in EMBEDDED_BLOCKED_VERBS:
+                await ws.close(code=1008)  # policy violation
+                return
+            # D-031 Task 3: validate the launcher-supplied cwd server-side
+            # (defense in depth; the UI already refused blanks + relatives).
+            # Blank cwd is still accepted at the ws level for backward compat
+            # with pre-Task-3 callers (test_ws_bridge... uses no cwd); the UI's
+            # own workflow always sends one.
+            raw_cwd = q.get("cwd")
+            if raw_cwd is not None and raw_cwd.strip():
+                cv = validate_cwd(raw_cwd)
+                if not cv.ok:
+                    # 1008 policy-violation; the browser's onerror will surface it.
+                    # The UI does its own pre-flight validation, so this path only
+                    # fires for scripted clients or an out-of-date UI.
+                    await ws.close(code=1008)
+                    return
+                resolved_cwd = cv.resolved
+                # D-031 Task 7: enforce hard-blocks server-side (the UI's
+                # /api/check-forbid catches these too; this is the safety net).
+                # Soft-warn is UI-only -- the server accepts and lets the user's
+                # explicit "continue" from the modal proceed.
+                fr = check_forbid(str(cv.resolved), q.get("scope"))
+                if fr.verdict is ForbidVerdict.HARD_BLOCK:
+                    await ws.close(code=1008)
+                    return
             try:
                 argv = build_launch_argv(
-                    q["verb"],
+                    verb,
                     cli_tool=q.get("cli_tool"),
                     scope=q.get("scope"),
                     port=int(q["port"]) if q.get("port") else None,
@@ -310,9 +649,55 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
                 return
         else:
             argv = list(engine_argv)
+            verb = None  # engine_argv default; no panel routing
+
+        # D-031 panel routing: pick a named slot from the verb; fall back to
+        # slot-less (legacy) register when the caller didn't name a verb.
+        panel: PanelSlot | None = None
+        if verb is not None:
+            panel = _panel_for_verb(verb)
+            # For Channel-owning verbs (currently just ``connect``), refuse
+            # if a live Channel session already exists. The UI's launcher
+            # offers a "stop + replace" secondary path that stops the old
+            # session via /api/sessions/<id>/stop and then reconnects; this
+            # server-side check is the safety net if the UI is bypassed.
+            if panel == "channel" and registry.panel_alive("channel"):
+                await ws.close(code=1008)  # channel already up
+                return
+
         await ws.accept()
-        session = PtySession(argv, dimensions=(24, 80))
-        managed = registry.register(session)
+        # D-031 Task 4: thread the validated cwd into PtySession -> subprocess
+        # so the engine (and any AI CLI tool it spawns) starts in the user's
+        # chosen directory. ``resolved_cwd`` is None when the caller didn't
+        # supply a cwd (legacy / test / default engine_argv path); Popen(cwd=None)
+        # inherits the parent's cwd, matching pre-D-031 behavior.
+        session = PtySession(
+            argv,
+            dimensions=(24, 80),
+            cwd=str(resolved_cwd) if resolved_cwd else None,
+        )
+        # D-031 Task 5: record successful cwd usage in the MRU list. Best-
+        # effort (a broken write should never abort the launch); errors are
+        # swallowed here + surfaced elsewhere via /api/state failures.
+        if resolved_cwd is not None:
+            try:
+                _state.touch_mru(str(resolved_cwd))
+            except OSError:
+                pass
+        if panel is not None:
+            managed, evicted = registry.register_panel(session, panel)
+            # Utility replacement: the previous Utility session (if any) was
+            # evicted from the slot mapping but not the id map. Stop + reap
+            # it so we don't leak PIDs.
+            if evicted is not None and evicted.session.isalive():
+                try:
+                    evicted.session.close()
+                except Exception:
+                    pass
+                registry.unregister(evicted.id)
+        else:
+            managed = registry.register(session)
+
         detached = False
         try:
             # Channel owners aren't force-killed on ws-close: keep them running so
@@ -366,11 +751,36 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8799,
     engine_argv: Sequence[str] = ("connect",),
+    reload: bool = False,
 ) -> None:
-    """Run the web UI under uvicorn (blocking)."""
+    """Run the web UI under uvicorn (blocking).
+
+    ``reload`` (dev only): pass the app as an import string + watch
+    ``src/argo_anywhere/`` so code edits restart uvicorn without a manual
+    Ctrl-C. The engine invocation for reload mode is fixed to the default
+    ("connect") because the factory-based reload path can't easily thread
+    the CLI's ``--engine`` argument through; users who need a non-default
+    engine invocation should run without ``--reload``. Requires
+    ``watchfiles``.
+    """
     import uvicorn
 
-    app = create_app(engine_argv=engine_argv)
     print(f"[argo-anywhere web] engine: {' '.join(engine_argv)!r}")
     print(f"[argo-anywhere web] open http://{host}:{port}")
+    if reload:
+        # In reload mode uvicorn must be able to re-import the app fresh, so
+        # pass an app import string + a factory. The reload watchdog picks
+        # up file changes under the package directory.
+        import argo_anywhere as _pkg
+        from pathlib import Path
+        pkg_dir = Path(_pkg.__file__).resolve().parent
+        print(f"[argo-anywhere web] --reload watching {pkg_dir} (dev mode)")
+        uvicorn.run(
+            "argo_anywhere.web.app:create_app",
+            factory=True,
+            host=host, port=port, log_level="info",
+            reload=True, reload_dirs=[str(pkg_dir)],
+        )
+        return
+    app = create_app(engine_argv=engine_argv)
     uvicorn.run(app, host=host, port=port, log_level="info")

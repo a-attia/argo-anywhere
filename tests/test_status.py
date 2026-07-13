@@ -20,7 +20,7 @@ from argo_anywhere import cli, status
 
 def test_engine_version_matches_script_version() -> None:
     v = status.engine_version()
-    # e.g. "2.2.1-dev"
+    # e.g. "2.3.0"
     assert re.match(r"^\d+\.\d+\.\d+", v)
 
 
@@ -30,6 +30,61 @@ def test_package_info_shape() -> None:
     assert info["engine_version"] == status.engine_version()
     assert len(info["engine_sha256_short"]) == 12
     assert info["python_version"]
+    # D-031 D3a: package_info exposes the app's own cwd (both absolute + short).
+    assert "app_cwd" in info and info["app_cwd"]
+    assert "app_cwd_short" in info and info["app_cwd_short"]
+
+
+# -- D-031: app-cwd helpers (STATE_DIR / APP_HOME + display) ----------------
+
+def test_app_home_constant_matches_engine_convention() -> None:
+    # D-023: canonical install lives at ~/.argo_anywhere (matches the engine's
+    # CANONICAL_HOME). The Python constant must agree so both sides target the
+    # same dir.
+    import os
+    assert str(status.APP_HOME) == os.path.expanduser("~/.argo_anywhere")
+
+
+def test_ensure_app_home_creates_and_is_idempotent(tmp_path, monkeypatch) -> None:
+    # Redirect APP_HOME to a tmp dir so we don't touch the real one.
+    target = tmp_path / ".argo_anywhere"
+    monkeypatch.setattr(status, "APP_HOME", target)
+    assert not target.exists()
+    assert status.ensure_app_home() == target
+    assert target.is_dir()
+    # Second call is a no-op.
+    status.ensure_app_home()
+    assert target.is_dir()
+
+
+def test_app_cwd_display_collapses_home(tmp_path, monkeypatch) -> None:
+    # ~/foo -> ~/foo; the exact ~ collapse is what we assert.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    inner = fake_home / "projects" / "x"
+    inner.mkdir(parents=True)
+
+    import os
+    monkeypatch.setattr(os, "getcwd", lambda: str(inner))
+    monkeypatch.setenv("HOME", str(fake_home))
+    # Path.home() reads HOME on POSIX; force refresh for the assertion below.
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    assert status.app_cwd_display() == "~/projects/x"
+
+
+def test_app_cwd_display_falls_back_when_outside_home(tmp_path, monkeypatch) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    import os
+    monkeypatch.setattr(os, "getcwd", lambda: str(outside))
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    # Not under $HOME -> report the absolute path unchanged.
+    assert status.app_cwd_display() == str(outside)
 
 
 # -- channel_health (localhost stub, never ANL) -----------------------------
