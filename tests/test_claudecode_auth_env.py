@@ -164,7 +164,17 @@ def _source_engine_and_run(bash_snippet: str, env: dict[str, str] | None = None,
 
     ``main "$@"`` is the last line of the engine; we strip it before
     sourcing so the function definitions load without side effects.
-    Returns ``(returncode, stdout, stderr)`` of the executed snippet."""
+    Returns ``(returncode, stdout, stderr)`` of the executed snippet.
+
+    Writes the wrapper (engine body + snippet, ~500KB) to a tempfile and
+    invokes ``bash <tempfile>`` rather than ``bash -c <wrapper>``. Linux
+    caps a single argv item at ARG_MAX (~128KB on many kernels); passing
+    the whole engine as ``-c`` exceeds that and raises OSError E7
+    "Argument list too long" (surfaces on Ubuntu CI runners but not on
+    macOS with its much larger limit).
+    """
+    import tempfile
+
     with engine_path() as script:
         body = script.read_text()
         # Drop the final ``main "$@"`` invocation.
@@ -174,11 +184,19 @@ def _source_engine_and_run(bash_snippet: str, env: dict[str, str] | None = None,
         )
         body_no_main = body.rstrip()[: -len('main "$@"')]
         wrapper = body_no_main + "\n" + bash_snippet + "\n"
-        r = subprocess.run(
-            ["bash", "-c", wrapper],
-            capture_output=True, text=True, timeout=timeout,
-            env=env if env is not None else os.environ.copy(),
-        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".sh", delete=False,
+        ) as tf:
+            tf.write(wrapper)
+            wrapper_path = tf.name
+        try:
+            r = subprocess.run(
+                ["bash", wrapper_path],
+                capture_output=True, text=True, timeout=timeout,
+                env=env if env is not None else os.environ.copy(),
+            )
+        finally:
+            os.unlink(wrapper_path)
     return r.returncode, r.stdout, r.stderr
 
 
