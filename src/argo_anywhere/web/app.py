@@ -19,7 +19,6 @@ import asyncio
 import os
 import re
 import subprocess
-import sys
 from contextlib import ExitStack, asynccontextmanager
 from importlib.resources import as_file, files
 from typing import Sequence

@@ -8,7 +8,6 @@ tmp-path override so they never touch the real file.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -54,7 +53,8 @@ def test_load_non_dict_returns_defaults(state_file: Path) -> None:
 # -- round-trip + atomicity ------------------------------------------------
 
 def test_save_and_reload_roundtrips(state_file: Path, tmp_path: Path) -> None:
-    d = tmp_path / "existing-proj"; d.mkdir()
+    d = tmp_path / "existing-proj"
+    d.mkdir()
     s = state.default_state()
     s["mru"] = [str(d)]
     s["divider_pct"] = 60
@@ -82,16 +82,20 @@ def test_save_creates_parent_dir(tmp_path: Path) -> None:
 # -- MRU -------------------------------------------------------------------
 
 def test_touch_mru_prepends_new_entry(state_file: Path, tmp_path: Path) -> None:
-    a = tmp_path / "a"; a.mkdir()
-    b = tmp_path / "b"; b.mkdir()
+    a = tmp_path / "a"
+    a.mkdir()
+    b = tmp_path / "b"
+    b.mkdir()
     state.touch_mru(str(a), state_file)
     state.touch_mru(str(b), state_file)
     assert state.load_state(state_file)["mru"] == [str(b), str(a)]
 
 
 def test_touch_mru_dedupes_existing_entry(state_file: Path, tmp_path: Path) -> None:
-    a = tmp_path / "a"; a.mkdir()
-    b = tmp_path / "b"; b.mkdir()
+    a = tmp_path / "a"
+    a.mkdir()
+    b = tmp_path / "b"
+    b.mkdir()
     state.touch_mru(str(a), state_file)
     state.touch_mru(str(b), state_file)
     state.touch_mru(str(a), state_file)
@@ -101,7 +105,8 @@ def test_touch_mru_dedupes_existing_entry(state_file: Path, tmp_path: Path) -> N
 
 def test_touch_mru_caps_at_ten(state_file: Path, tmp_path: Path) -> None:
     for i in range(12):
-        p = tmp_path / f"proj{i}"; p.mkdir()
+        p = tmp_path / f"proj{i}"
+        p.mkdir()
         state.touch_mru(str(p), state_file)
     mru = state.load_state(state_file)["mru"]
     assert len(mru) == state.MRU_CAP
@@ -116,7 +121,8 @@ def test_touch_mru_ignores_relative_path(state_file: Path) -> None:
 
 
 def test_load_prunes_vanished_paths(state_file: Path, tmp_path: Path) -> None:
-    real = tmp_path / "real"; real.mkdir()
+    real = tmp_path / "real"
+    real.mkdir()
     ghost = tmp_path / "ghost"  # never created
     state.save_state(
         {"version": state.SCHEMA_VERSION, "mru": [str(real), str(ghost)],

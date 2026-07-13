@@ -146,7 +146,9 @@ def test_focus_raise_macos_cli_no_ops_for_unknown_term(monkeypatch) -> None:
     def fake_run(argv, **kw):
         called["count"] += 1
         class _R:
-            returncode = 0; stdout = ""; stderr = ""
+            returncode = 0
+            stdout = ""
+            stderr = ""
         return _R()
 
     monkeypatch.setattr(et.shutil, "which", lambda name: "/usr/bin/" + name)
@@ -273,7 +275,8 @@ def test_console_command_prefers_sibling_script(monkeypatch, tmp_path) -> None:
     _clear_all_argo_paths(monkeypatch, tmp_path)
     # Now DROP an ``argo-anywhere`` next to the fake python.
     script = tmp_path / "bin" / "argo-anywhere"
-    script.write_text("#!/bin/sh\necho hi\n"); script.chmod(0o755)
+    script.write_text("#!/bin/sh\necho hi\n")
+    script.chmod(0o755)
     assert console_command() == [str(script)]
 
 
@@ -292,7 +295,8 @@ def test_console_command_prefers_path_over_dash_m(
     )
     other = tmp_path / "elsewhere" / "argo-anywhere"
     other.parent.mkdir()
-    other.write_text("#!/bin/sh\necho hi\n"); other.chmod(0o755)
+    other.write_text("#!/bin/sh\necho hi\n")
+    other.chmod(0o755)
     monkeypatch.setenv("PATH", str(other.parent))
     # PATH wins.
     assert console_command() == [str(other)]
@@ -334,7 +338,8 @@ def test_console_command_verified_returns_prefix_on_success(
     _clear_all_argo_paths(monkeypatch, tmp_path)
     # Provide a fake argo-anywhere script that prints its version + exits 0.
     fake = tmp_path / "bin" / "argo-anywhere"
-    fake.write_text("#!/bin/sh\necho 'argo-anywhere fake 0.0.0'\n"); fake.chmod(0o755)
+    fake.write_text("#!/bin/sh\necho 'argo-anywhere fake 0.0.0'\n")
+    fake.chmod(0o755)
     prefix, err = et.console_command_verified()
     assert err is None
     assert prefix == [str(fake)]

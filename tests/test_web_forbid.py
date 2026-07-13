@@ -6,14 +6,11 @@ unrestricted so beginners running from ``$HOME`` take the happy path.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from argo_anywhere.web.forbid import (
-    HARD_BLOCK_ROOTS,
-    ForbidResult,
     Verdict,
     check,
 )
@@ -54,7 +51,8 @@ def test_subdir_of_hard_block_is_not_hard_blocked(tmp_path: Path) -> None:
 
 
 def test_home_exact_is_hard_blocked(monkeypatch, tmp_path: Path) -> None:
-    fake_home = tmp_path / "home"; fake_home.mkdir()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     r = check(str(fake_home), "project")
     assert r.verdict is Verdict.HARD_BLOCK
@@ -62,8 +60,10 @@ def test_home_exact_is_hard_blocked(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_home_subdir_is_not_hard_blocked(monkeypatch, tmp_path: Path) -> None:
-    fake_home = tmp_path / "home"; fake_home.mkdir()
-    proj = fake_home / "projects" / "x"; proj.mkdir(parents=True)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj = fake_home / "projects" / "x"
+    proj.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(fake_home))
     r = check(str(proj), "project")
     assert r.verdict is not Verdict.HARD_BLOCK
@@ -107,7 +107,8 @@ def test_dot_claude_dir_suppresses_soft_warn(tmp_path: Path) -> None:
 # -- symlink resolution ---------------------------------------------------
 
 def test_symlink_to_home_is_still_hard_blocked(monkeypatch, tmp_path: Path) -> None:
-    fake_home = tmp_path / "home"; fake_home.mkdir()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     link = tmp_path / "link-to-home"
     link.symlink_to(fake_home)

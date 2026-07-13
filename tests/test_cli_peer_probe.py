@@ -34,7 +34,8 @@ class _SiblingHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         else:
-            self.send_response(404); self.end_headers()
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, *a):  # silence
         pass
@@ -45,8 +46,10 @@ class _ForeignHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         body = json.dumps({"status": "ok", "app": "something-else"}).encode()
-        self.send_response(200); self.send_header("Content-Length", str(len(body)))
-        self.end_headers(); self.wfile.write(body)
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *a):
         pass

@@ -40,7 +40,6 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from argo_anywhere._engine import engine_path
 
@@ -86,7 +85,8 @@ def _run_writer(orig: Path, dest: Path, user: str = "testuser", port: str = "647
 def test_writer_emits_api_key_not_auth_token(tmp_path: Path) -> None:
     """Root fix: fresh writes use ANTHROPIC_API_KEY -- the var that
     Claude Code actually honors when a personal OAuth session exists."""
-    orig = tmp_path / "settings.json"; dest = tmp_path / "out.json"
+    orig = tmp_path / "settings.json"
+    dest = tmp_path / "out.json"
     _run_writer(orig, dest)
     out = json.loads(dest.read_text())
     env = out["env"]
@@ -100,7 +100,8 @@ def test_writer_strips_our_old_auth_token_on_migration(tmp_path: Path) -> None:
     """Pre-2026-07-13 configs have ``ANTHROPIC_AUTH_TOKEN = <user>``.
     The migration strips it when the value matches the current user
     (i.e. it's ours), leaving ANTHROPIC_API_KEY as the sole auth var."""
-    orig = tmp_path / "settings.json"; dest = tmp_path / "out.json"
+    orig = tmp_path / "settings.json"
+    dest = tmp_path / "out.json"
     orig.write_text(json.dumps({
         "model": "sonnet",  # user-owned; must be preserved
         "env": {
@@ -123,7 +124,8 @@ def test_writer_preserves_user_owned_auth_token(tmp_path: Path) -> None:
     that isn't their ANL username (e.g. a personal OAuth token) keeps
     that value across our rewrites. We only strip when the value matches
     OUR username -- that's the fingerprint that it came from us."""
-    orig = tmp_path / "settings.json"; dest = tmp_path / "out.json"
+    orig = tmp_path / "settings.json"
+    dest = tmp_path / "out.json"
     orig.write_text(json.dumps({
         "env": {
             "ANTHROPIC_AUTH_TOKEN": "my-personal-oauth-token-not-ours",
@@ -141,7 +143,8 @@ def test_writer_preserves_user_owned_auth_token(tmp_path: Path) -> None:
 
 def test_writer_refuses_to_overwrite_malformed_json(tmp_path: Path) -> None:
     """M8 invariant: malformed target file -> exit code 2, no overwrite."""
-    orig = tmp_path / "settings.json"; dest = tmp_path / "out.json"
+    orig = tmp_path / "settings.json"
+    dest = tmp_path / "out.json"
     orig.write_text("{not-json")
     r = subprocess.run(
         ["python3", "-c", _WRITER_PY, str(orig), str(dest), "testuser", "64742"],
