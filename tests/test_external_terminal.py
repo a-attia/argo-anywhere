@@ -40,6 +40,36 @@ def test_macos_script_terminal_vs_iterm() -> None:
     assert 'application "iTerm"' in i and "create window" in i and "client" in i
 
 
+def test_macos_terminal_script_uses_valid_frontmost_idiom() -> None:
+    """Regression 2026-07-13: the Terminal.app script previously used
+    ``set index of window 1 of newTab to 1`` to raise the new window,
+    which is an invalid reference (``window 1 of newTab`` doesn't parse;
+    even ``set index of (window of newTab) to 1`` fails because the
+    window class exposes ``frontmost``, not ``index``). Either variant
+    made osascript exit 1 with ``Can't set window ... (-10006)`` and
+    the launcher showed the raw error to the user. Pin the working
+    idiom so a well-meaning refactor can't reintroduce the broken one."""
+    s = macos_osa_script("terminal", "echo x")
+    # Must NOT contain the two broken patterns.
+    assert "set index of window 1 of newTab" not in s, (
+        "Terminal.app script re-adopted the invalid `window 1 of newTab` "
+        "reference; osascript exits 1 with -10006 on this."
+    )
+    assert "set index of (window of newTab)" not in s, (
+        "Terminal.app's window class exposes `frontmost` (boolean), not "
+        "`index`; setting index on a window object is invalid."
+    )
+    # Must use the working idiom.
+    assert "tabs contains newTab" in s, (
+        "Terminal.app script should find the new window by searching "
+        "for the window whose tabs contain the returned tab object."
+    )
+    assert "set frontmost of" in s, (
+        "The working way to raise the new Terminal.app window is "
+        "`set frontmost of <windowref> to true`, then `activate`."
+    )
+
+
 # --- focus-follow-window (cross-platform, best effort) --------------------
 
 def test_open_macos_cli_terminal_triggers_focus_raise(monkeypatch) -> None:

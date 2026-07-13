@@ -12,6 +12,35 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
+## v3.1.1 — 2026-07-13
+
+Hotfix. iTerm2 was smoke-tested during the v3.1.0 release cycle;
+Terminal.app was not, and it turned out the AppleScript we ship for
+Terminal.app never worked at all — a `run` verb targeting Terminal.app
+would surface as `could not open (HTTP 502)` with the raw
+osascript error text in the launcher popover.
+
+### Fixed
+
+- **Terminal.app AppleScript**: replaced the invalid
+  ``set index of window 1 of newTab to 1`` (osascript exit 1,
+  ``-10006 Can't set window ... to 1``) with the working idiom
+  ``set frontmost of (first window whose tabs contains newTab) to
+  true``. Terminal.app's `window` class exposes `frontmost`
+  (boolean), not `index`; the earlier attempt also used
+  ``window 1 of newTab`` which isn't a valid reference at all.
+  iTerm2's path was unaffected (uses `create window` +
+  `select newWindow` + `activate`).
+- **Regression test added**
+  (`test_macos_terminal_script_uses_valid_frontmost_idiom`) that
+  pins the broken patterns OUT and the working idiom IN, so a
+  well-meaning refactor can't silently reintroduce the bug.
+
+Everything else in v3.1.0 unchanged. `pipx upgrade argo-anywhere`
+picks this up.
+
+---
+
 ## v3.1.0 — 2026-07-13
 
 Feature-adding release. Engine `SCRIPT_VERSION` bumped `2.2.1-dev` →

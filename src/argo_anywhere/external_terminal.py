@@ -254,12 +254,26 @@ def macos_osa_script(term_id: str, command: str) -> str:
             "  activate\n"
             "end tell"
         )
-    # Terminal.app: `do script` opens a NEW window running the command.
-    # Grab the returned tab, promote its window to front, THEN activate.
+    # Terminal.app: `do script` opens a NEW window running the command
+    # and returns the tab object. Two fixes on 2026-07-13:
+    #   * ``set index of window 1 of newTab to 1`` (previous attempt) is
+    #     an invalid reference -- ``window 1 of newTab`` doesn't parse
+    #     in Terminal.app's AppleScript model, and osascript exits 1
+    #     with ``Can't set window 1 of tab 1 of window id X to 1.
+    #     (-10006)``, leaving the launcher's user-facing note showing
+    #     the raw osascript error;
+    #   * Terminal.app's window class exposes ``frontmost`` (boolean),
+    #     not ``index``, so even the "correct" reference
+    #     ``set index of (window of newTab) to 1`` fails the same way.
+    # The working idiom: find the window whose tabs contain newTab and
+    # set its ``frontmost`` to true, THEN activate the app so the
+    # window actually surfaces (per D-031's focus-follow-window
+    # discipline: ``activate`` is the LAST statement).
     return (
         'tell application "Terminal"\n'
         f'  set newTab to (do script "{q}")\n'
-        "  set index of window 1 of newTab to 1\n"
+        "  set targetWindow to first window whose tabs contains newTab\n"
+        "  set frontmost of targetWindow to true\n"
         "  activate\n"
         "end tell"
     )
