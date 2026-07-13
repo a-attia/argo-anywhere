@@ -715,10 +715,12 @@ bash <path-to-script>/argo-anywhere.sh --cli-tool claudecode client
 #   [argo_anywhere]   'claude' is run from this directory (/tmp/test-claude-scope-default).
 # Then verify the project file was written:
 cat ./.claude/settings.local.json
-# Should contain:
+# Should contain (as of 2026-07-13; ANTHROPIC_API_KEY is Anthropic's
+# canonical env-var name — see docs/LIMITATIONS.md "Claude Code TUI is
+# misleading" for the story):
 #   "env": {
 #     "ANTHROPIC_BASE_URL": "http://localhost:64742",
-#     "ANTHROPIC_AUTH_TOKEN": "<your-anl-username>"
+#     "ANTHROPIC_API_KEY": "<your-anl-username>"
 #   }
 # And the global file was NOT written:
 [ ! -f ~/.claude/settings.json ] && echo "global untouched (correct)"
@@ -777,10 +779,16 @@ cat ~/.claude/settings.json
 # Should still contain:
 #   - "model": "sonnet"
 #   - "permissions": {...}
-#   - env.ANTHROPIC_API_KEY (preserved)
 #   - env.MY_OTHER_VAR (preserved)
-#   - env.ANTHROPIC_BASE_URL (NEW, from us)
-#   - env.ANTHROPIC_AUTH_TOKEN (NEW, from us)
+#   - env.ANTHROPIC_BASE_URL (from us; may replace user's if we own the value)
+#   - env.ANTHROPIC_API_KEY (from us since 2026-07-13; Anthropic's
+#     canonical env-var name, adopted as future-proofing over the
+#     equivalent-but-legacy ANTHROPIC_AUTH_TOKEN — see
+#     docs/LIMITATIONS.md "Claude Code TUI is misleading")
+# Note: a user-set env.ANTHROPIC_API_KEY = "sk-ant-personal-..." would
+# be OVERWRITTEN by us (we own that key now). If a user needs to
+# preserve a personal API key, they should use --scope project so we
+# don't touch ~/.claude/settings.json at all.
 ```
 
 ### Multi-tool test 7: H7 privacy warning prints
@@ -792,7 +800,7 @@ didn't exist), look for the H7 privacy-warning callout:
 
 ```
 [warn] Privacy note: <path-to-claudecode-config> now contains your ANL username
-[warn]   ('<user>') in env.ANTHROPIC_AUTH_TOKEN. Don't commit it to a
+[warn]   ('<user>') in env.ANTHROPIC_API_KEY. Don't commit it to a
 [warn]   public dotfile repo or share it widely.
 [argo_anywhere]   (Project scope -- Claude Code's defaults gitignore
 [argo_anywhere]    .claude/settings.local.json automatically; verify your repo's
@@ -826,3 +834,23 @@ bash argo-anywhere.sh --cli-tool claudecode client    # second run should report
 | 6    | `write_claudecode_config` Python heredoc preserves user-owned env keys + non-env top-level keys |
 | 7    | H7 privacy warning fires per-scope (project vs global hint variants) |
 | 8    | Per-tool setup is idempotent (handle_config_file's cmp branch) |
+
+---
+
+## v3.1.0 — launcher cwd + dual embedded terminals + `--cwd` flag (D-031)
+
+Live-verification scenarios for the v3.1.0 launcher / cwd / theme / dual-panel
+work are enumerated in [`notes/impl_launcher_cwd.md`](../notes/impl_launcher_cwd.md)
+§7.4 (the design record for D-031). Run them once against a real ANL session
+before tagging v3.1.0.
+
+Highlights not covered by `pytest` (which is 240-tests-green as of the merge):
+
+- **Cold Duo through the Channel panel** — first `connect` from a fresh
+  session must prompt Duo exactly once in the Channel panel; subsequent
+  Utility-panel `status` / `configure` reuses the master with no repeat Duo.
+- **Browser reload with Channel active** — reloading the page must find the
+  still-running Channel session in `SessionRegistry` and re-attach the ws.
+- **`--cwd` engine flag against real ANL** — `argo-anywhere --cwd /path/to/proj
+  --scope project run --cli-tool opencode` must write `opencode.json` at the
+  resolved project root, not in `$HOME` or wherever the shell was.

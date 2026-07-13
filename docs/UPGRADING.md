@@ -16,6 +16,42 @@ this section is reference detail you only need if something surprises you.
    `argo-anywhere run aider` (or `opencode` / `claudecode`). Prefer no terminal?
    `argo-anywhere install-launcher` gives you a double-click app.
 
+### Coming from v3.0.x (already on the PyPI package)
+
+`v3.1.0` is a UX-only upgrade of the web UI + a new `--cwd` engine flag; no
+state migration. `pipx upgrade argo-anywhere` is the whole procedure.
+
+**What changes:**
+
+- **Web UI launcher:** requires you to pick a **working directory** (absolute
+  path; blank no longer silently inherits the server's cwd). Pre-fills with
+  the most-recently-used path or `~` on first run; **Browse…** button in the
+  desktop app; missing directories prompt "Create + Launch" (never silent).
+- **Web UI verbs:** `client` removed from the launcher's dropdown — use
+  `connect` + `configure` + `run` instead. `client` still exists in the CLI.
+- **Web UI terminals:** the embedded panel is now split into **Channel**
+  (persistent; owns `connect`) and **Utility** (ephemeral; `configure` /
+  `setup` / `tunnel`) — both toggle together via the existing show/hide.
+- **`run`/`client`** hard-blocked from in-browser terminals (would die on tab
+  close). Use a native terminal — the launcher shows the recommended one.
+- **Scope field** is a dropdown now, not free-text — no more `--scope projct`
+  typos.
+- **New `--cwd PATH` engine flag** (CLI parity with the launcher's field).
+  Under `--scope project` it enforces a forbid-list (`$HOME` exact + system
+  dirs) so `--scope project` can't accidentally litter dotfiles in `~`. See
+  [`PLAN.md` D-031](../PLAN.md).
+- **Light / dark theme toggle** in the top bar (cycles `auto → dark → light →
+  auto`; persists in `~/.argo_anywhere/web_state.json`).
+- **`~/.argo_anywhere/web_state.json`** is new (small; auto-created; safe to
+  delete — regenerates on next launch with defaults). Holds the MRU list,
+  divider position, and theme choice.
+- **Multi-instance guard.** `argo-anywhere web` / `app` now refuse to start if
+  another argo-anywhere is already listening on the same port (or if
+  something else is on that port). Message tells you the peer's pid + version
+  and suggests the next port. Bypass with `--force`. Also useful when
+  running a dev-mode instance alongside the pipx-installed one:
+  `PYTHONPATH=src python -m argo_anywhere web --port 8800`.
+
 ### Coming from v2.x (you ran `bash argo-anywhere.sh …` or `curl … .sh`)
 
 1. **Install the package:** `pipx install argo-anywhere`. It bundles the engine
@@ -299,6 +335,22 @@ precedence rule. Use `--scope global` (or `CLAUDECODE_SCOPE=global`)
 to opt back in to the old behavior, AND accept that you can't run
 `claude auth login` from that machine without breaking the proxy
 config.
+
+> **Update 2026-07-13**: the writer now emits
+> `env.ANTHROPIC_API_KEY` (Anthropic's canonical env-var name)
+> instead of the legacy alias `env.ANTHROPIC_AUTH_TOKEN`. Both
+> are honored by Claude Code and both route requests correctly;
+> the swap is future-proofing over the legacy name. Any
+> pre-existing `ANTHROPIC_AUTH_TOKEN` whose value matches your
+> ANL username (a fingerprint of a value we wrote) is stripped
+> on the next `configure` — a user-owned value that doesn't
+> match is preserved untouched. Project scope remains the
+> recommended default for other reasons (keeps our config out of
+> your home tree so directories WITHOUT a project override still
+> reach your personal subscription unchanged). See
+> docs/LIMITATIONS.md "Claude Code TUI is misleading" for a
+> user-facing story about the misleading TUI banner that turned
+> up during the same investigation.
 
 If your existing setup uses global scope and you want to keep it,
 nothing breaks — `--scope global` is still supported. The change

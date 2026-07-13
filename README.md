@@ -266,6 +266,61 @@ native window via pywebview when it's available, falling back to your browser
 otherwise. The launchers are part of argo-anywhere's footprint: they show up in
 `argo-anywhere info` and are removed by `argo-anywhere uninstall`.
 
+### Launching from the web UI (v3.1.0+)
+
+The launcher popover in the web UI has five fields; the last two are new in
+v3.1.0 (design decision **D-031** in [`PLAN.md`](PLAN.md)):
+
+- **command** — the engine verb (`run`, `configure`, `setup`, `connect`,
+  `tunnel`). `client` is CLI-only (the web UI teaches the split-verb story).
+- **cli tool** — which AI tool the verb targets (`opencode` / `claudecode` /
+  `aider`), or `— default —` to fire the picker.
+- **scope** — a dropdown (`— auto —` / `global` / `project`). Per-tool default
+  when auto; `global` writes a config that applies anywhere, `project` writes
+  it under the current working directory (target file differs per tool — see
+  the [scope table](#supported-ai-cli-tools)).
+- **working directory** *(new)* — an absolute path where the launched process
+  starts (i.e. where `project` scope resolves against, and where the AI tool
+  runs from). Pre-filled with the most-recently-used entry from
+  `~/.argo_anywhere/web_state.json` (or `~` on first run); type or paste any
+  absolute path, or click **Browse…** in the desktop app for a native folder
+  picker. Missing directories trigger an explicit "Create + Launch"
+  confirmation — never silent `mkdir`.
+- **where to run** — `In-browser terminal` (routes to the Channel or Utility
+  panel automatically per verb) OR a native terminal window. `run` always
+  goes to a native terminal so closing the browser tab can't kill the tool.
+
+The embedded-terminal area now shows **two panels side-by-side**:
+
+- **Channel** (left) — persistent; owns `connect`; survives a browser tab
+  close so the SSH master + tunnel keep running (no repeat Duo).
+- **Utility** (right) — ephemeral; runs `configure` / `setup` / `tunnel`; free
+  to relaunch without disturbing the Channel.
+
+Both panels share the container-level `Terminal` / `Hide` toggle. Drag the
+divider to resize; the position is persisted.
+
+**Light/dark theme.** A top-bar toggle cycles `auto → dark → light → auto`.
+`auto` follows the OS preference; explicit choices persist across sessions.
+The two embedded terminals re-color on toggle.
+
+**Forbid-list.** When scope is `project`, argo-anywhere refuses working
+directories that would litter dotfiles in `$HOME` or touch system dirs
+(`$HOME` exact; `/`, `/etc`, `/usr`, `/tmp`, `/var`, `/opt`, `/System`,
+`/Library`, `/private`, ...). `--scope global` is unrestricted — beginners who
+launch a client from `$HOME` just to chat with the agent take the happy path.
+
+### Same guarantees from the CLI: `--cwd`
+
+The engine gained a **`--cwd PATH`** flag in v3.1.0 so CLI users on remote
+nodes (via `screen` / `tmux`) get identical behavior to web-UI users. It
+changes to `PATH` before dispatching the verb, and — under `--scope project`
+— applies the same forbid-list. Absolute path required; `~` is expanded.
+
+```sh
+argo-anywhere --cwd /path/to/my-project --scope project run --cli-tool opencode
+```
+
 ## Supported AI CLI tools
 
 Pass one to `--cli-tool` (or pick it interactively):

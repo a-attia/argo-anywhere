@@ -82,7 +82,7 @@ A complete inventory of where prompt and identity data may persist:
 | `~/.config/argo_anywhere/ssh-fail-lock` | Epoch timestamp of most recent SSH-failure lock event | none (just an integer) |
 | `~/.config/argo_anywhere/ssh-fail-lock-count` | Cumulative count of historical lock events (drives exponential backoff) | none |
 | `~/.config/opencode/config.json` | OpenCode config including `provider.argo.options.baseURL` (proxy URL) and the bearer token (= ANL username) | low (PII) |
-| `~/.claude/settings.json` (global scope) OR `./.claude/settings.local.json` (project scope; default since v2.0) | Claude Code config including `env.ANTHROPIC_AUTH_TOKEN` (= ANL username) | low (PII) |
+| `~/.claude/settings.json` (global scope) OR `./.claude/settings.local.json` (project scope; default since v2.0) | Claude Code config including `env.ANTHROPIC_API_KEY` (= ANL username; was `ANTHROPIC_AUTH_TOKEN` before 2026-07-13 canonical-name adoption — see docs/LIMITATIONS.md "Claude Code TUI is misleading") | low (PII) |
 | `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master sockets | none (sockets, not data) |
 
 No prompt content is logged on the laptop. The web UI keeps no data at
@@ -238,9 +238,15 @@ ANL username. The username flows as follows:
 2. Embedded in the AI client config:
    - **OpenCode**: `provider.argo.options.apiKey` = `<username>` in
      `~/.config/opencode/config.json`.
-   - **Claude Code**: `env.ANTHROPIC_AUTH_TOKEN` = `<username>` in
+   - **Claude Code**: `env.ANTHROPIC_API_KEY` = `<username>` in
      `~/.claude/settings.json` (global) or
      `./.claude/settings.local.json` (project, default since v2.0).
+     (The env-var name changed from `ANTHROPIC_AUTH_TOKEN` to
+     `ANTHROPIC_API_KEY` on 2026-07-13; both are honored by Claude
+     Code and both route requests correctly, but `ANTHROPIC_API_KEY`
+     is Anthropic's canonical name. See docs/LIMITATIONS.md
+     "Claude Code TUI is misleading" for the UX story that turned
+     up during the same investigation.)
 3. Sent as the bearer token by argo-proxy to the Argo gateway.
 
 The script does NOT separate the laptop OS user (`id -un`) from the

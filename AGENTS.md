@@ -70,7 +70,41 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.0.0 RELEASED on PyPI** (`pipx install argo-anywhere`;
+- **Status**: **v3.0.0 RELEASED on PyPI**; **v3.1.0 execution
+  complete + user-verified (2026-07-13)** on `main` — awaiting the
+  tag. D-031 shipped: web-UI launcher cwd + dual embedded terminals
+  (Channel + Utility) + scope-aware forbid-list + scope dropdown +
+  MRU history + light/dark theme toggle + engine `--cwd` parity +
+  multi-instance guard + cross-platform focus-follow-window (macOS
+  AppleScript activate-last + Popen-path System Events raise; Linux
+  wmctrl best-effort with Wayland no-op). Design record
+  [`notes/impl_launcher_cwd.md`](notes/impl_launcher_cwd.md). Test
+  count: 133 baseline → **290 passing** (includes the 2026-07-13
+  claudecode-config cleanup: `write_claudecode_config` now emits
+  Anthropic's canonical `ANTHROPIC_API_KEY` instead of the legacy
+  alias `ANTHROPIC_AUTH_TOKEN` (both are honored by Claude Code;
+  the swap is future-proofing, not a bug fix — earlier notes
+  claiming AUTH_TOKEN was silently ignored were mistaken, later
+  falsified by dead-port tests showing both env vars route the
+  request through `ANTHROPIC_BASE_URL` correctly);
+  `_migrate_claudecode_config_in_place` runs BEFORE
+  `handle_config_file` so pre-2026-07-13 configs converge on the
+  canonical shape silently in non-TTY callers (web UI's
+  `configure` verb + `run --ensure` + `-y` runs auto-answer `k`
+  at the k/b/d/m/a prompt and would otherwise skip the migration);
+  per-tool `<name>_shadowing_env_vars()` contract +
+  `_check_env_shadow_and_warn` fires at configure / before `run`
+  execs the tool and warns loudly if a shell-env value would
+  shadow the config we wrote (universal detector, applies to
+  every tool). Same investigation also surfaced the real
+  UX issue: the Claude Code TUI welcome banner + Select-model
+  picker are rendered from `~/.claude.json` OAuth account state
+  regardless of the actual routing — users see "Opus 4.8 · API
+  Usage Billing" and reasonably conclude they're off argo. The
+  post-configure output block now prints a "how to verify
+  routing" hint. See docs/LIMITATIONS.md "Claude Code TUI is
+  misleading"). Prior release:
+  (`pipx install argo-anywhere`;
   Model-A merge `01ac516`). The Python-package + web-UI rebuild
   (D-026..D-030) shipped: package builds (wheel+sdist bundle the
   engine + assets + static), engine round-trips verbatim via
@@ -630,6 +664,25 @@ Optional but conventional:
   local pip's `--upgrade` path over upstream self-updaters (see D-022
   for the live-test rationale that `argo-proxy update install` resolves
   the wrong `pip` on compute nodes).
+- A **`<name>_shadowing_env_vars()`** function (added 2026-07-13)
+  declaring space-separated env-var names whose SHELL values, if set,
+  would override the config we write. Consumed by
+  `_check_env_shadow_and_warn <name>` which the dispatcher
+  (`do_post_tunnel_for_cli_tool`) calls right after configure
+  finishes / before `mode_run` execs the tool. Warns loudly with the
+  exact `unset <VAR>` commands to run. Tools with no runtime env
+  exposure may omit the function (the helper cleanly no-ops).
+  **When adding a new tool**: declare the function even if you think
+  the tool has no env footgun today. Upstream tools grow env
+  overrides across releases; a user with `ANTHROPIC_API_KEY=sk-ant-…`
+  (or `OPENAI_API_KEY=…`, etc.) exported in their shell rc would
+  have that value override the argo credential we wrote to the
+  config file, silently routing requests to their personal account
+  instead of argo. The detector surfaces that class of leak
+  universally. Keep the list in sync with `write_<name>_config`:
+  any env key we write should be in the shadow list too, so a
+  user with a stale export finds out immediately instead of
+  silently getting the wrong endpoint.
 
 The server-side `argo-proxy` component has the analogous shape but
 is NOT a CLI tool registered in `CLI_TOOLS_AVAILABLE`; it lives in
@@ -661,6 +714,139 @@ helpers). `ensure_argoproxy_installed` is the shared install primitive
   subscription) > else global (convenience for fresh installs). For
   opencode, default is global (no OAuth state to preserve; opencode is
   global-only until B1b adds project support).
+- **Engine ↔ web-UI scope coupling rule (D-031)**: any change to a
+  tool's `<name>_scope_values()` function in the engine (adding /
+  removing / renaming a legal scope value) MUST update the web UI's
+  `lScope` `<select>` options in `src/argo_anywhere/web/static/index.html`
+  in the same commit. The two are loosely coupled by convention (no
+  automated check) because the web UI dropdown is a closed-vocabulary
+  UI whose values must match the per-tool engine vocabulary exactly.
+  A mismatch would either hide a legal value from web users
+  (dropdown missing) or ship a value the engine rejects (dropdown
+  extra → engine `die`). Reviewers verify by grepping
+  `<name>_scope_values` in both files. Also update `PLAN.md`'s
+  D-031 (if the change is substantive) and `notes/impl_launcher_cwd.md`
+  §6.1 wording (if the field's default logic changes).
+
+### Launcher cwd handling: D-031 (v3.1.0)
+
+Web UI + engine both honor an explicit working directory now:
+
+- **Web UI**: the launcher popover requires a cwd. Blank is
+  rejected. Field pre-fills with MRU top entry from
+  `~/.argo_anywhere/web_state.json`, else `$HOME` on first run.
+  Browse button (pywebview only) opens a native folder picker.
+  Missing directory → 409 → confirm modal → explicit `POST /api/mkdir`
+  (never silent).
+- **Engine**: `--cwd <path>` flag parsed early; `cd -- "$path" || die`
+  before mode dispatch. Same forbid-list applied. Existing CLI
+  invocations without `--cwd` are unaffected (backward compatible).
+- **Forbid-list (project scope only; global unrestricted)**:
+  authoritative source is `_scope_project_forbid_dirs` in the
+  engine; Python parallel in `src/argo_anywhere/web/forbid.py`
+  (tested against the bash list). Hard-block: `$HOME` exact + `/`,
+  `/bin`, `/sbin`, `/usr`, `/etc`, `/var`, `/opt`, `/tmp`, `/var/tmp`,
+  `/System`, `/Library`, `/private`. Soft-warn: cwd has no `.git`
+  AND no project marker (`pyproject.toml`, `package.json`,
+  `Cargo.toml`, `Makefile`, `go.mod`, ...) AND no existing tool
+  config.
+- **Cwd-aware scope default (one-directional nudge)**: cwd == `$HOME`
+  → dropdown pre-selects `global`. Project markers do NOT auto-nudge
+  toward `project` (only nudge in the safe direction).
+- **pywebview app cwd** is `~/.argo_anywhere/` (not `$HOME`). Shown
+  in launcher header + About popover. `mkdir -p` before the `os.chdir`
+  in `cli._cmd_app` / launcher scripts (canonical install may not
+  be bootstrapped yet per D-023).
+- **`PtySession(cwd=)`** kwarg (`src/argo_anywhere/driver.py`)
+  threads the request from the web layer to `subprocess.Popen`.
+  Blank/None = inherit process cwd (preserves today's behavior for
+  direct programmatic callers).
+
+### Dual embedded terminals: Channel + Utility (D-031)
+
+The web UI's embedded-terminal container is split horizontally
+into two named panels with a draggable divider:
+
+- **Channel (left)**: persistent; owns `connect`; SSH master + tunnel
+  live here; ws-close does NOT terminate (per
+  `terminate_on_close=not managed.owns_channel` in `pty_bridge.py`).
+  One at a time; re-launch checks `channel_is_up` first and refuses
+  gracefully with a "stop + replace" option if the channel is
+  already up.
+- **Utility (right)**: ephemeral; runs `configure` / `setup` /
+  `tunnel`. ws-close terminates cleanly; can be relaunched freely.
+  `configure` refuses if no Channel active (clear error directs
+  user to `connect` first — explicit > magic).
+- Info verbs (`status` / `list-models` / `list-tools`) continue
+  using `/api/run` (Lane-1 captured output); NOT streamed to
+  Utility.
+- `run` and `client` are HARD-BLOCKED from both panels (UI disables
+  + server refuses); browser tab close would kill the tool session.
+  `client` is also REMOVED from the web-UI verb dropdown (CLI
+  unchanged).
+- Existing `Terminal` / `Hide` buttons act on the container (both
+  panels show / hide together — no per-panel toggle in v1).
+- Divider draggable with 25%/75% min/max limits; position
+  persisted as `divider_pct` in `~/.argo_anywhere/web_state.json`.
+- `SessionRegistry` (`src/argo_anywhere/web/registry.py`) gains
+  named slots `channel` + `utility` alongside the existing
+  id-keyed `_by_id` map.
+
+### Multi-instance policy for the web UI (D-031)
+
+Concurrent `argo-anywhere web` / `argo-anywhere app` instances are guarded
+against by a pre-bind probe of ``/healthz`` (D-031, added mid-execution):
+
+- ``/healthz`` includes ``{"app": "argo-anywhere", "pid": ..., "package_version": ..., "app_cwd_short": ...}`` so an incoming argo can identify an incumbent as a sibling (vs. an unrelated service on that port).
+- ``_cmd_web`` and ``_cmd_app`` in ``src/argo_anywhere/cli.py`` call ``_probe_peer_web(host, port)`` before starting uvicorn. Sibling → refuse with pid + version + next-port hint. Foreign service on port → refuse with generic "not us" message.
+- ``--force`` on either command bypasses the probe (for advanced use; both instances then share ``~/.argo_anywhere/web_state.json`` with last-write-wins semantics, and the uvicorn bind will still fail if the port is really busy).
+- ``_cmd_app`` additionally opens the incumbent's URL in the default browser after refusing (most natural response to "argo-anywhere is already running"); still exits 1 so scripts see the refusal.
+- Pre-D-031 servers (returning bare ``{"status": "ok"}``) classify as ``foreign`` → refuse safely without any coordination during an incremental upgrade.
+
+**Why not just let uvicorn's bind fail?** Two reasons: (a) the bind-error stack trace is user-hostile compared to a targeted "there's already an argo-anywhere on :8799"; (b) foreign-service detection catches the case where port 8799 is genuinely used by something else on the user's box, before they see uvicorn's more generic error.
+
+**Do NOT** rely on the guard for correctness against a determined caller — it's a UX safety-net, not a mutex. Two instances at the same port CAN'T both bind (kernel enforces); two instances on different ports MAY overwrite each other's ``web_state.json``. The Channel-panel single-instance discipline is enforced per-instance by ``SessionRegistry.panel_alive("channel")`` and cannot span instances (each has its own in-process registry).
+
+### Focus-follow-window for spawned terminals (D-031)
+
+Spawned native terminals must end up frontmost, not behind the browser
+that triggered the launch. Two mechanisms, both best-effort:
+
+- **macOS AppleScript path** (Terminal.app, iTerm2): ``activate`` MUST
+  be the LAST statement in the tell-block. Calling it at the top races
+  window-creation against the caller (the browser) re-taking focus by
+  the time the script returns. Also explicitly ``select newWindow``
+  (iTerm) / ``set index of window 1 of newTab to 1`` (Terminal.app)
+  so the RIGHT window is frontmost, not just the app.
+- **CLI-Popen path** (alacritty / kitty / wezterm / ghostty on macOS;
+  the whole Linux catalog): after ``Popen``, call
+  ``_raise_focus_macos_cli(term_id)`` on Darwin or
+  ``_raise_focus_linux(label, pid)`` on Linux. Both are best-effort:
+  ``osascript``/``wmctrl`` absent, TCC denied, Wayland compositor, or
+  the raise call timing out -- silent no-op; launch itself still
+  succeeds.
+
+Never let focus-raise failures fail the launch. Pinned by regression
+tests in ``tests/test_external_terminal.py``
+(``test_macos_scripts_activate_last_for_focus``,
+``test_open_macos_cli_terminal_triggers_focus_raise``,
+``test_open_linux_cli_terminal_triggers_focus_raise``,
+``test_focus_raise_never_fails_the_launch``).
+
+### Light/dark theme toggle (D-031)
+
+The web UI shipped dark-only in v3.0.x; v3.1.0 adds a
+top-bar toggle cycling `auto → dark → light → auto` (default
+`auto` reads `prefers-color-scheme`). Choice persisted as a
+`theme` key in `~/.argo_anywhere/web_state.json` (values
+`{"auto", "dark", "light"}`). Palette lives in CSS custom
+properties gated on a `data-theme` attribute on `<html>`; the
+two xterm.js panels (Channel + Utility) re-color on toggle via
+`setOption('theme', ...)`. Design mirrors the sibling
+`scrollback` project. Any new UI color MUST be added via CSS
+custom properties in both `:root[data-theme="dark"]` and
+`:root[data-theme="light"]` blocks — never hex literals — so the
+toggle covers new surfaces without follow-up work.
 
 ### Single-instance constraint (one argo-proxy + one tunnel per user per node)
 

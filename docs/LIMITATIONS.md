@@ -345,20 +345,30 @@ Switching to opus-4-7 mid-session via `/model claude-opus-4-7`
 also reliably reproduces the failure.
 
 **Persistent workaround**: add to the `env` block in
-`~/.claude/settings.json` (or the project-scope equivalent):
+`~/.claude/settings.json` (or the project-scope equivalent at
+`./.claude/settings.local.json`):
 
 ```json
 {
   "env": {
     "ANTHROPIC_MODEL": "claude-sonnet-4-6",
     "ANTHROPIC_BASE_URL": "http://localhost:64742",
-    "ANTHROPIC_AUTH_TOKEN": "your-anl-username"
+    "ANTHROPIC_API_KEY": "your-anl-username"
   }
 }
 ```
 
 The `ANTHROPIC_MODEL` setting overrides Claude Code's default
 model selection for every session.
+
+> **Note on the auth-var name** (2026-07-13): earlier versions of
+> this document showed `ANTHROPIC_AUTH_TOKEN` here.
+> `ANTHROPIC_API_KEY` is Anthropic's canonical name for the same
+> env var (both are honored by Claude Code and both route
+> requests correctly); we adopted the canonical spelling on
+> 2026-07-13 as future-proofing. See "Claude Code TUI is
+> misleading" below for the UX story that turned up during the
+> same investigation.
 
 **Why we don't fix it upstream-of-us**:
 
@@ -387,6 +397,100 @@ validation + Claude Code SSE parsing), so an argo-proxy fix would
 have to be a translation-layer workaround (rewrite
 `thinking.type.enabled` → `thinking.type.adaptive` for opus-4-7
 on the fly).
+
+### Claude Code TUI is misleading: shows subscription-tier text even when routing goes through argo
+
+**Applies to**: `claudecode` (Claude Code v2.1.x with an active
+personal-subscription OAuth session in `~/.claude.json`).
+
+**Symptom**: after `argo-anywhere configure --cli-tool claudecode`
+(or the full `client` verb), `claude` starts and shows a welcome
+banner like:
+
+```
+Claude Code v2.1.207
+Welcome back!
+
+  Opus 4.8 · API Usage Billing
+  ~/AHMED_HOME/TMP3
+```
+
+Plus a **Select model** picker that lists `Fable 5`, `Sonnet 5`,
+`Haiku 4.5`, etc. with `$/Mtok` prices — the tiers offered by
+your personal-subscription account. Users reasonably conclude
+that Claude Code is talking to `api.anthropic.com` under their
+personal subscription, not through argo-proxy.
+
+**What's actually happening** (verified 2026-07-13 on Claude Code
+v2.1.207): both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+DO override the OAuth session and route requests to
+`ANTHROPIC_BASE_URL` correctly. The welcome banner + model
+picker are **UI content pulled from `~/.claude.json`'s OAuth
+account state** (plan tier, billing type, available-model
+catalog), NOT from what's currently being served. The TUI shows
+this metadata regardless of the actual endpoint.
+
+Additional confusion source: the visible warning banner —
+
+> ⚠ claude.ai connectors are disabled because `ANTHROPIC_API_KEY`
+> or another auth source is set and takes precedence over your
+> claude.ai login
+
+— fires whenever ANY non-OAuth auth source is set, including our
+own env var. It correctly signals "auth source detected" but says
+nothing about which base URL the request will hit.
+
+**How to verify argo routing is actually working**:
+
+```bash
+# Test 1: an argo-only model id. If routing goes to argo, this
+# succeeds; if routing goes to Anthropic direct, this fails.
+claude --print --model claude-4.5-haiku "reply ok"
+
+# Test 2: an obviously-invalid model. The ERROR shape reveals the
+# routing:
+claude --print --model bogus-xyz "reply ok"
+# argo-proxy shape:  API Error: 400 {"error":"Upstream API error: ..."}
+# Anthropic shape:   There's an issue with the selected model (bogus-xyz)...
+
+# Test 3: a dead-port stress test (destroys the tunnel; run only
+# if you can restart it). If routing respects our BASE_URL, the
+# request hangs against the dead port instead of succeeding.
+```
+
+If Test 1 succeeds and Test 2 shows the `Upstream API error`
+shape, requests ARE reaching argo. The subscription-tier text
+in the TUI is cosmetic-only.
+
+**Our writer** (as of 2026-07-13) writes both an
+`ANTHROPIC_API_KEY` (which is Anthropic's official name for the
+auth env var; it works reliably across Claude Code versions).
+Pre-2026-07-13 versions wrote `ANTHROPIC_AUTH_TOKEN` instead
+(also honored by Claude Code, but the two-name-for-same-thing
+history has caused confusion). Older configs are auto-migrated
+in place by `_migrate_claudecode_config_in_place` at the next
+`configure` — a stale `ANTHROPIC_AUTH_TOKEN` matching your ANL
+username (the fingerprint of a value we wrote) is stripped and
+replaced with `ANTHROPIC_API_KEY`. A user-owned
+`ANTHROPIC_AUTH_TOKEN` with any other value (e.g. a personal
+OAuth token you set for another reason) is preserved untouched.
+
+**Related detector** (2026-07-13): the engine runs
+`_check_env_shadow_and_warn <tool>` after `configure` / before
+`run` `exec`s the binary. It scans the shell env for variables
+that would shadow our written config (per-tool list in
+`<tool>_shadowing_env_vars`). If any are set, a loud warning
+fires with the exact `unset <VAR>` commands to run. Applies to
+`opencode` / `claudecode` / `aider`.
+
+**Wishlist / possible future improvement**: write an explicit
+`"model"` key to our config that names an argo-served model
+(e.g. `claude-4.6-sonnet`), so the TUI's welcome-banner default
+is at least accurate to argo's offering. Left unimplemented
+today because (a) it would trample a user preference set in
+`~/.claude/settings.json` (`"model": "opus"`), and (b) `opus`
+etc. are also served by argo, so the default still works —
+just with misleading pricing text.
 
 ### Vertex returns HTTP 500 on large non-streaming `/messages` requests
 
