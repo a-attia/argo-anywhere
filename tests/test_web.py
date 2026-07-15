@@ -616,3 +616,82 @@ def test_ws_refuses_second_channel_when_one_alive() -> None:
             with c.websocket_connect("/ws?verb=connect", headers={"host": "127.0.0.1"}):
                 pass
         assert exc.value.code == 1008
+
+
+# ===========================================================================
+# D-032 (2026-07-15): /api/ssh-hosts endpoint tests.
+# The parser itself is exercised in detail in tests/test_ssh_hosts.py; these
+# tests cover the endpoint's caching + refresh contract only.
+# ===========================================================================
+
+
+def test_api_ssh_hosts_returns_list(client: TestClient) -> None:
+    """Endpoint responds with {"hosts": [...]} shape."""
+    r = client.get("/api/ssh-hosts")
+    assert r.status_code == 200
+    body = r.json()
+    assert "hosts" in body
+    assert isinstance(body["hosts"], list)
+
+
+def test_api_ssh_hosts_cached_across_calls(monkeypatch, client: TestClient) -> None:
+    """Second call without ?refresh=1 reuses the cache -- parser called once."""
+    from argo_anywhere.web import ssh_hosts as m
+
+    calls = {"n": 0}
+    real = m.parse_ssh_config_hosts
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(m, "parse_ssh_config_hosts", counting)
+    # Cache may already be populated from an earlier test in this session;
+    # clear it via ?refresh=1 first, then measure.
+    client.get("/api/ssh-hosts?refresh=1")
+    calls["n"] = 0
+
+    client.get("/api/ssh-hosts")
+    client.get("/api/ssh-hosts")
+    client.get("/api/ssh-hosts")
+
+    assert calls["n"] == 0, (
+        "expected the second+ calls to hit the cache; "
+        f"parser was called {calls['n']} time(s) after the initial refresh"
+    )
+
+
+def test_api_ssh_hosts_refresh_bypasses_cache(
+    monkeypatch, client: TestClient,
+) -> None:
+    """?refresh=1 forces the parser to re-read the file."""
+    from argo_anywhere.web import ssh_hosts as m
+
+    calls = {"n": 0}
+    real = m.parse_ssh_config_hosts
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(m, "parse_ssh_config_hosts", counting)
+    # Warm the cache first.
+    client.get("/api/ssh-hosts?refresh=1")
+    calls["n"] = 0
+
+    client.get("/api/ssh-hosts?refresh=1")
+    client.get("/api/ssh-hosts?refresh=1")
+
+    assert calls["n"] == 2, (
+        "expected each ?refresh=1 to re-invoke the parser; "
+        f"got {calls['n']} calls (expected 2)"
+    )
+
+
+def test_api_ssh_hosts_host_guard(client: TestClient) -> None:
+    """Endpoint honors the app-wide loopback host guard."""
+    r = client.get(
+        "/api/ssh-hosts",
+        headers={"host": "evil.example.com"},
+    )
+    assert r.status_code == 403

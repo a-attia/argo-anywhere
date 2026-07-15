@@ -454,9 +454,16 @@
         <div class="two" style="margin-top:8px">
           <div class="field">
             <label for="lNode">compute node</label>
-            <input id="lNode" type="text" autocomplete="off"
-                   placeholder="polaris-login  OR  compute-01.cels.anl.gov" />
-            <span class="pop-note" style="margin-top:4px">an ssh_config alias OR a full hostname</span>
+            <div style="display:flex; gap:8px; align-items:stretch;">
+              <input id="lNode" type="text" autocomplete="off" list="nodeHosts"
+                     placeholder="polaris-login  OR  compute-01.cels.anl.gov"
+                     style="flex:1" />
+              <button id="refreshNodeHosts" class="btn btn-ghost" type="button"
+                      title="Re-read ~/.ssh/config for alias changes"
+                      style="min-width:32px">↻</button>
+            </div>
+            <datalist id="nodeHosts"></datalist>
+            <span class="pop-note" style="margin-top:4px">an ssh_config alias OR a full hostname (aliases auto-populate from ~/.ssh/config)</span>
           </div>
           <div class="field">
             <label for="lUser">ANL username</label>
@@ -1510,10 +1517,28 @@
       } catch (e) { /* best-effort */ }
     }
 
+    // D-032 (2026-07-15): populate the ssh_config alias picker. Fire on page
+    // load (silent-error on failure -- no aliases is a legitimate state). The
+    // refresh button re-reads ~/.ssh/config via ?refresh=1. Per plan §7 W11:
+    // the endpoint is a pure file parse; NEVER calls ssh; zero IP-block risk
+    // -- safe to fire on every page load without any coordination.
+    async function refreshNodeHosts(force) {
+      try {
+        const url = force ? '/api/ssh-hosts?refresh=1' : '/api/ssh-hosts';
+        const r = await fetch(url);
+        if (!r.ok) return;
+        const body = await r.json();
+        const hosts = body.hosts || [];
+        const dl = el('nodeHosts');
+        dl.innerHTML = hosts.map((h) => `<option value="${_escHtml(h)}">`).join('');
+      } catch (e) { /* silent -- no aliases is a legitimate state */ }
+    }
+    el('refreshNodeHosts').addEventListener('click', () => refreshNodeHosts(true));
+
     // ---- boot: monitor only; no auto-connect ----------------------------
     setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
-    refreshStatus(); loadTools(); loadTerminals(); loadState();
+    refreshStatus(); loadTools(); loadTerminals(); loadState(); refreshNodeHosts();
   </script>
 </body>
 </html>

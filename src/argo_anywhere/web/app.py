@@ -447,6 +447,25 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             "default": default_terminal(),
         })
 
+    @app.get("/api/ssh-hosts")
+    def api_ssh_hosts(refresh: int = 0) -> JSONResponse:
+        """D-032 (2026-07-15): enumerate ssh_config Host aliases for the
+        launcher's node-field datalist.
+
+        Cached at process lifetime; ``?refresh=1`` re-reads the file. The
+        parse is a pure filesystem read + textual Include expansion --
+        NEVER calls ssh. Zero IP-block risk. See
+        ``argo_anywhere.web.ssh_hosts.parse_ssh_config_hosts`` for the
+        full contract.
+        """
+        from .ssh_hosts import parse_ssh_config_hosts
+
+        cache = getattr(app.state, "ssh_hosts_cache", None)
+        if cache is None or refresh:
+            cache = parse_ssh_config_hosts()
+            app.state.ssh_hosts_cache = cache
+        return JSONResponse({"hosts": cache})
+
     @app.post("/api/launch-external")
     def api_launch_external(
         verb: str,
