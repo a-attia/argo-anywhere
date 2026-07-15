@@ -49,6 +49,19 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 #: but we still constrain them to a safe alphabet to keep argv predictable.
 _SAFE_TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
+#: Hostname / username / jump-host guard for D-032 launcher fields
+#: (compute node, ANL username, jump-host). Broader than _SAFE_TOKEN because
+#: real hostnames contain ``.`` (compute-01.cels.anl.gov), real usernames
+#: contain ``_`` (some ANL accounts), and both preserve case (mixed-case
+#: aliases are unusual but legal). Deliberately excludes ``@`` (would confuse
+#: ``${user}@${host}`` target parse in the engine), ``/`` and ``:`` (path/
+#: URI separators — nothing to do with hostnames), whitespace, and shell
+#: metachars. Length capped at 253 (max DNS label length per RFC 1035).
+#: Rejected §7 W1 audit "reuse _SAFE_TOKEN" verdict on inspection: _SAFE_TOKEN
+#: is stricter than the plan claimed (lowercase-only, no ``.`` or ``_``) and
+#: would reject legitimate hostnames like the default node fqdn.
+_SAFE_HOSTLIKE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+
 #: Returning verbs the dashboard may run captured (Lane 1) via /api/run. The
 #: ``anl`` flag says whether the verb reaches ANL through the tunnel, so the UI
 #: can gate those behind an explicit confirm and never auto-run them.
@@ -91,12 +104,25 @@ def build_launch_argv(
     cli_tool: str | None = None,
     scope: str | None = None,
     port: int | None = None,
+    node: str | None = None,
+    user: str | None = None,
+    jump_host: str | None = None,
+    no_jump: bool = False,
 ) -> list[str]:
     """Assemble a validated engine argv for a browser-initiated terminal launch.
 
     Only a known verb plus a constrained set of flags is allowed; free-form
     passthrough is deliberately not supported. Raises ``ValueError`` on anything
     outside the allowlist so the caller can reject the launch.
+
+    D-032 additions (2026-07-15) -- ``node``, ``user``, ``jump_host``,
+    ``no_jump`` map 1:1 to the engine's ``--node`` / ``--user`` /
+    ``--jump-host`` / ``--no-jump`` flags. Empty string means "let the
+    engine resolve it" (per plan §10.2): we simply omit the flag rather
+    than passing an empty value that the engine would reject at parse time
+    (--jump-host "" is a die per §7 A9). For the explicit "skip the jump
+    host entirely" intent, callers pass ``no_jump=True`` (mirrors the
+    checkbox in the launcher popover added in C4).
     """
     if verb not in KNOWN_VERBS:
         raise ValueError(f"unknown verb: {verb!r}")
@@ -113,6 +139,20 @@ def build_launch_argv(
         if not 1 <= int(port) <= 65535:
             raise ValueError(f"port out of range: {port!r}")
         argv += ["--port", str(int(port))]
+    if node:
+        if not _SAFE_HOSTLIKE.match(node):
+            raise ValueError(f"bad node: {node!r}")
+        argv += ["--node", node]
+    if user:
+        if not _SAFE_HOSTLIKE.match(user):
+            raise ValueError(f"bad user: {user!r}")
+        argv += ["--user", user]
+    if jump_host:
+        if not _SAFE_HOSTLIKE.match(jump_host):
+            raise ValueError(f"bad jump_host: {jump_host!r}")
+        argv += ["--jump-host", jump_host]
+    if no_jump:
+        argv += ["--no-jump"]
     argv.append(verb)
     return argv
 
@@ -415,6 +455,10 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         port: int | None = None,
         terminal: str | None = None,
         cwd: str | None = None,
+        node: str | None = None,       # D-032 (2026-07-15)
+        user: str | None = None,       # D-032
+        jump_host: str | None = None,  # D-032
+        no_jump: bool = False,         # D-032 (checkbox in launcher)
     ) -> JSONResponse:
         # Open the chosen verb in a NEW native terminal window the user owns
         # (independent of the web server; not tracked in the registry). The
@@ -447,7 +491,10 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
                 )
 
         try:
-            engine_argv = build_launch_argv(verb, cli_tool=cli_tool, scope=scope, port=port)
+            engine_argv = build_launch_argv(
+                verb, cli_tool=cli_tool, scope=scope, port=port,
+                node=node, user=user, jump_host=jump_host, no_jump=no_jump,
+            )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -642,6 +689,10 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
                     cli_tool=q.get("cli_tool"),
                     scope=q.get("scope"),
                     port=int(q["port"]) if q.get("port") else None,
+                    node=q.get("node"),            # D-032 (2026-07-15)
+                    user=q.get("user"),            # D-032
+                    jump_host=q.get("jump_host"),  # D-032
+                    no_jump=q.get("no_jump") in ("1", "true", "on"),  # D-032
                 )
             except (ValueError, TypeError):
                 await ws.close(code=1008)  # rejected launch spec

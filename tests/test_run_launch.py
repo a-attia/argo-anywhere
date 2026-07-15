@@ -51,6 +51,126 @@ def test_build_argv_rejects_bad_port(port: int) -> None:
         build_launch_argv("connect", port=port)
 
 
+# -- D-032 (2026-07-15) build_launch_argv SSH-target overrides -------------
+# The new node/user/jump-host/no-jump kwargs are C4's addition; they map 1:1
+# to the engine's --node / --user / --jump-host / --no-jump flags.
+
+
+def test_build_argv_with_node_alias() -> None:
+    """Passing node=polaris-login threads through as --node polaris-login."""
+    argv = build_launch_argv("connect", node="polaris-login")
+    assert argv == ["--node", "polaris-login", "connect"]
+
+
+def test_build_argv_with_all_d032_flags() -> None:
+    """All four D-032 kwargs threaded in the documented order (node, user,
+    jump-host, no-jump). Order matters because the engine's argv parser is
+    positional-agnostic BUT reviewers scan visually and out-of-order flags
+    are noisy in commit diffs."""
+    argv = build_launch_argv(
+        "connect",
+        node="polaris-login",
+        user="example-user",
+        jump_host="bastion.example.com",
+    )
+    assert argv == [
+        "--node", "polaris-login",
+        "--user", "example-user",
+        "--jump-host", "bastion.example.com",
+        "connect",
+    ]
+
+
+def test_build_argv_no_jump_flag() -> None:
+    """no_jump=True emits --no-jump (no value)."""
+    argv = build_launch_argv("connect", no_jump=True)
+    assert argv == ["--no-jump", "connect"]
+
+
+def test_build_argv_no_jump_and_jump_host_can_coexist() -> None:
+    """Both --jump-host and --no-jump can be present in argv. The engine's
+    resolution block treats --no-jump as more explicit (wins), so the caller
+    who sets both gets no-jump semantics -- which is the CLI's behavior too."""
+    argv = build_launch_argv(
+        "connect",
+        jump_host="bastion.example.com",
+        no_jump=True,
+    )
+    assert "--no-jump" in argv
+    assert "--jump-host" in argv
+    assert "bastion.example.com" in argv
+
+
+def test_build_argv_empty_d032_fields_omitted() -> None:
+    """Empty strings for the D-032 flag values are omitted from argv (they
+    don't become `--node ""` etc.). This matches the launcher's semantics:
+    blank field == "let the engine resolve it," NOT "pass an empty value.\""""
+    argv = build_launch_argv(
+        "connect",
+        node="",
+        user="",
+        jump_host="",
+        no_jump=False,
+    )
+    assert argv == ["connect"]
+
+
+@pytest.mark.parametrize("bad_node", [
+    "user@host",         # @ would confuse ${user}@${host} target parse
+    "path/to/host",      # / is a path separator
+    "host:22",           # : is a URI separator
+    "space in name",     # whitespace
+    "",                  # empty (would fail if we treated blank as valid)
+    "-flag-like",        # leading dash would look like a flag
+    "$injection",        # shell metachar
+    "x" * 300,           # exceeds RFC 1035 253-char cap
+])
+def test_build_argv_rejects_bad_node(bad_node: str) -> None:
+    """_SAFE_HOSTLIKE rejects the shape of things that would confuse the
+    engine's argv parse or shell semantics. Empty strings are silently
+    omitted (per test_build_argv_empty_d032_fields_omitted), so pass a
+    non-empty guardrail explicitly here."""
+    if bad_node == "":
+        # Empty is handled by the "omit-from-argv" path, not the reject path.
+        argv = build_launch_argv("connect", node=bad_node)
+        assert "--node" not in argv
+        return
+    with pytest.raises(ValueError, match="bad node"):
+        build_launch_argv("connect", node=bad_node)
+
+
+@pytest.mark.parametrize("bad_user", [
+    "user@host", "path/to/user", "user:pass", "with space",
+    "$USER", "x" * 300,
+])
+def test_build_argv_rejects_bad_user(bad_user: str) -> None:
+    with pytest.raises(ValueError, match="bad user"):
+        build_launch_argv("connect", user=bad_user)
+
+
+@pytest.mark.parametrize("bad_jump", [
+    "user@host", "host:22", "with space", "$var",
+])
+def test_build_argv_rejects_bad_jump_host(bad_jump: str) -> None:
+    with pytest.raises(ValueError, match="bad jump_host"):
+        build_launch_argv("connect", jump_host=bad_jump)
+
+
+def test_build_argv_accepts_legitimate_hostnames() -> None:
+    """_SAFE_HOSTLIKE must accept real-world hostnames: dotted fqdns,
+    hyphenated aliases, underscored usernames, mixed case (unusual but
+    legal)."""
+    argv = build_launch_argv(
+        "connect",
+        node="compute-01.cels.anl.gov",
+        user="j_smith",
+        jump_host="Alt-Jump.Example.ORG",
+    )
+    assert "compute-01.cels.anl.gov" in argv
+    assert "j_smith" in argv
+    assert "Alt-Jump.Example.ORG" in argv
+
+
 # -- /api/run (captured Lane 1) ---------------------------------------------
 
 @pytest.fixture()

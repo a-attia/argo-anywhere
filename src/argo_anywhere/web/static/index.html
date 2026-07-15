@@ -440,6 +440,48 @@
         <datalist id="cwdHistory"></datalist>
         <span class="pop-note" style="margin-top:4px">the tool will start in this directory (absolute path)</span>
       </div>
+      <!-- D-032 (2026-07-15): SSH-target overrides. All three fields are
+           OPTIONAL -- leaving them blank means "let the engine resolve it"
+           (which is what today's flow does: NODE_CACHE / USER_CACHE / the
+           default ANL_JUMP). Fields shine when the user has an
+           ssh_config alias route (--node polaris-login), a different
+           ANL username than $USER (--user), or a non-CELS jump host
+           (--jump-host). Popover-collapsed by default via <details>
+           so the launcher isn't overwhelming on first use; expands with
+           a click. See notes/impl_ssh_config_native.md §10.2. -->
+      <details class="ssh-target-details" style="margin-top:8px">
+        <summary style="cursor:pointer">SSH target overrides <span class="pop-note">(optional; usually leave blank)</span></summary>
+        <div class="two" style="margin-top:8px">
+          <div class="field">
+            <label for="lNode">compute node</label>
+            <input id="lNode" type="text" autocomplete="off"
+                   placeholder="polaris-login  OR  compute-01.cels.anl.gov" />
+            <span class="pop-note" style="margin-top:4px">an ssh_config alias OR a full hostname</span>
+          </div>
+          <div class="field">
+            <label for="lUser">ANL username</label>
+            <input id="lUser" type="text" autocomplete="off"
+                   placeholder="(auto — from ~/.ssh/config or cache)" />
+            <span class="pop-note" style="margin-put:4px">explicit --user; overrides ssh_config inference</span>
+          </div>
+        </div>
+        <div class="two" style="margin-top:8px">
+          <div class="field">
+            <label for="lJump">jump-host</label>
+            <input id="lJump" type="text" autocomplete="off"
+                   placeholder="(auto — logins.cels.anl.gov; check the box below to skip)" />
+            <span class="pop-note" style="margin-top:4px">override the default jump host; blank == default</span>
+          </div>
+          <div class="field">
+            <label for="lNoJump">skip jump host</label>
+            <div style="display:flex; align-items:center; gap:8px; padding-top:8px">
+              <input id="lNoJump" type="checkbox" />
+              <label for="lNoJump" style="font-weight:normal; cursor:pointer">no jump host (--no-jump)</label>
+            </div>
+            <span class="pop-note" style="margin-top:4px">use for on-network direct SSH; empty jump-host field means auto, not skip</span>
+          </div>
+        </div>
+      </details>
       <div class="pop-actions">
         <button id="doLaunch" class="btn btn-primary">Launch</button>
         <button id="cancelLaunch" class="btn btn-ghost">Cancel</button>
@@ -1271,6 +1313,16 @@
       const verb = el('lVerb').value, tool = el('lTool').value, scope = el('lScope').value.trim(), target = el('lTarget').value;
       let cwd = el('lCwd').value.trim();
 
+      // D-032 (2026-07-15): SSH-target override fields. Blank means "let the
+      // engine resolve it" -- we omit the param rather than pass an empty
+      // string (the engine's --jump-host "" is a parse error; for empty
+      // node/user, the engine falls through to its cache / ssh_config /
+      // prompt precedence chain, which is the intended behavior).
+      const node = el('lNode').value.trim();
+      const user = el('lUser').value.trim();
+      const jumpHost = el('lJump').value.trim();
+      const noJump = el('lNoJump').checked;
+
       // D-031 D2a: client-side absolute-path check. Blank rejected too.
       if (!_cwdIsAbsolute(cwd)) {
         const note = el('popNote'); note.className = 'pop-note err';
@@ -1283,6 +1335,11 @@
       if (tool) params.set('cli_tool', tool);
       if (scope) params.set('scope', scope);
       params.set('cwd', cwd);
+      // D-032: include the SSH-target overrides only when non-empty.
+      if (node) params.set('node', node);
+      if (user) params.set('user', user);
+      if (jumpHost) params.set('jump_host', jumpHost);
+      if (noJump) params.set('no_jump', '1');
 
       if (target === 'embedded') {
         // D-031: pick the right panel based on the verb.
