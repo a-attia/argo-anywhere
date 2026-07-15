@@ -1783,6 +1783,20 @@ ssh_jump_args() {
   if [ -n "$target" ] && [ "$target" = "$ANL_JUMP" ]; then
     return
   fi
+  # D-032 Sub-fix C (2026-07-15): if the target alias already has its
+  # own ProxyJump/ProxyCommand via ~/.ssh/config, defer to it. Adding
+  # our -J on top would either be redundant (best case) or trigger a
+  # jump-loop error if the alias's proxy IS the same host we'd add.
+  # This is what makes `argo-anywhere --node <ssh-config-alias>`
+  # actually work -- without the skip, our unconditional -J on top of
+  # the alias's own ProxyJump causes ssh_reachable to fail and
+  # pick_node dies. The notice is deduped (~10+ ssh_jump_args calls
+  # per client run; dedup keeps the log line to one per alias per
+  # invocation).
+  if [ -n "$target" ] && _alias_has_own_proxy "$target"; then
+    _alias_proxy_notice_dedup "$target" "$user"
+    return
+  fi
   printf -- '-J %s@%s' "$user" "$ANL_JUMP"
 }
 
@@ -1852,14 +1866,20 @@ _alias_has_own_proxy() {
   local raw
   raw="$(ssh -G "$target" 2>/dev/null)" || return 1
   # ProxyJump `none` is the "no jump" sentinel; anything else counts.
-  # awk idiom: exit 0 on first match (shell sees success); END with
-  # no match exits 1 (shell sees failure). Cleaner than found-flag
-  # patterns under `set -e`.
-  if printf '%s\n' "$raw" | awk '/^proxyjump / && $2 != "none" {exit 0} END{exit 1}'; then
+  #
+  # awk gotcha (learned the hard way 2026-07-15): `{exit 0} END{exit 1}`
+  # does NOT do what a naive read suggests. awk's `exit N` in a body
+  # block sets the exit code AND runs the END block. If END then does
+  # its own `exit M`, M overrides N. So the "clean" `{exit 0} END{exit 1}`
+  # idiom always exits 1. Use the found-flag pattern instead:
+  #   {found=1} END{exit found ? 0 : 1}
+  # Reads correctly under set -e (awk exits 1 only if no match; shell
+  # treats that as false; the `if !` handles the semantics).
+  if printf '%s\n' "$raw" | awk '/^proxyjump / && $2 != "none" {found=1} END{exit found ? 0 : 1}'; then
     return 0
   fi
   # ProxyCommand `none` is the "no proxy" sentinel; anything else counts.
-  if printf '%s\n' "$raw" | awk '/^proxycommand / && $0 !~ /^proxycommand none$/ {exit 0} END{exit 1}'; then
+  if printf '%s\n' "$raw" | awk '/^proxycommand / && $0 !~ /^proxycommand none$/ {found=1} END{exit found ? 0 : 1}'; then
     return 0
   fi
   return 1
@@ -2284,29 +2304,97 @@ ssh_mux_open() {
 # ============================================================================
 # SECTION: 10. USERNAME RESOLUTION (resolve_username, cache I/O)
 # ============================================================================
+# resolve_username sets three globals for the caller (D-005 "$() capture of
+# a function that mutates globals" pattern: never call resolve_username via
+# `$(...)` -- the subshell would drop the globals):
+#
+#   _USERNAME_RESULT         the resolved username
+#   _USERNAME_SOURCE         one of: env|cache|prompt|ssh-config:<target>
+#   _USERNAME_SHOULD_CACHE   1 if the caller should persist the value to
+#                            USER_CACHE (only true for prompted values,
+#                            per plan §7 E3: cache is write-only-from-
+#                            explicit-actions); 0 otherwise.
+#
+# Callers:
+#   resolve_username
+#   ANL_USERNAME="$_USERNAME_RESULT"
+#   [ "$_USERNAME_SHOULD_CACHE" = 1 ] && _persist_username_cache "$ANL_USERNAME"
+#
+# Priority (D-032 Sub-fix B added the ssh-config source between env
+# and cache -- per plan §8 Q5 decision, permissive-plus-attribution):
+#   1. --user flag / ARGO_ANYWHERE_USER env
+#   2. ssh-config for $ARGO_ANYWHERE_NODE (if set)     [NEW in D-032]
+#   3. ssh-config for $ANL_JUMP                        [NEW in D-032]
+#   4. USER_CACHE
+#   5. interactive prompt
+#
+# The ssh-config path is skipped on-node (`on_anl_compute_node` == "yes"):
+# self-alias resolution would return the OS user, which is noise.
 resolve_username() {
-  # Priority: --user flag (sets ARGO_ANYWHERE_USER) > env > cache > prompt.
-  # ANL_USERNAME is honored as a deprecated alias (warning printed once
-  # at top-level when promoted into ARGO_ANYWHERE_USER).
+  _USERNAME_RESULT=""
+  _USERNAME_SOURCE=""
+  _USERNAME_SHOULD_CACHE=0
+
   if [ -n "${ARGO_ANYWHERE_USER:-}" ]; then
-    echo "$ARGO_ANYWHERE_USER"; return
+    _USERNAME_RESULT="$ARGO_ANYWHERE_USER"
+    _USERNAME_SOURCE="env"   # covers both --user flag and env-set
+    return
   fi
+
+  # D-032 Sub-fix B (2026-07-15): consult ~/.ssh/config before cache.
+  # Values from here are inference, not user intent -- they are NEVER
+  # persisted to USER_CACHE (SHOULD_CACHE stays 0). If the user later
+  # sets --user explicitly, priority 1 wins and this branch never fires.
+  # Skipped on-node because ssh -G on the compute node itself would
+  # resolve a self-alias to $USER, which is the wrong answer.
+  if [ "$(on_anl_compute_node)" = "no" ]; then
+    local _u
+    if [ -n "${ARGO_ANYWHERE_NODE:-}" ]; then
+      _u="$(_ssh_config_user "$ARGO_ANYWHERE_NODE")"
+      if [ -n "$_u" ]; then
+        _USERNAME_RESULT="$_u"
+        _USERNAME_SOURCE="ssh-config:${ARGO_ANYWHERE_NODE}"
+        return
+      fi
+    fi
+    _u="$(_ssh_config_user "$ANL_JUMP")"
+    if [ -n "$_u" ]; then
+      _USERNAME_RESULT="$_u"
+      _USERNAME_SOURCE="ssh-config:${ANL_JUMP}"
+      return
+    fi
+  fi
+
   if [ -f "$USER_CACHE" ]; then
-    cat "$USER_CACHE"; return
+    _USERNAME_RESULT="$(cat "$USER_CACHE")"
+    _USERNAME_SOURCE="cache"
+    return
   fi
+
   local u
   while :; do
     u="$(ask "Enter your ANL username (e.g. jdoe):")"
     [[ "$u" =~ ^[a-zA-Z][a-zA-Z0-9._-]*$ ]] && break
     err "Invalid username. Use letters, digits, dot, underscore, hyphen."
   done
+  _USERNAME_RESULT="$u"
+  _USERNAME_SOURCE="prompt"
+  _USERNAME_SHOULD_CACHE=1  # only prompted values get cached
+}
+
+# _persist_username_cache <username>: write the value to USER_CACHE.
+# Extracted from the old resolve_username so the "cache" write is now
+# an explicit caller decision (gated on $_USERNAME_SHOULD_CACHE from
+# resolve_username).
+_persist_username_cache() {
+  local u="$1"
+  [ -n "$u" ] || return 0
   # L1 fix (audit Phase 2c) -- refactored in B2 (Phase 4) to call
   # _ensure_state_dir, which centralizes the mkdir-with-stderr-capture
   # pattern (was inline here; now shared with write_port_cache and
   # other state-dir writers).
   _ensure_state_dir
   printf '%s\n' "$u" > "$USER_CACHE"
-  echo "$u"
 }
 
 # Read a top-level YAML scalar value from a file. Handles the three
@@ -4310,7 +4398,23 @@ pick_node() {
     for n in "${ANL_NODES[@]:-}"; do
       [ "$n" = "$req" ] && in_list=1 && break
     done
-    [ "$in_list" -eq 1 ] || warn "Requested node '${req}' is not in ANL_NODES (proceeding anyway)."
+    if [ "$in_list" -eq 0 ]; then
+      # D-032 Sub-fix A (2026-07-15): distinguish "user typed an
+      # ssh_config alias" from "user typed an unknown hostname."
+      # If ssh -G resolves the string to a rewritten hostname, it IS
+      # an alias -- emit a helpful log line ("routes via ~/.ssh/config")
+      # instead of the generic warn ("not in ANL_NODES"). If ssh -G
+      # doesn't rewrite (bare hostname or resolution fails), keep the
+      # historical warn verbatim.
+      local _resolved
+      _resolved="$(_ssh_config_hostname "$req")"
+      if [ -n "$_resolved" ] && [ "$_resolved" != "$req" ]; then
+        log "Note: '${req}' is an ssh_config alias"
+        log "  (resolves to ${_resolved}); proceeding via ~/.ssh/config."
+      else
+        warn "Requested node '${req}' is not in ANL_NODES (proceeding anyway)."
+      fi
+    fi
 
      log "Verifying reachability of '${req}' $(jump_descr)..."
     if ssh_reachable "$user" "$req"; then
@@ -4454,7 +4558,19 @@ EOF
       for n in "${ANL_NODES[@]:-}"; do
         [ "$n" = "$choice" ] && in_list=1 && break
       done
-      [ "$in_list" -eq 1 ] || warn "Typed node '${choice}' is not in ANL_NODES (proceeding anyway)."
+      if [ "$in_list" -eq 0 ]; then
+        # D-032 Sub-fix A: same alias-detection as the --node branch
+        # above -- if ssh -G resolves it, promote the warn to a
+        # helpful log line.
+        local _resolved
+        _resolved="$(_ssh_config_hostname "$choice")"
+        if [ -n "$_resolved" ] && [ "$_resolved" != "$choice" ]; then
+          log "Note: '${choice}' is an ssh_config alias"
+          log "  (resolves to ${_resolved}); proceeding via ~/.ssh/config."
+        else
+          warn "Typed node '${choice}' is not in ANL_NODES (proceeding anyway)."
+        fi
+      fi
       log "Verifying reachability of '${choice}' $(jump_descr)..."
       if ssh_reachable "$user" "$choice"; then
         ok "  reachable: ${choice}"
@@ -4511,7 +4627,17 @@ remote_bootstrap() {
                 -o "ControlPersist=${persist}" )
   fi
   if [ "${ARGO_ANYWHERE_NO_JUMP:-0}" != 1 ]; then
-    scp_opts+=( -o "ProxyJump=${user}@${ANL_JUMP}" )
+    # D-032 Sub-fix C (2026-07-15): defer to the alias's own
+    # ProxyJump/ProxyCommand if present. Mirrors the same skip in
+    # ssh_jump_args (see comment there). Without this, scp bootstrap
+    # would fail the same way ssh does for ssh_config-alias nodes.
+    # Notice already fired via ssh_jump_args -> _alias_proxy_notice_dedup
+    # earlier in the same run (pick_node's ssh_reachable calls ssh_args
+    # which calls ssh_jump_args); dedup keeps the log line to one per
+    # alias per invocation.
+    if ! _alias_has_own_proxy "$node"; then
+      scp_opts+=( -o "ProxyJump=${user}@${ANL_JUMP}" )
+    fi
   fi
   # In --no-mfa mode scp opens a new auth session; track it so a broken key
   # doesn't silently accumulate CSPO failures. In MFA mode the mux master
@@ -5943,7 +6069,11 @@ do_post_tunnel_for_cli_tool() {
 _PICKED_NODE=""
 _client_common_setup() {
   local with_opencode_setup="${1:-1}"
-  ANL_USERNAME="$(resolve_username)"
+  # D-032 Sub-fix B: resolve_username sets globals; must NOT be called via
+  # $(...) (subshell drops the source/should-cache tracking).
+  resolve_username
+  ANL_USERNAME="$_USERNAME_RESULT"
+  [ "$_USERNAME_SHOULD_CACHE" = 1 ] && _persist_username_cache "$ANL_USERNAME"
   # Set both names as script-level globals (NOT exported). Later code in this
   # process reads them as shell variables (e.g. write_opencode_config,
   # write_argoproxy_config), and remote_bootstrap explicitly passes them on
@@ -5952,7 +6082,7 @@ _client_common_setup() {
   # from the same shell session, which is surprising when the laptop's $USER
   # differs from the Argonne username (the common case).
   ARGO_ANYWHERE_USER="$ANL_USERNAME"
-  log "Using ANL username: ${ANL_USERNAME}"
+  log "Using ANL username: ${ANL_USERNAME} (source: ${_USERNAME_SOURCE})"
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
   # If we appear to be running ON a compute node already, the script's
@@ -6353,9 +6483,12 @@ mode_configure() {
   fi
 
   # Username is needed by the writers; resolve without opening a tunnel.
-  ANL_USERNAME="$(resolve_username)"
+  # D-032 Sub-fix B: resolve_username sets globals; do NOT call via $(...).
+  resolve_username
+  ANL_USERNAME="$_USERNAME_RESULT"
+  [ "$_USERNAME_SHOULD_CACHE" = 1 ] && _persist_username_cache "$ANL_USERNAME"
   ARGO_ANYWHERE_USER="$ANL_USERNAME"
-  log "Using ANL username: ${ANL_USERNAME}"
+  log "Using ANL username: ${ANL_USERNAME} (source: ${_USERNAME_SOURCE})"
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
   # Precondition: the channel must exist (or --ensure brings it up).
@@ -6410,9 +6543,12 @@ mode_run() {
   fi
   cli_tool_is_known "$tool" || die "run: unknown tool '${tool}'. Known tools: $(cli_tool_known_names)."
 
-  ANL_USERNAME="$(resolve_username)"
+  # D-032 Sub-fix B: resolve_username sets globals; do NOT call via $(...).
+  resolve_username
+  ANL_USERNAME="$_USERNAME_RESULT"
+  [ "$_USERNAME_SHOULD_CACHE" = 1 ] && _persist_username_cache "$ANL_USERNAME"
   ARGO_ANYWHERE_USER="$ANL_USERNAME"
-  log "Using ANL username: ${ANL_USERNAME}"
+  log "Using ANL username: ${ANL_USERNAME} (source: ${_USERNAME_SOURCE})"
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
   # run brings the channel up if missing. Default: prompt (unless -y or
@@ -8497,8 +8633,11 @@ update_argoproxy_component() {
 
   # Resolve identity (username + node). Same precedence as mode_clean's
   # remote step: env > cache > die-with-hint.
+  # D-032 Sub-fix B: resolve_username sets globals; do NOT call via $(...).
   local user node
-  user="$(resolve_username)"
+  resolve_username
+  user="$_USERNAME_RESULT"
+  [ "$_USERNAME_SHOULD_CACHE" = 1 ] && _persist_username_cache "$user"
   ARGO_ANYWHERE_USER="$user"
 
   if [ -n "${ARGO_ANYWHERE_NODE:-}" ]; then
