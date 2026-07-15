@@ -1795,6 +1795,98 @@ jump_descr() {
   fi
 }
 
+# ----------------------------------------------------------------------------
+# Native ~/.ssh/config resolution (D-032; introduced 2026-07-15, dormant
+# in this commit -- callers wire in via a follow-up commit).
+#
+# The three helpers below let argo-anywhere respect a user's ~/.ssh/config
+# without generalizing past the ANL-Duo-plus-argo-proxy assumption:
+#
+#   _ssh_config_hostname <alias>
+#     Prints the resolved hostname from `ssh -G <alias>`, or empty on
+#     failure. Consumed by pick_node's "not in ANL_NODES" branch to
+#     rewrite the warn as an informational log when the string IS an
+#     ssh_config alias.
+#
+#   _ssh_config_user <alias-or-host>
+#     Prints the resolved `User <name>` from `ssh -G`, or empty. Consumed
+#     by resolve_username as a fallback source between ARGO_ANYWHERE_USER
+#     (env/flag) and USER_CACHE. Values sourced from here are NEVER
+#     written to USER_CACHE (per plan §7 A7: cache is write-only-from-
+#     explicit-actions).
+#
+#   _alias_has_own_proxy <alias>
+#     Returns 0 if ssh_config sets a non-empty ProxyJump or ProxyCommand
+#     for the target, else 1. Consumed by ssh_jump_args to suppress our
+#     `-J <user>@<ANL_JUMP>` when the alias already routes itself
+#     (preventing both a redundant hop and the jump-loop error).
+#
+# All three:
+#   * Silently return empty / non-zero on `ssh -G` failure -- callers fall
+#     back to today's behavior. Never `die`; the ssh-config path is a
+#     capability, not a requirement.
+#   * Assume `ssh -G` output is lowercase-keyed (confirmed 2026-07-15 on
+#     OpenSSH 10.2p1; landed in OpenSSH 5.6, 2010).
+#   * Are IP-block-safe: `ssh -G` does NOT authenticate -- no network I/O,
+#     no Duo prompts, no contribution to the D-012 SSH failure tracker.
+#     Documented in notes/impl_ssh_config_native.md §7 C1/C5.
+#
+# See notes/impl_ssh_config_native.md §2.1-2.3 for the design rationale
+# and §10 for the web-UI surface that consumes the same signals.
+
+_ssh_config_hostname() {
+  local target="$1"
+  [ -n "$target" ] || return
+  ssh -G "$target" 2>/dev/null | awk '/^hostname / {print $2; exit}'
+}
+
+_ssh_config_user() {
+  local target="$1"
+  [ -n "$target" ] || return
+  ssh -G "$target" 2>/dev/null | awk '/^user / {print $2; exit}'
+}
+
+_alias_has_own_proxy() {
+  local target="$1"
+  [ -n "$target" ] || return 1
+  local raw
+  raw="$(ssh -G "$target" 2>/dev/null)" || return 1
+  # ProxyJump `none` is the "no jump" sentinel; anything else counts.
+  # awk idiom: exit 0 on first match (shell sees success); END with
+  # no match exits 1 (shell sees failure). Cleaner than found-flag
+  # patterns under `set -e`.
+  if printf '%s\n' "$raw" | awk '/^proxyjump / && $2 != "none" {exit 0} END{exit 1}'; then
+    return 0
+  fi
+  # ProxyCommand `none` is the "no proxy" sentinel; anything else counts.
+  if printf '%s\n' "$raw" | awk '/^proxycommand / && $0 !~ /^proxycommand none$/ {exit 0} END{exit 1}'; then
+    return 0
+  fi
+  return 1
+}
+
+# _alias_proxy_notice_dedup <alias> <user>: log the "routes via ssh_config"
+# notice at most ONCE per alias per invocation. ssh_jump_args (which will
+# call this helper in a follow-up commit) is invoked ~10+ times per
+# `client` run (from every ssh_reachable / ssh_mux_open / SCP branch);
+# without dedup the user sees the same notice a dozen times per session.
+#
+# Bash-3.2-compatible naming: use ${var//pat/replacement} to scrub the
+# alias into a valid identifier (bash 3.2 supports the two-slash form;
+# only the ${var,,} lowercasing is a bash-4 feature). Indirect read via
+# eval on the scrubbed variable name (safe: no attacker-supplied content
+# reaches the eval).
+_alias_proxy_notice_dedup() {
+  local alias="$1" user="$2"
+  local safe="${alias//[^a-zA-Z0-9]/_}"
+  local seen_var="_ALIAS_PROXY_NOTICE_SEEN_${safe}"
+  eval "local seen=\${${seen_var}:-0}"
+  if [ "$seen" = 1 ]; then return; fi
+  eval "${seen_var}=1"
+  log "Note: ${alias} already routes via ~/.ssh/config;"
+  log "  not adding our -J ${user}@${ANL_JUMP}."
+}
+
 # ============================================================================
 # SECTION: 9. MFA / SSH MULTIPLEXING (ssh_args, ssh_reachable, ssh_mux_*)
 # ============================================================================
@@ -10656,6 +10748,16 @@ main() {
         FORCE_REINSTALL=1; export ARGO_ANYWHERE_FORCE_REINSTALL=1; shift ;;
       --no-jump)
         ARGO_ANYWHERE_NO_JUMP=1; shift ;;
+      --jump-host)
+        # D-032 (2026-07-15): override the default ANL_JUMP for THIS
+        # run. CLI-empty dies at parse (consistent with every other
+        # engine flag; direct the user to --no-jump if they meant to
+        # skip). ARGO_ANYWHERE_JUMP_HOST="" env-empty means "no jump"
+        # (matches shell convention for opt-out env vars); handled in
+        # the resolution block below main()'s argv parser.
+        [ -n "${2:-}" ] || die "--jump-host expects a value (a hostname). To skip the jump host, use --no-jump."
+        ARGO_ANYWHERE_JUMP_HOST="$2"; export ARGO_ANYWHERE_JUMP_HOST
+        shift 2 ;;
       --no-mfa)
         ARGO_ANYWHERE_NO_MFA=1; shift ;;
       --probe-nodes)
@@ -10790,6 +10892,29 @@ main() {
   # resolver, or any mode dispatch. Combined with --scope project it
   # enforces the shared forbid-list. No-op if --cwd wasn't passed.
   _apply_cwd_flag
+
+  # D-032 (2026-07-15): apply --jump-host / ARGO_ANYWHERE_JUMP_HOST
+  # override to the mutable ANL_JUMP global. Every downstream call site
+  # (~42 references; audited in notes/impl_ssh_config_native.md §2.5)
+  # reads $ANL_JUMP at call/interpolation time, so mutating the global
+  # here propagates to ssh_jump_args, the SCP branch, ssh_preflight,
+  # help text, status output, and error messages without any per-site
+  # change. Invariant: ANL_JUMP must NEVER be declared `local` or
+  # `readonly` in a function called after this block (would silently
+  # break --jump-host).
+  #
+  # CLI-empty (`--jump-host ""`) is rejected at parse time (see the
+  # argv parser's --jump-host arm). Env-empty (`ARGO_ANYWHERE_JUMP_HOST=""`)
+  # explicitly signals "no jump" (matches shell convention for opt-out
+  # env vars; distinguishable from unset via ${VAR+set}).
+  if [ "${ARGO_ANYWHERE_JUMP_HOST+set}" = "set" ]; then
+    if [ -z "$ARGO_ANYWHERE_JUMP_HOST" ]; then
+      # Explicit env-empty == no jump. Never fires via CLI (that dies).
+      ARGO_ANYWHERE_NO_JUMP=1
+    else
+      ANL_JUMP="$ARGO_ANYWHERE_JUMP_HOST"
+    fi
+  fi
 
   # --keep-orphans and --drop-orphans are mutually exclusive (and both
   # only meaningful for update-models). Reject the combination early so
