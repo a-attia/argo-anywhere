@@ -117,9 +117,17 @@ loading set for normal sessions.
   (`notes/test_plan_v3_branch.md`: package-mode `connect` reached ALL
   GREEN with hyphenated node files + dormant bootstrap). **v3.0.1**
   (version set to `3.0.1`) is on `main` — docs re-ground + README
-  screenshots (`assets/screenshots/`, via `scripts/screenshots.py` +
-  `[screenshots]` extra) + install-launcher docs — published from CI on
-  its `v3.0.1` tag. The stdlib-PTY-over-*cold*-Duo point is an
+  screenshots (`assets/screenshots/`, via `scripts/screenshots.py`,
+  regeneration tools now in the `[dev]` extra) + install-launcher docs
+  — published from CI on its `v3.0.1` tag. **Post-v3.1.0 on `main`
+  (pending tag)**: extras consolidated to a single-mode default install
+  — `fastapi` + `uvicorn` + `pywebview` are folded into `dependencies`,
+  and the old `[web]`/`[app]`/`[all]`/`[test]`/`[screenshots]` extras
+  are dropped. Only `[dev]` remains, now absorbing `rich` + `playwright`
+  so the maintainer-only screenshot regeneration path still works. Net
+  effect for users: `pipx install argo-anywhere` now delivers the web
+  UI + native app + `install-launcher` out of the box; no more
+  `argo-anywhere[app]` incantation to remember. The stdlib-PTY-over-*cold*-Duo point is an
   observed-partial (non-blocking; a warm master was reused during the
   gate). The engine's internal `SCRIPT_VERSION`
   is `2.2.1-dev` — intentionally distinct from the package version per

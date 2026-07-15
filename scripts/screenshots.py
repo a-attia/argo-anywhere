@@ -1,10 +1,11 @@
 """Regenerate the README screenshots from synthetic (scrubbed) demo data.
 
-Maintainers only. Requires the ``screenshots`` extra, plus (for ``client.png``)
-an SVG->PNG converter (``rsvg-convert`` or ImageMagick ``magick``) and (for
-``web.png``) a one-time Playwright Chromium download:
+Maintainers only. Requires the ``dev`` extra (which pulls in ``rich`` and
+``playwright``), plus (for ``client.png``) an SVG->PNG converter
+(``rsvg-convert`` or ImageMagick ``magick``) and (for ``web.png``) a one-time
+Playwright Chromium download:
 
-    pip install -e ".[screenshots]"
+    pip install -e ".[dev]"
     python -m playwright install chromium     # one-time, for the web shot
     python scripts/screenshots.py             # both shots
     python scripts/screenshots.py client      # just the client shot
@@ -327,7 +328,7 @@ def render_web() -> Path | None:
     except ModuleNotFoundError:
         print(
             "  (playwright not installed; skipping web.png. "
-            "pip install -e '.[screenshots]' && python -m playwright install chromium)",
+            "pip install -e '.[dev]' && python -m playwright install chromium)",
             file=sys.stderr,
         )
         return None

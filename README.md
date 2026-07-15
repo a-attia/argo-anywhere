@@ -75,16 +75,20 @@ The recommended install is [`pipx`](https://pipx.pypa.io/) — it puts the
 `argo-anywhere` command on your `PATH` in its own isolated environment:
 
 ```sh
-pipx install argo-anywhere            # command-line only
-pipx install 'argo-anywhere[app]'     # + the native desktop window / web UI
+pipx install argo-anywhere            # everything included -- CLI, web UI, native app
 ```
+
+That's the whole install. The FastAPI web server (`argo-anywhere web`) and the
+native desktop window (`argo-anywhere app` + the double-clickable launcher from
+`install-launcher`) are bundled in the default install — no extras to remember,
+no follow-up commands to enable the UI.
 
 Plain `pip install argo-anywhere` (ideally into a virtual environment) works
 too. Requires Python 3.10+. See [Prerequisites](#prerequisites) for the SSH /
 `jq` / laptop tooling the engine needs at run time.
 
-> **Until v3.0.0 is on PyPI**, install from the `main` branch:
-> `pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@main'`.
+> **Installing from `main` (unreleased)**:
+> `pipx install 'argo-anywhere @ git+https://github.com/a-attia/argo-anywhere@main'`.
 > See [Status](#status).
 
 Coming from a v1.x / v2.x `.sh` install? See [Upgrading](#upgrading) for the
@@ -212,18 +216,17 @@ showing ALL GREEN, the tunnels/sessions cards, and an embedded terminal.](https:
 *(The screenshot uses scrubbed demo data — no real username or credentials.)*
 
 ```sh
-pipx install 'argo-anywhere[app]'    # the [app] extra adds the native window
-
 argo-anywhere app                 # open the web UI in a native desktop window
 argo-anywhere web                 # ...or serve it to your browser
 ```
 
-These verbs are handled by the **package**; everything else passes straight
-through to the engine (see [Subcommands](#subcommands)):
+Both verbs work out of the box after `pipx install argo-anywhere` — no extras.
+They are handled by the **package**; everything else passes straight through to
+the engine (see [Subcommands](#subcommands)):
 
 | Command | What it does |
 |:--|:--|
-| `argo-anywhere app` | Open the web UI in a native desktop window (needs `[app]`; browser fallback). |
+| `argo-anywhere app` | Open the web UI in a native desktop window (browser fallback if the platform webview is unavailable). |
 | `argo-anywhere web` | Serve the web UI to your browser (loopback-only). |
 | `argo-anywhere install-launcher` | Install a double-clickable launcher (see below). |
 | `argo-anywhere info [--json]` | Local status: package + engine versions, loopback listeners, and argo-anywhere's on-disk footprint (no ANL contact). |
@@ -238,7 +241,7 @@ and restored — never argo-anywhere's to delete.
 ### A double-clickable launcher (no terminal needed)
 
 You don't have to type a command every time. After `pipx install
-'argo-anywhere[app]'`, one command installs a **persistent, double-clickable
+argo-anywhere`, one command installs a **persistent, double-clickable
 launcher** that opens the web UI:
 
 ```sh
@@ -920,7 +923,7 @@ framework's conventions.
 Set up a development environment and run the checks:
 
 ```sh
-pip install -e '.[dev]'    # package + web + pytest + ruff (or: uv pip install -e '.[dev]')
+pip install -e '.[dev]'    # package + pytest + httpx + ruff + rich + playwright (or: uv pip install -e '.[dev]')
 pytest -q                  # the package test suite (no ANL infra)
 ruff check src tests       # lint
 ```

@@ -3,10 +3,17 @@
 Pick the **one** row that matches you. Each path is 2–3 steps; everything after
 this section is reference detail you only need if something surprises you.
 
-> **Pre-release note.** v3 isn't on PyPI yet, so `pipx install argo-anywhere` will
-> work once v3.0.0 ships. **Until then**, wherever a step below says
-> `pipx install argo-anywhere`, install from the repo `main` branch:
-> `pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@main'`
+> **Installing from `main` (unreleased).** Wherever a step below says
+> `pipx install argo-anywhere`, install from the repo `main` branch instead:
+> `pipx install 'argo-anywhere @ git+https://github.com/a-attia/argo-anywhere@main'`
+>
+> **Single-mode install (post-v3.1.0).** `pipx install argo-anywhere` includes
+> the web UI (`argo-anywhere web`) and the native desktop app
+> (`argo-anywhere app`, `install-launcher`) by default. The old `[web]` /
+> `[app]` / `[all]` extras have been dropped — any old command line that
+> spells `argo-anywhere[web]` or `argo-anywhere[app]` should be simplified to
+> `argo-anywhere` (pip/pipx accept the bracket form for a while as a no-op
+> harmless request, but there is nothing extra to install).
 
 ### New to argo-anywhere
 
@@ -892,17 +899,18 @@ Requires Python 3.10+ (plus the engine's usual `bash` / `ssh` / `scp` / `curl` /
 `lsof`).
 
 ```bash
-pipx install argo-anywhere            # CLI only
-pipx install 'argo-anywhere[web]'     # + local web UI   (argo-anywhere web)
-pipx install 'argo-anywhere[app]'     # + native window  (argo-anywhere app)
+pipx install argo-anywhere            # everything -- CLI, web UI, native app
 ```
 
+That's it. Since the post-v3.1.0 single-mode install, the web UI + native
+desktop app are bundled by default; there is nothing extra to enable.
+
 Prefer `pipx` so the CLI lands on your `PATH` in its own isolated environment;
-`pip install --user` works too. Until v3.0.0 is published to PyPI, install the
-pre-release straight from the `main` branch:
+`pip install --user` works too. Installing directly from the repo `main` branch
+(pre-release):
 
 ```bash
-pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@main'
+pipx install 'argo-anywhere @ git+https://github.com/a-attia/argo-anywhere@main'
 ```
 
 ### What you do
@@ -923,18 +931,18 @@ pipx install 'argo-anywhere[app] @ git+https://github.com/a-attia/argo-anywhere@
 
 - **`argo-anywhere web`** serves a loopback-only web UI — a live channel
   monitor, a browser terminal for connecting (Duo runs in the browser), and a
-  launcher that opens your CLI tools in new native terminal windows. Needs the
-  `[web]` extra.
+  launcher that opens your CLI tools in new native terminal windows.
 - **`argo-anywhere app`** opens that same UI in a native desktop window
-  (pywebview); it falls back to your default browser if the `[app]` extra isn't
-  installed. Needs the `[app]` extra for the native window.
+  (pywebview); it falls back to your default browser if the platform's webview
+  backend can't load.
 - **`argo-anywhere install-launcher`** drops a persistent, double-clickable
   launcher so you can start the UI without a terminal: on macOS a Desktop
   `.command` + a real `argo-anywhere.app` bundle (with an app icon); on Linux a
   `.desktop` menu entry + a Desktop `.sh`. It's registered in the footprint, so
   `argo-anywhere uninstall` removes it.
 
-All three are optional — the CLI is fully usable without them.
+All three are shipped in the default install — the CLI is fully usable without
+touching them, but nothing extra is needed to enable them either.
 
 ### Why the clean break
 

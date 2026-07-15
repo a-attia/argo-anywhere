@@ -2,7 +2,9 @@
 WebSocket <-> PTY bridge round-trip -- driving the engine's ``help`` verb so no
 ANL/SSH/network is touched.
 
-Skipped entirely unless the ``[web]``/``[test]`` extras are installed.
+Uses ``pytest.importorskip("fastapi")`` at module load so the file no-ops in the
+unlikely case fastapi isn't importable (e.g. a broken install); a normal
+``pipx install argo-anywhere`` + ``pip install -e '.[dev]'`` has it.
 """
 
 from __future__ import annotations

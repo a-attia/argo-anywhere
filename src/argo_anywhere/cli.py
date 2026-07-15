@@ -4,7 +4,7 @@ Dispatch model:
 
 - **Package-level flags/verbs** handled here: ``--version``, ``--print-script``
   (the D-026 inspect-and-fork escape hatch), and ``web`` (launch the local
-  web-terminal UI; needs the ``[web]`` extra).
+  web-terminal UI).
 - **Everything else** is a bash-engine invocation and is passed through to the
   vendored engine on the user's **real terminal** (stdin/stdout/stderr
   inherited). That gives full fidelity: Duo prompts, the live monitor, and the
@@ -33,18 +33,16 @@ from ._engine import ENGINE_FILENAME, engine_bytes, engine_path, packaged_env
 _PACKAGE_ADDENDUM = f"""
 argo-anywhere (Python package) additions beyond the engine's help:
   argo-anywhere app [--port N] [--browser]
-                                 Open the web UI in a native desktop window
-                                 (needs the [app] extra: pip install
-                                 'argo-anywhere[app]'); falls back to your
-                                 browser if pywebview isn't installed.
+                                 Open the web UI in a native desktop window;
+                                 falls back to your default browser if the
+                                 platform's webview backend is unavailable.
   argo-anywhere install-launcher [--desktop] [--app-bundle]
                                  Install a double-clickable launcher for the
                                  web UI (macOS .command / .app; Linux .desktop
                                  + .sh) so you can start it without a terminal.
                                  Removed by 'argo-anywhere uninstall'.
   argo-anywhere web [--host H] [--port N] [--engine "VERB ARGS"]
-                                 Serve the local web UI (needs the [web] extra:
-                                 pip install 'argo-anywhere[web]').
+                                 Serve the local web UI on loopback.
   argo-anywhere info [--json]    Local status: package + engine versions,
                                  loopback listeners, and argo-anywhere's own
                                  on-disk footprint (no ANL contact).
@@ -301,10 +299,12 @@ def _cmd_web(args: Sequence[str]) -> int:
 
     try:
         from .web.app import serve
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as exc:
+        # fastapi + uvicorn are hard deps of the package; a ModuleNotFoundError
+        # here means the install is broken (or a maintainer stripped a dep).
         print(
-            "argo-anywhere web: the web UI needs the [web] extra.\n"
-            "  Install it with:  pip install 'argo-anywhere[web]'",
+            f"argo-anywhere web: could not import the web server ({exc}).\n"
+            "  Reinstall with:   pipx install --force argo-anywhere",
             file=sys.stderr,
         )
         return 1
@@ -489,8 +489,8 @@ def _cmd_app(args: Sequence[str]) -> int:
     """Open the web UI in a native desktop window (pywebview), server and all.
 
     Starts the web server on loopback in a background thread, then opens a native
-    window pointed at it. Falls back to the default browser if pywebview (the
-    ``[app]`` extra) isn't installed or ``--browser`` is passed.
+    window pointed at it. Falls back to the default browser if pywebview can't
+    load (missing platform webview backend) or ``--browser`` is passed.
     """
     parser = argparse.ArgumentParser(
         prog="argo-anywhere app",
@@ -508,10 +508,12 @@ def _cmd_app(args: Sequence[str]) -> int:
 
     try:
         from .web.app import create_app
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as exc:
+        # fastapi + uvicorn are hard deps of the package; a ModuleNotFoundError
+        # here means the install is broken (or a maintainer stripped a dep).
         print(
-            "argo-anywhere app: the UI needs the web server.\n"
-            "  Install it with:  pip install 'argo-anywhere[app]'",
+            f"argo-anywhere app: could not import the web server ({exc}).\n"
+            "  Reinstall with:   pipx install --force argo-anywhere",
             file=sys.stderr,
         )
         return 1
@@ -646,9 +648,11 @@ def _cmd_app(args: Sequence[str]) -> int:
             _shutdown_web(app, server, thread)
             return 0
         except ModuleNotFoundError:
+            # pywebview is a hard dep of the package, but its platform backend
+            # (Cocoa/WebKit / GTK / Qt) can still be absent on exotic systems --
+            # or a maintainer stripped the dep. Degrade to the default browser.
             print(
-                "(native window needs the [app] extra: pip install 'argo-anywhere[app]'; "
-                "opening your browser instead)",
+                "(native window unavailable on this platform; opening your browser instead)",
                 file=sys.stderr,
             )
 
@@ -724,8 +728,9 @@ def _cmd_install_launcher(args: Sequence[str]) -> int:
     for p in created:
         print(f"created: {p}")
     print(
-        "\nDouble-click it to open argo-anywhere (a native window if the [app] extra\n"
-        "is installed, otherwise your browser). Remove with 'argo-anywhere uninstall'."
+        "\nDouble-click it to open argo-anywhere (a native desktop window; falls\n"
+        "back to your default browser if the platform webview is unavailable).\n"
+        "Remove with 'argo-anywhere uninstall'."
     )
     return 0
 

@@ -12,8 +12,14 @@ web-UI rebuild (D-026..D-030): package owns the runtime, wraps the
 vendored engine, web UI + native app; CI + tag-gated OIDC publish;
 Q11 ratified in `docs/SECURITY.md`; D-028/D-030 live-test gate PASSED
 (2026-07-12). **v3.0.1** (version set to `3.0.1`) is on `main` —
-docs re-ground + README screenshots + install-launcher docs +
-`[screenshots]` tooling — published from CI on its `v3.0.1` tag.
+docs re-ground + README screenshots + install-launcher docs — published
+from CI on its `v3.0.1` tag. **Post-v3.1.0 on `main`**: extras layout
+consolidated to single-mode default install (fastapi + uvicorn +
+pywebview folded into `dependencies`; the old `[web]`/`[app]`/`[all]`/
+`[test]`/`[screenshots]` extras dropped; only `[dev]` remains, now
+absorbing `rich` + `playwright` for the maintainer-only screenshot
+regeneration). `pipx install argo-anywhere` now delivers the web UI +
+native app + `install-launcher` out of the box.
 Prior tags: **v2.2.0 (2026-05-18)** last `.sh`-era release; v2.0.0 /
 v2.1.0 (both 2026-05-15); v1.x line v1.0.0 / v1.1.0 / v1.2.0; legacy
 URLs redirect forever.
