@@ -2457,17 +2457,49 @@ handle_config_file() {
   fi
 
   warn "${desc} already exists at ${target} and differs from the proposed version."
+
+  # Compute merge-capability once, BEFORE rendering the prompt.
+  #
+  # Field-reported 2026-07-15: the [k/b/d/m/a] prompt used to be
+  # unconditional even for YAML (where the writer already merges before
+  # calling us) and for JSON without jq. Users picked [m] from muscle
+  # memory; the same function then rejected it with a `[warn]` and
+  # re-prompted, sometimes 3-4 times before they picked [k] or [b].
+  #
+  # Fix: only offer [m] when it can actually do work. YAML files
+  # NEVER get [m] here because the YAML writers (currently only
+  # write_argoproxy_config) already merge against the existing file
+  # before returning the proposed candidate -- a second merge would
+  # be a no-op or fight the writer's ownership decisions. JSON gets
+  # [m] only if jq is on PATH.
+  local allow_merge=0
+  if [[ "$target" == *.json ]] && command -v jq >/dev/null 2>&1; then
+    allow_merge=1
+  fi
+
   while :; do
-    cat >&2 <<EOF
+    if [ "$allow_merge" -eq 1 ]; then
+      cat >&2 <<EOF
 
   Choose how to handle ${target}:
     [k] keep existing (no changes)
     [b] backup existing to .bak.<timestamp>, then overwrite
     [d] show diff (existing -> proposed), then ask again
-    [m] merge: only update keys this script manages (requires jq for JSON)
+    [m] merge: only update keys this script manages (JSON via jq)
     [a] abort
 EOF
-    local choice; choice="$(ask "Your choice [k/b/d/m/a]:" "k")"
+      local choice; choice="$(ask "Your choice [k/b/d/m/a]:" "k")"
+    else
+      cat >&2 <<EOF
+
+  Choose how to handle ${target}:
+    [k] keep existing (no changes)
+    [b] backup existing to .bak.<timestamp>, then overwrite
+    [d] show diff (existing -> proposed), then ask again
+    [a] abort
+EOF
+      local choice; choice="$(ask "Your choice [k/b/d/a]:" "k")"
+    fi
     case "$choice" in
       k|K) ok "Keeping existing ${desc}."; break ;;
       b|B)
@@ -2489,17 +2521,24 @@ EOF
         fi
         ;;
       m|M)
-        if [[ "$target" == *.json ]] && command -v jq >/dev/null 2>&1; then
+        if [ "$allow_merge" -eq 1 ]; then
           # Merge: proposed values win for keys present in proposed.
           local merged; merged="$(mktemp -t argo_anywhere.XXXXXX)"
           jq -s '.[0] * .[1]' "$target" "$proposed" > "$merged"
           cp "$merged" "$target"; rm -f "$merged"
           ok "Merged proposed keys into existing ${desc}."
           break
-        elif [[ "$target" == *.yaml ]] || [[ "$target" == *.yml ]]; then
-          warn "YAML merge not supported here. Pick [b] to overwrite or [k] to keep."
         else
-          warn "Merge requires jq for JSON files. Install jq or pick another option."
+          # Muscle-memory user typed `m` even though the menu didn't
+          # advertise it. Explain why in the exact terms of THIS file
+          # so the user isn't guessing at the mismatch.
+          if [[ "$target" == *.json ]]; then
+            warn "Merge for JSON needs jq (not on PATH). Install jq or pick [k]/[b]/[d]."
+          elif [[ "$target" == *.yaml ]] || [[ "$target" == *.yml ]]; then
+            warn "Merge is not offered for YAML here (the writer already merges before this prompt). Pick [k]/[b]/[d]."
+          else
+            warn "Merge is not offered for this file type. Pick [k]/[b]/[d]."
+          fi
         fi
         ;;
       a|A) rm -f "$proposed"; trap - RETURN; die "Aborted at ${desc} step." ;;
@@ -6638,6 +6677,39 @@ ensure_argoproxy_installed() {
       || die "argo-proxy 'serve' subcommand still missing after install. Inspect ${venv}/bin/argo-proxy."
   fi
   ok "argo-proxy: $("${venv}/bin/argo-proxy" --version 2>&1 | head -n1)"
+
+  # 4) PyYAML in the venv (owned by us, not by argo-proxy).
+  # ------------------------------------------------------------------
+  # write_argoproxy_config uses PyYAML to safely merge the new config
+  # with the user's existing ~/.config/argoproxy/config.yaml so we
+  # preserve user-owned keys (argo_embedding_url, concurrent_downloads,
+  # etc.). Historically PyYAML rode in transitively via argo-proxy's
+  # own deps and the historical comment on write_argoproxy_config
+  # asserted "PyYAML is always present in the venv". Field-reported
+  # 2026-07-15 (compute-386-02, argo-proxy 3.2.2): FALSE. Both the
+  # venv python AND the system python3 lacked yaml, write_argoproxy_
+  # config fell into the M9 die-hard path, and the [k/b/d/m/a] prompt
+  # cycled with a phantom [m] the same function rejected.
+  #
+  # Make the dependency ours: probe and pip-install if missing. Small
+  # (~200 KB universal wheel; no compile) and idempotent (pip is a
+  # no-op when the dep is already satisfied). Fail path is a warn,
+  # not a die -- offline compute nodes still let the bootstrap
+  # proceed, and write_argoproxy_config's own die-hard fires only IF
+  # a merge would actually be needed (Case 1 -- no existing config --
+  # doesn't touch Python at all).
+  if ! "${venv}/bin/python" -c 'import yaml' >/dev/null 2>&1; then
+    log "PyYAML missing from ${venv}; installing (needed for safe YAML config merge)..."
+    if "${venv}/bin/pip" install --quiet pyyaml; then
+      ok "PyYAML installed in ${venv}."
+    else
+      warn "PyYAML install failed; write_argoproxy_config will fall back"
+      warn "  to the die-hard path if an existing config needs merging."
+    fi
+  fi
+  local _yaml_ver
+  _yaml_ver="$("${venv}/bin/python" -c 'import yaml;print(yaml.__version__)' 2>/dev/null || echo "unavailable")"
+  ok "PyYAML in ${venv}: ${_yaml_ver}"
 }
 
 mode_server() {
