@@ -177,6 +177,49 @@ restriction".
 
 **Roadmap**: would need ANL to change its login-shell policy.
 
+### SSH socket duplication with mixed alias/fqdn use (D-032, v3.1.0)
+
+The multiplex socket path uses the literal host string the user
+typed: `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>`. If a
+user runs `argo-anywhere --node polaris-login` in one session and
+`argo-anywhere --node compute-386-02.cels.anl.gov` in another (same
+physical host, resolved via the alias in the first run), argo
+opens two mux sockets for what is logically the same connection.
+Consequences:
+
+- Two Duo prompts across the two sessions (each socket needs its
+  own master).
+- `ssh -O check` / `stop` against one socket doesn't affect the
+  other. `argo-anywhere stop` cleans up the socket for the
+  alias/fqdn that produced the cache entry, leaving the other
+  behind until it hits its `ControlPersist` timeout.
+
+**Workaround**: pick one form per compute node (alias OR fqdn) and
+stick with it. The cache stores whatever you used first; subsequent
+runs reuse it.
+
+**Rationale**: the socket path can't be keyed on the resolved fqdn
+without a per-run `ssh -G` call (~ms overhead) on every SSH
+invocation. That's an unwarranted cost for a papercut.
+
+**Roadmap**: no runtime-detection is planned. Users who observe the
+duplication can pick a canonical form + `argo-anywhere clean` to
+wipe the stale caches.
+
+### Custom jump host (`--jump-host`) is not live-tested in CI
+
+The `--jump-host HOST` flag (D-032) sets `ANL_JUMP` for the run.
+Unit tests cover the flag's plumbing + the invariant that all 42
+`ANL_JUMP` references pick up the mutated global (grep-based tests
+in `tests/test_engine_ssh_config.py`). What's NOT covered by
+argo-anywhere's own test suite: whether the alternate jump host
+you point at can actually reach ANL compute nodes and forward the
+SSH connection through to argo-proxy. If you use `--jump-host` in
+production and hit issues, please open an issue with your setup
+(sanitised `~/.ssh/config` snippet + the `-vvv` output of a manual
+`ssh -J <user>@<your-jump-host> <user>@<compute-node>`) so we can
+extend the live-verification guide (`docs/TESTING.md`).
+
 ## CLI surface
 
 ### Filename-based per-tool selection has been removed

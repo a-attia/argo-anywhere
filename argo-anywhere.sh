@@ -10178,7 +10178,8 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [SUBCOMMAND] [--cli-tool NAME]
                           [--user NAME] [--node HOST] [--port N]
-                          [--no-jump] [--no-mfa] [--probe-nodes]
+                          [--no-jump] [--jump-host HOST] [--no-mfa]
+                          [--probe-nodes]
                           [--auto-port] [--port-range LO-HI]
                           [--scope project|global]
                           [--verbose-server]
@@ -10329,9 +10330,26 @@ Options:
                        Canonical env: ARGO_ANYWHERE_PORT.
   --no-jump            Skip the jump host (${ANL_JUMP}); SSH directly
                        to the compute node. Useful when you're on the ANL
-                       network or your ~/.ssh/config already inserts a
-                       ProxyJump for cels.anl.gov hosts.
-                       Canonical env: ARGO_ANYWHERE_NO_JUMP=1.
+                       network. If your ~/.ssh/config already routes
+                       your alias via its own ProxyJump/ProxyCommand,
+                       argo-anywhere detects that automatically and
+                       skips its own -J (see --jump-host below); you
+                       do NOT need --no-jump for the ssh_config-alias
+                       case. Canonical env: ARGO_ANYWHERE_NO_JUMP=1.
+  --jump-host HOST     Point our SSH ProxyJump at HOST instead of the
+                       default ${ANL_JUMP} for THIS run. Useful for
+                       users on a non-CELS jump host (say, a personal
+                       bastion or a different ANL entry point). If
+                       your ~/.ssh/config for the target alias already
+                       specifies a ProxyJump, argo-anywhere defers to
+                       that and skips its own -J entirely -- --jump-host
+                       is for the cohort that doesn't have a mature
+                       ssh_config but needs a non-default jump.
+                       Canonical env: ARGO_ANYWHERE_JUMP_HOST=HOST.
+                       Env-empty (ARGO_ANYWHERE_JUMP_HOST="") is
+                       equivalent to --no-jump. CLI-empty
+                       (--jump-host "") is rejected at parse -- use
+                       --no-jump for the "skip jump host" intent.
   --no-mfa             Disable Duo/MFA-aware behavior (SSH multiplexing).
                        The script defaults to MFA mode because all CELS access
                        is Duo-protected. Use --no-mfa for hosts that don't
@@ -10667,6 +10685,8 @@ Canonical (preferred):
   ARGO_ANYWHERE_NODE             compute node hostname (alternative to --node)
   ARGO_ANYWHERE_PORT             port (alternative to --port)
   ARGO_ANYWHERE_NO_JUMP=1        skip the jump host (alternative to --no-jump)
+  ARGO_ANYWHERE_JUMP_HOST=HOST   override the default jump host (alt. to
+                                 --jump-host); empty string == --no-jump
   ARGO_ANYWHERE_NO_MFA=1         disable SSH multiplexing (--no-mfa)
   ARGO_ANYWHERE_CONTROL_PERSIST=N seconds the SSH master stays after the last
                                  client disconnects (default 3600 = 1 hour;

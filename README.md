@@ -545,6 +545,63 @@ names, producing two different socket paths for one logical connection. See
 
 Turn this off for non-Duo hosts with `--no-mfa` or `ARGO_ANYWHERE_NO_MFA=1`.
 
+### Using your own `~/.ssh/config` route (D-032, v3.1.0+)
+
+If your `~/.ssh/config` already routes ANL compute nodes for you (an
+alias with `HostName`, `User`, and its own on/off-site
+`ProxyJump`/`ProxyCommand`), pass the alias to `--node` and argo-anywhere
+"just works" — no `--user`, no `--no-jump`:
+
+```sh
+# ~/.ssh/config (already works for `ssh polaris-login`):
+#   Host polaris-login
+#       HostName compute-XX.cels.anl.gov
+#       User <ANL-username>
+#       Match exec "on-anl-network"   # your own on/off-site logic
+#           ProxyCommand none
+#       Match !exec "on-anl-network"
+#           ProxyJump <ANL-username>@logins.cels.anl.gov
+
+argo-anywhere --cli-tool opencode client --node polaris-login
+```
+
+Three things happen automatically:
+
+1. **Alias acceptance** — `pick_node` recognises that the string
+   resolves via `ssh -G` and emits a helpful `Note: 'polaris-login'
+   is an ssh_config alias (resolves to compute-XX.cels.anl.gov);
+   proceeding via ~/.ssh/config` instead of the generic "not in
+   ANL_NODES" warn.
+2. **Username inference** — `resolve_username` reads the alias's
+   `User <name>` line and uses it, logging the source
+   (`Using ANL username: <ANL-username> (source: ssh-config:polaris-login)`).
+   Explicit `--user` / `ARGO_ANYWHERE_USER` still wins if you set it.
+3. **ProxyJump deference** — `ssh_jump_args` detects the alias's own
+   ProxyJump and **skips** its own `-J`, preventing both a redundant
+   hop and the jump-loop error that would otherwise fail
+   `ssh_reachable`.
+
+Values inferred from ssh_config are **never persisted** to
+`~/.config/argo_anywhere/user` — the cache remains write-only from
+explicit actions (flag / prompt). Change your ssh_config later and the
+inference tracks it.
+
+### Custom jump host (`--jump-host`)
+
+If you don't have a mature `~/.ssh/config` but need a jump host other
+than the default `logins.cels.anl.gov`, use `--jump-host HOST` or set
+`ARGO_ANYWHERE_JUMP_HOST=HOST`:
+
+```sh
+argo-anywhere --jump-host alt-jump.example.org --cli-tool opencode client
+# ... or persistently in your shell rc:
+export ARGO_ANYWHERE_JUMP_HOST=alt-jump.example.org
+```
+
+An empty `ARGO_ANYWHERE_JUMP_HOST=""` env is equivalent to `--no-jump`.
+The CLI form `--jump-host ""` is a parse-error — use `--no-jump` for
+the "skip jump host entirely" intent.
+
 ## Running on a compute node
 
 The default `client` flow assumes you run from a laptop *outside* the ANL

@@ -127,7 +127,20 @@ loading set for normal sessions.
   so the maintainer-only screenshot regeneration path still works. Net
   effect for users: `pipx install argo-anywhere` now delivers the web
   UI + native app + `install-launcher` out of the box; no more
-  `argo-anywhere[app]` incantation to remember. The stdlib-PTY-over-*cold*-Duo point is an
+  `argo-anywhere[app]` incantation to remember. **Also on `main`
+  post-v3.1.0**: PyYAML self-heal in the argo-proxy venv (`ensure_
+  argoproxy_installed` now probes + installs, replacing the "argo-proxy
+  pulls it transitively" assumption that got falsified in a 2026-07-15
+  field report on `compute-386-02`) + `handle_config_file`'s `[k/b/d/m/a]`
+  prompt only offers `[m]` when merge can actually work (YAML never;
+  JSON only when `jq` is on PATH); AND D-032 native `~/.ssh/config`
+  respect (new engine helpers `_ssh_config_hostname` /
+  `_ssh_config_user` / `_alias_has_own_proxy`; refactored
+  `resolve_username` to a globals-based API that separates value-
+  resolution from cache-persistence per plan §7 A7 / E3; new
+  `--jump-host HOST` / `ARGO_ANYWHERE_JUMP_HOST` for custom jump hosts;
+  every existing invocation continues to behave identically —
+  ssh-config path activates only when there is one to consult). The stdlib-PTY-over-*cold*-Duo point is an
   observed-partial (non-blocking; a warm master was reused during the
   gate). The engine's internal `SCRIPT_VERSION`
   is `2.2.1-dev` — intentionally distinct from the package version per
@@ -472,6 +485,50 @@ NODE, not the jump host. `mode_client` reorders pick-node before
 preflight under MFA. **Do not** try to
 `ssh -O ... <user>@logins.cels.anl.gov true` — it always fails.
 
+### Jump-host resolution (D-032, v3.1.0)
+
+`ANL_JUMP` is a **mutable script global**, not a `readonly` constant.
+Resolution precedence at `main()` (post-argv, pre-mode-dispatch):
+
+1. `--no-jump` on CLI (or `ARGO_ANYWHERE_NO_JUMP=1` env) → skip the
+   jump host entirely; `ssh_jump_args` returns empty.
+2. `--jump-host HOST` on CLI → `ANL_JUMP=HOST` for THIS run.
+3. `ARGO_ANYWHERE_JUMP_HOST=HOST` env → `ANL_JUMP=HOST` (flag beats
+   env; both were parsed by the argv arm which exports the env var).
+4. `ARGO_ANYWHERE_JUMP_HOST=""` env (explicitly empty) → treated as
+   `--no-jump` (matches shell convention for opt-out env vars;
+   distinguishable from unset via `${VAR+set}`).
+5. Per-target `~/.ssh/config` `ProxyJump`/`ProxyCommand` on the alias
+   → `ssh_jump_args` detects via `_alias_has_own_proxy` and skips
+   our `-J` even when steps 1-4 didn't fire, deferring to the
+   alias's own routing. Notice deduped per-alias-per-invocation
+   via `_alias_proxy_notice_dedup`.
+6. Default: `ANL_JUMP="logins.cels.anl.gov"` (declared in Section 5).
+
+**Load-bearing invariant**: `ANL_JUMP` must NEVER be declared
+`local` or `readonly` inside a function called after step 2/3
+mutates it. All 42 existing `ANL_JUMP` references read `$ANL_JUMP`
+at call/interpolation time, so mutating the global here propagates
+to `ssh_jump_args`, the SCP branch, `ssh_preflight`, the status
+card, help text, error messages, and every template `ssh -J
+<user>@${ANL_JUMP} ...` command in the docs — without any per-site
+change. Two grep-based invariant tests in
+`tests/test_engine_ssh_config.py` (`test_no_local_ANL_JUMP_shadow`
++ `test_ANL_JUMP_readers_use_expansion`) protect this contract from
+a future refactor.
+
+Username inference (D-032 Sub-fix B): `resolve_username` consults
+`ssh -G` for `ARGO_ANYWHERE_NODE` then `ANL_JUMP` between the
+env-check and the cache-check. Values inferred this way are NEVER
+persisted to `USER_CACHE` (the cache remains write-only-from-
+explicit-actions per plan §7 E3); prompted values still get cached
+as before. The refactor split `resolve_username` (which now sets
+globals `_USERNAME_RESULT`, `_USERNAME_SOURCE`,
+`_USERNAME_SHOULD_CACHE`) from a new `_persist_username_cache`
+helper the caller invokes conditionally. **Callers MUST NOT** use
+`$(resolve_username)` command substitution — the subshell drops
+the globals (D-005 pattern).
+
 ### Mux master holds tunnels alive
 
 Under `ControlMaster=auto`, a foreground `ssh -N -L` may exit
@@ -516,6 +573,7 @@ Canonical names:
 - `ARGO_ANYWHERE_NODE`
 - `ARGO_ANYWHERE_PORT`
 - `ARGO_ANYWHERE_NO_JUMP`
+- `ARGO_ANYWHERE_JUMP_HOST` (D-032; empty string == `--no-jump`)
 - `ARGO_ANYWHERE_NO_MFA`
 - `ARGO_ANYWHERE_FORCE_REINSTALL`
 - `ARGO_ANYWHERE_SHOW_MODELS`

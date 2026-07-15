@@ -58,6 +58,18 @@ state migration. `pipx upgrade argo-anywhere` is the whole procedure.
   and suggests the next port. Bypass with `--force`. Also useful when
   running a dev-mode instance alongside the pipx-installed one:
   `PYTHONPATH=src python -m argo_anywhere web --port 8800`.
+- **Native `~/.ssh/config` respect** ([D-032](../PLAN.md)). If
+  `ssh <alias>` works for your ANL nodes, `argo-anywhere --node <alias>`
+  works too — username is inferred from your ssh_config (unless you
+  override with `--user`), and our SSH `-J` is skipped when the alias
+  already routes via its own ProxyJump/ProxyCommand (preventing the
+  jump-loop error). New `--jump-host HOST` /
+  `ARGO_ANYWHERE_JUMP_HOST=HOST` for the cohort that needs a
+  non-default jump host without a mature ssh_config. If you hit issues
+  with `--jump-host` in production, please open an issue with your
+  setup so we can extend the live-verification guide. See
+  [README "Using your own `~/.ssh/config` route"](../README.md#using-your-own-sshconfig-route-d-032-v310)
+  for the walkthrough.
 
 ### Coming from v2.x (you ran `bash argo-anywhere.sh …` or `curl … .sh`)
 

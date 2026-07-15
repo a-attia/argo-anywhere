@@ -19,7 +19,14 @@ pywebview folded into `dependencies`; the old `[web]`/`[app]`/`[all]`/
 `[test]`/`[screenshots]` extras dropped; only `[dev]` remains, now
 absorbing `rich` + `playwright` for the maintainer-only screenshot
 regeneration). `pipx install argo-anywhere` now delivers the web UI +
-native app + `install-launcher` out of the box.
+native app + `install-launcher` out of the box. **Also on `main`
+post-v3.1.0**: PyYAML self-heal in `ensure_argoproxy_installed` +
+`handle_config_file`'s `[m]` menu accuracy fix (both triggered by a
+2026-07-15 field report); AND D-032 native `~/.ssh/config` respect
+(new engine helpers + refactored `resolve_username` + `--jump-host` /
+`ARGO_ANYWHERE_JUMP_HOST` — every existing invocation continues to
+behave identically; ssh-config path activates only when there is one
+to consult).
 Prior tags: **v2.2.0 (2026-05-18)** last `.sh`-era release; v2.0.0 /
 v2.1.0 (both 2026-05-15); v1.x line v1.0.0 / v1.1.0 / v1.2.0; legacy
 URLs redirect forever.
@@ -1984,6 +1991,103 @@ D-020 (port-as-transport-state); D-021 (cross-client coherence);
 D-024 (connect/configure/run split — this decision is the
 web-UI teaching of that split); D-026..D-030 (Python package
 + web UI foundation — this decision is the natural next step).
+
+### D-032 — Native `~/.ssh/config` respect (engine + web UI) (2026-07-15 [v3.1.0-in-progress])
+
+**Decision.** argo-anywhere resolves per-target ssh_config via
+`ssh -G <alias>` and uses the results as fallback signals for
+(a) hostname acceptance in `--node`, (b) username inference in
+`resolve_username`, and (c) suppression of our
+`-J <user>@<jump>` when the alias defines its own
+`ProxyJump`/`ProxyCommand`. The `logins.cels.anl.gov` default
+remains; users override via `--jump-host HOST` /
+`ARGO_ANYWHERE_JUMP_HOST`.
+
+**Rationale.** Many ANL users maintain `~/.ssh/config` blocks
+that handle on-site vs. off-site routing themselves; `ssh
+<alias>` "just works" for them and `argo-anywhere --node
+<alias>` should too. Pre-D-032, our unconditional
+`-J logins.cels.anl.gov` on top of the alias's own ProxyJump
+either duplicated a hop or triggered a jump-loop error and
+`ssh_reachable` failed. Preserves the ANL-Duo-plus-argo-proxy
+assumption; does not generalize the engine to non-ANL
+environments (see [`notes/impl_ssh_config_native.md`](../notes/impl_ssh_config_native.md)
+§7 E4 for the rejected alternative).
+
+**Contract.**
+
+- **Engine (Track E; commits C1-C3)**: three new helpers in
+  Section 8 (`_ssh_config_hostname`, `_ssh_config_user`,
+  `_alias_has_own_proxy`) + a dedup helper
+  (`_alias_proxy_notice_dedup`). `ssh_jump_args` and the SCP
+  branch check `_alias_has_own_proxy` and skip our `-J` when
+  the alias routes itself. `pick_node`'s "not in ANL_NODES"
+  warn upgrades to a helpful log line when the string is an
+  ssh_config alias. `resolve_username` refactored to
+  set globals (`_USERNAME_RESULT` + `_USERNAME_SOURCE` +
+  `_USERNAME_SHOULD_CACHE`) instead of echoing; callers must NOT
+  use `$(...)` capture (D-005 pattern). ssh-config-inferred
+  usernames are NEVER cached (cache is write-only-from-explicit-
+  actions per E3). New `--jump-host HOST` /
+  `ARGO_ANYWHERE_JUMP_HOST=HOST` at the CLI + env layer;
+  CLI-empty is a parse error, env-empty means `--no-jump`
+  (matches shell convention for opt-out env vars).
+
+- **Web UI (Track W; commits C4-C6)**: launcher popover gains
+  three new fields (`compute node` / `ANL username` /
+  `jump-host`) with `_SAFE_TOKEN` validation; a
+  `/api/ssh-hosts` endpoint (pure file parse; never calls
+  `ssh`) populates a datalist alias picker with a refresh
+  button; a `/api/preview-launch` endpoint runs `ssh -G` (2s
+  timeout, non-authenticating) and returns a resolved-launch
+  preview with divergence detection. The preview panel is
+  collapsed by default and auto-expands on divergence with an
+  amber "review before launch" summary chip.
+
+**Tri-lockstep coupling requirement** (recorded in AGENTS.md's
+"Engine ↔ web-UI coupling rules" subsection, added in C6):
+any rename of the three new engine flags (`--node`,
+`--user`, `--jump-host`), the three new engine helpers
+(`_ssh_config_hostname`, `_ssh_config_user`,
+`_alias_has_own_proxy`), or the Python reflection
+`_reflect_our_jump_args` MUST land in the same commit as the
+corresponding launcher popover field / API-shape update.
+
+**IP-block safety.** `ssh -G` is non-authenticating by design
+— no network I/O, no Duo prompts, no interaction with the
+D-012 SSH failure tracker. Both `/api/ssh-hosts` (pure file
+parse) and `/api/preview-launch` (`ssh -G` only, 2s timeout
+against the user's own `Match exec` blocks) are IP-block-safe
+by construction. Documented in `notes/impl_ssh_config_native.md`
+§7 C1/C3/C5 and §10.3/§10.4.
+
+**Load-bearing invariant.** `ANL_JUMP` is a **mutable script
+global**, not a `readonly` constant. All 42 existing
+references read `$ANL_JUMP` at call/interpolation time, so
+mutating the global in `main()`'s resolution block propagates
+to every downstream site without a per-site change. Two
+grep-based invariant tests in
+`tests/test_engine_ssh_config.py`
+(`test_no_local_ANL_JUMP_shadow` +
+`test_ANL_JUMP_readers_use_expansion`) protect this contract
+from a future refactor.
+
+**Live-verification scope.** Scenario X (`--node <alias>` end-
+to-end via real SSH+Duo) is in the consolidated
+`notes/test_plan_v3_1_0.md`. Scenario Y (custom `--jump-host`
+against a real alternate bastion) was DROPPED per §8 Q6
+decision — replaced by the grep-based invariants above +
+`test_jump_host_override`. Users hitting real `--jump-host`
+issues are invited via `docs/UPGRADING.md` to open an issue
+with their setup.
+
+**Related decisions.** D-005 ($()-capture-of-globals-mutator
+pattern; underpins the resolve_username refactor). D-012 (SSH
+failure tracker; verified untouched by ssh-config work). D-020
+(port-as-transport-state; the ANL_JUMP-as-mutable-global
+pattern here mirrors that). D-031 (web-UI launcher and its
+scope-values coupling rule; D-032's tri-lockstep is the
+extension of the same coupling discipline).
 
 ---
 
