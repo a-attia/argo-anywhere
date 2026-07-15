@@ -780,12 +780,22 @@ helpers). `ensure_argoproxy_installed` is the shared install primitive
   subscription) > else global (convenience for fresh installs). For
   opencode, default is global (no OAuth state to preserve; opencode is
   global-only until B1b adds project support).
-- **Engine ↔ web-UI scope coupling rule (D-031)**: any change to a
-  tool's `<name>_scope_values()` function in the engine (adding /
+- **Engine ↔ web-UI coupling**: see the dedicated `### Engine ↔
+  web-UI coupling rules` subsection below (moved out of this bullet
+  post-D-032 so all coupling rules live in one place).
+
+### Engine ↔ web-UI coupling rules
+
+Any change on one side of these coupled surfaces requires a matching
+change on the other in the SAME commit. No automated enforcement
+except where noted (a couple of grep-based invariant tests exist);
+reviewers verify by grep or the mirror-test suite.
+
+- **D-031 scope-values (2026-07-13)**: any change to a tool's
+  `<name>_scope_values()` function in the engine (adding /
   removing / renaming a legal scope value) MUST update the web UI's
   `lScope` `<select>` options in `src/argo_anywhere/web/static/index.html`
-  in the same commit. The two are loosely coupled by convention (no
-  automated check) because the web UI dropdown is a closed-vocabulary
+  in the same commit. The web UI dropdown is a closed-vocabulary
   UI whose values must match the per-tool engine vocabulary exactly.
   A mismatch would either hide a legal value from web users
   (dropdown missing) or ship a value the engine rejects (dropdown
@@ -793,6 +803,67 @@ helpers). `ensure_argoproxy_installed` is the shared install primitive
   `<name>_scope_values` in both files. Also update `PLAN.md`'s
   D-031 (if the change is substantive) and `notes/impl_launcher_cwd.md`
   §6.1 wording (if the field's default logic changes).
+
+- **D-032 ssh-config surface (2026-07-15)**: **tri-lockstep**
+  contract across three coupled surfaces:
+
+    1. **Engine CLI flags** (`--node` / `--user` / `--jump-host` /
+       `--no-jump`) ↔ **launcher popover field names + IDs**
+       (`lNode` / `lUser` / `lJump` / `lNoJump`) in
+       `src/argo_anywhere/web/static/index.html` ↔
+       **`build_launch_argv` kwargs** (`node` / `user` /
+       `jump_host` / `no_jump`) in `src/argo_anywhere/web/app.py`.
+       Renaming any one of the four flags requires all three
+       surfaces to move in the same commit.
+
+    2. **Engine helpers** (`_ssh_config_hostname` /
+       `_ssh_config_user` / `_alias_has_own_proxy` /
+       `_alias_proxy_notice_dedup` in Section 8 of the engine) ↔
+       **Python mirror** (`argo_anywhere.web.preview.reflect_jump_args`
+       + `SshGResult.has_own_proxy`) in
+       `src/argo_anywhere/web/preview.py`. The mirror reflects
+       the engine's ssh_jump_args decision back to the launcher's
+       preview panel; if the two disagree, the panel lies about
+       what argo will do at Launch. Enforced by
+       `tests/test_preview_launch.py::test_reflect_jump_args_matches_engine`
+       — a byte-equivalent-mirror test using the same stub-ssh
+       fixture on both sides.
+
+    3. **`ANL_JUMP` mutability contract** (engine's `main()`
+       resolution block) ↔ **`/api/preview-launch` response
+       shape** — both must reflect the resolved jump host, not
+       the compile-time default. Protected by
+       `tests/test_engine_ssh_config.py::test_no_local_ANL_JUMP_shadow`
+       + `test_ANL_JUMP_readers_use_expansion` (grep-based
+       invariants that fail if a future refactor `local`-shadows
+       `ANL_JUMP` or introduces an assignment outside the two
+       known sites).
+
+  Additional reviewer checks:
+
+  * `grep -n '_SAFE_HOSTLIKE\|_SAFE_TOKEN' src/argo_anywhere/web/`
+    — the two regexes have distinct purposes (`_SAFE_TOKEN` for
+    cli-tool + scope tokens; `_SAFE_HOSTLIKE` for hostnames +
+    usernames + jump-hosts). Any tightening of either must
+    preserve the coverage of legitimate real-world inputs.
+  * `grep -n 'ssh_jump_args\|reflect_jump_args' src/argo_anywhere/`
+    — the two implementations must produce byte-equivalent argv
+    fragments; adding a new decision branch to one requires the
+    other to gain the same branch in the same commit.
+
+- **IP-block safety contract** (D-032, cross-cutting): the web
+  endpoints `/api/ssh-hosts` and `/api/preview-launch` MUST NOT
+  authenticate against any SSH server. `/api/ssh-hosts` is a pure
+  file parse (never calls `ssh`); `/api/preview-launch` calls only
+  `ssh -G <alias>` (non-authenticating; 2s timeout). Enforced by:
+  * `tests/test_ssh_hosts.py::test_module_source_never_calls_ssh`
+    (grep-based invariant: no `subprocess.` / `os.system` / etc.
+    in `src/argo_anywhere/web/ssh_hosts.py`).
+  * `tests/test_preview_launch.py::test_api_preview_ssh_never_authenticates`
+    (verifies `subprocess.run` is called with an argv list, not
+    `shell=True`, and with `timeout <= 2.0`).
+  Any endpoint addition that touches SSH MUST document its IP-block
+  safety story in this bullet AND add a matching invariant test.
 
 ### Launcher cwd handling: D-031 (v3.1.0)
 

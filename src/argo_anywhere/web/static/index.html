@@ -216,6 +216,9 @@
     .m-badge.prov-gemini   { color: #4285f4; border-color: color-mix(in srgb, #4285f4 40%, transparent); }
     .m-badge.oc-yes  { color: var(--up); border-color: color-mix(in srgb, var(--up) 45%, transparent); }
     .m-badge.oc-orph { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+    /* D-032 (2026-07-15): resolved-launch preview panel styling. */
+    #previewSummary.summary-warn { color: var(--warn); font-weight: 600; }
+    #launchPreview .div-warn { color: var(--warn); font-weight: 600; }
     .models-note { font-size: 10.5px; color: var(--ink-faint); padding: 4px 6px 2px;
                    border-left: 2px solid var(--line); margin: 6px 0; }
     .models-counts { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim);
@@ -488,6 +491,16 @@
             <span class="pop-note" style="margin-top:4px">use for on-network direct SSH; empty jump-host field means auto, not skip</span>
           </div>
         </div>
+      </details>
+      <!-- D-032 (2026-07-15) resolved-launch preview panel. Collapsed by
+           default per §8 Q10; auto-expands on divergence with an amber
+           "Divergence -- review before launch" summary chip. Populated by
+           /api/preview-launch (debounced 750ms per §8 Q12; ssh -G is
+           non-authenticating so no Duo/IP-block risk per §7 W3/C5). -->
+      <details id="previewPanel" class="preview-panel" style="margin-top:8px">
+        <summary id="previewSummary" style="cursor:pointer">Show resolved launch</summary>
+        <div id="launchPreview" aria-live="polite"
+             style="margin-top:8px; font-family: monospace; white-space: pre-wrap;"></div>
       </details>
       <div class="pop-actions">
         <button id="doLaunch" class="btn btn-primary">Launch</button>
@@ -1534,6 +1547,135 @@
       } catch (e) { /* silent -- no aliases is a legitimate state */ }
     }
     el('refreshNodeHosts').addEventListener('click', () => refreshNodeHosts(true));
+
+    // D-032 resolved-launch preview panel (C6). Fires on every launcher-field
+    // change with 750ms debounce (§8 Q12; ssh -G is non-authenticating so
+    // no Duo/IP-block risk regardless of firing rate). Auto-expands on
+    // divergence with an amber "review before launch" summary chip (§8 Q10).
+    let previewCtrl = null;
+    async function refreshPreview() {
+      if (previewCtrl) previewCtrl.abort();
+      previewCtrl = new AbortController();
+      const body = {
+        node: el('lNode').value.trim(),
+        user: el('lUser').value.trim(),
+        jump_host: el('lJump').value.trim(),
+        no_jump: el('lNoJump').checked,
+      };
+      try {
+        const r = await fetch('/api/preview-launch', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: previewCtrl.signal,
+        });
+        if (!r.ok) {
+          // Server-side validation rejected the input (e.g. shell metachars).
+          // Show the error in the preview area; don't auto-expand.
+          const err = await r.json().catch(() => ({}));
+          el('launchPreview').textContent = err.error || 'preview unavailable';
+          return;
+        }
+        const data = await r.json();
+        renderPreview(data);
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          // Silent -- preview is best-effort.
+        }
+      }
+    }
+    function renderPreview(data) {
+      const target = el('launchPreview');
+      const panel = el('previewPanel');
+      const summary = el('previewSummary');
+      // Clear divergence styling by default.
+      summary.classList.remove('summary-warn');
+      summary.textContent = 'Show resolved launch';
+      if (data.state === 'empty') {
+        target.textContent = 'No cached identity yet. Type a compute node above to preview.';
+        return;
+      }
+      if (data.state === 'cached') {
+        const h = data.hostname || {}, u = data.user || {}, p = data.proxyjump || {};
+        target.innerHTML =
+          `Node:      ${_escHtml(h.value || '(unset)')} (source: ${_escHtml(h.source)})\n` +
+          `User:      ${_escHtml(u.value || '(unset)')} (source: ${_escHtml(u.source)})\n` +
+          `Jump host: ${_escHtml(p.value)} (source: ${_escHtml(p.source)})\n` +
+          `\n(edit any field above to preview a specific launch)`;
+        return;
+      }
+      if (data.state === 'partial') {
+        target.textContent = 'Enter a compute node (top field) to see the resolved launch.';
+        return;
+      }
+      if (data.state === 'unresolved') {
+        target.textContent =
+          `ssh -G could not resolve this alias / hostname on the local machine.\n` +
+          `argo will still try -- but the alias-specific behaviors (user inference,\n` +
+          `ProxyJump skip) won't apply.`;
+        return;
+      }
+      // state === 'resolved'
+      const divs = data.divergences || [];
+      const divByField = {};
+      for (const d of divs) { divByField[d.field] = d; }
+      const lines = [];
+      const nodeInput = el('lNode').value.trim();
+      lines.push(`Node:      ${_escHtml(nodeInput)} → ${_escHtml(data.hostname || '(unresolved)')}`);
+      const userLine = divByField.user
+        ? `<span class="div-warn">User:      ${_escHtml(divByField.user.yours)}  ⚠  ssh_config says ${_escHtml(divByField.user.ssh_config)}</span>`
+        : `User:      ${_escHtml(data.user || '(from cache / prompt at runtime)')}`;
+      lines.push(userLine);
+      const pj = data.proxyjump || '';
+      let jumpLine;
+      if (pj === 'none') {
+        jumpLine = `Jump host: (ProxyJump=none in ssh_config; argo will not add its own)`;
+      } else if (pj) {
+        jumpLine = divByField.jump_host
+          ? `<span class="div-warn">Jump host: ${_escHtml(divByField.jump_host.yours)}  ⚠  ssh_config says ${_escHtml(divByField.jump_host.ssh_config)}</span>`
+          : `Jump host: (routed via your ssh_config: ${_escHtml(pj)}; argo will not add its own)`;
+      } else {
+        jumpLine = `Jump host: (default: logins.cels.anl.gov; argo adds its own -J)`;
+      }
+      lines.push(jumpLine);
+      const extras = data.our_extra_jump_args || [];
+      if (extras.length === 0) {
+        lines.push(``);
+        lines.push(`(argo will NOT add an extra -J; ssh_config's own routing takes over)`);
+      } else {
+        lines.push(``);
+        lines.push(`argo will add: ${_escHtml(extras.join(' '))}`);
+      }
+      target.innerHTML = lines.join('\n');
+      // Auto-expand on divergence.
+      if (divs.length > 0) {
+        panel.open = true;
+        summary.textContent = '⚠ Divergence — review before launch';
+        summary.classList.add('summary-warn');
+      }
+      // Note: don't force-collapse. Respect the user if they had it open.
+    }
+    // Debounce with abort. 750ms per §8 Q12.
+    function _debounce(fn, ms) {
+      let t = null;
+      return function debounced() {
+        if (t) clearTimeout(t);
+        t = setTimeout(fn, ms);
+      };
+    }
+    const _debouncedPreview = _debounce(refreshPreview, 750);
+    for (const id of ['lNode', 'lUser', 'lJump']) {
+      el(id).addEventListener('input', _debouncedPreview);
+    }
+    el('lNoJump').addEventListener('change', _debouncedPreview);
+    // Also fire once when the popover opens so the panel isn't blank.
+    // The launcher already has a "openLaunch" or "showLaunch" trigger --
+    // hook into whatever opens the popover. For simplicity, fire when the
+    // preview panel's summary is clicked (user showing intent to see it).
+    el('previewSummary').addEventListener('click', () => {
+      // Small delay so the toggle animation isn't jarring.
+      setTimeout(refreshPreview, 50);
+    });
 
     // ---- boot: monitor only; no auto-connect ----------------------------
     setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);

@@ -447,6 +447,133 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             "default": default_terminal(),
         })
 
+    @app.post("/api/preview-launch")
+    def api_preview_launch(payload: dict) -> JSONResponse:
+        """D-032 (2026-07-15): reflect back what argo WOULD run given the
+        launcher popover's current inputs.
+
+        Purely reflective -- no SSH connection is attempted.
+        ``ssh -G`` is non-authenticating; 2s timeout guards against
+        user-config Match-exec hangs. See src/argo_anywhere/web/preview.py
+        for the full security contract.
+
+        Request body: ``{node, user, jump_host, no_jump}`` (all optional).
+        Response shape:
+          * ``{"state": "cached", <field>: {"value": ..., "source": ...}, ...}``
+            when all inputs are empty AND caches exist (pre-Launch reassurance).
+          * ``{"state": "empty"}`` when all inputs are empty AND no caches.
+          * ``{"state": "partial", ...}`` when some inputs given but no node.
+          * ``{"state": "unresolved"}`` when node given but ssh -G failed.
+          * ``{"state": "resolved", "hostname": ..., "user": ...,
+             "proxyjump": ..., "our_extra_jump_args": [...],
+             "divergences": [...]}``: full resolution.
+        """
+        from .preview import (
+            DEFAULT_ANL_JUMP,
+            reflect_jump_args,
+            run_ssh_G,
+        )
+
+        node = (payload.get("node") or "").strip()
+        user = (payload.get("user") or "").strip()
+        jump_host = (payload.get("jump_host") or "").strip()
+        no_jump = bool(payload.get("no_jump"))
+
+        # Server-side validation (per §7 C6 audit): reject anything with
+        # shell-hostile chars before ssh -G sees it. Defense-in-depth --
+        # subprocess.run with a list is injection-safe by construction,
+        # but hygiene says validate first.
+        for name, val in (("node", node), ("user", user),
+                          ("jump_host", jump_host)):
+            if val and not _SAFE_HOSTLIKE.match(val):
+                return JSONResponse(
+                    {"error": f"bad {name}: contains disallowed characters"},
+                    status_code=400,
+                )
+
+        # W13: empty inputs -> show cached defaults (or "empty" if no cache).
+        if not node and not user and not jump_host and not no_jump:
+            from ..status import STATE_DIR
+
+            cached_node = ""
+            cached_user = ""
+            try:
+                cached_node = (STATE_DIR / "node").read_text().strip()
+            except OSError:
+                pass
+            try:
+                cached_user = (STATE_DIR / "user").read_text().strip()
+            except OSError:
+                pass
+            if cached_node or cached_user:
+                return JSONResponse({
+                    "state": "cached",
+                    "hostname": {"value": cached_node, "source": "cache" if cached_node else "unset"},
+                    "user": {"value": cached_user, "source": "cache" if cached_user else "unset"},
+                    "proxyjump": {"value": DEFAULT_ANL_JUMP, "source": "default"},
+                })
+            return JSONResponse({"state": "empty"})
+
+        # W13: partial input (username or jump-host but no node) -> can't
+        # ssh -G without a target; return what we have.
+        if not node:
+            return JSONResponse({
+                "state": "partial",
+                "user": {"value": user, "source": "input"} if user else None,
+                "jump_host": {"value": jump_host, "source": "input"} if jump_host else None,
+                "no_jump": no_jump,
+            })
+
+        # Resolve via ssh -G. Returns None on timeout / non-zero exit / bad
+        # input -- collapse all failure modes to "unresolved" (never leak
+        # stderr to the response, per §7 W3).
+        result = run_ssh_G(node)
+        if result is None:
+            return JSONResponse({"state": "unresolved"})
+
+        # Divergence detection: user's explicit input differs from what
+        # ssh_config says. Load-bearing for the auto-expand-on-divergence
+        # UX (Q10 decision).
+        divergences = []
+        if user and result.user and user != result.user:
+            divergences.append({
+                "field": "user",
+                "yours": user,
+                "ssh_config": result.user,
+            })
+        if jump_host and result.proxyjump and jump_host != result.proxyjump:
+            divergences.append({
+                "field": "jump_host",
+                "yours": jump_host,
+                "ssh_config": result.proxyjump,
+            })
+
+        # Resolve the effective ANL_JUMP for the reflection (--jump-host
+        # explicit input beats the default; --no-jump takes precedence
+        # over both).
+        anl_jump = jump_host or DEFAULT_ANL_JUMP
+        # Resolve the effective user for the reflection: caller's explicit
+        # --user wins; else ssh-config's User; else empty (engine would
+        # prompt at runtime).
+        effective_user = user or result.user or ""
+
+        our_jump_args = reflect_jump_args(
+            effective_user,
+            node,
+            anl_jump=anl_jump,
+            no_jump=no_jump,
+            ssh_g_result=result,
+        )
+
+        return JSONResponse({
+            "state": "resolved",
+            "hostname": result.hostname,
+            "user": result.user,
+            "proxyjump": result.proxyjump,
+            "our_extra_jump_args": our_jump_args,
+            "divergences": divergences,
+        })
+
     @app.get("/api/ssh-hosts")
     def api_ssh_hosts(refresh: int = 0) -> JSONResponse:
         """D-032 (2026-07-15): enumerate ssh_config Host aliases for the
