@@ -1941,3 +1941,129 @@ Not in Track W's scope; captured here so they don't get lost:
   before launching?" telemetry — SKIP, we don't do telemetry.
 
 ---
+
+## 11. Post-execution addendum (2026-07-15)
+
+Recorded after the 9-commit sequence landed (`5565048` → `643de22`)
+so this plan's body stays a historical record of the pre-execution
+DESIGN while this section captures what shipped DIFFERENTLY. Details
+in `notes/audit_v3_1_0_post_execution.md`.
+
+### 11.1 Divergences from the plan body
+
+**`_SAFE_HOSTLIKE` regex (not `_SAFE_TOKEN` reuse).** §5's Track W
+file-inventory table and §10.2 both said "reuse existing `_SAFE_TOKEN`
+for all three new fields." That was based on the pre-execution §7 W1
+audit's claim that `_SAFE_TOKEN = ^[A-Za-z0-9._-]+$`. On code
+inspection during C4 execution, `_SAFE_TOKEN` turned out to be
+`^[a-z0-9][a-z0-9-]{0,31}$` — lowercase-only, no `.` or `_`, capped
+at 32 chars. Would reject legitimate hostnames including the default
+node fqdn (`compute-01.cels.anl.gov`). C4 introduced a new
+`_SAFE_HOSTLIKE = ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$` (RFC 1035
+total-length cap; mixed case allowed; `.` + `_` allowed). Behavior
+otherwise identical to what the plan intended. Documented inline
+in `src/argo_anywhere/web/app.py`'s `_SAFE_HOSTLIKE` docstring.
+
+**Python mirror named `reflect_jump_args` (not `_reflect_our_jump_args`).**
+§10.4 sketch referenced `_reflect_our_jump_args`; actual shipped
+name is `reflect_jump_args` (module-level Python function in
+`src/argo_anywhere/web/preview.py`; no leading underscore because
+it's part of the module's public surface for the endpoint). Also
+introduced a companion `SshGResult` dataclass + `_parse_ssh_G` + a
+`run_ssh_G` wrapper that the plan didn't enumerate. Behavior
+matches the intent.
+
+**awk-idiom correction landed via C2's debugging.** §2.3's initial
+"cleaner" awk pattern `{exit 0} END{exit 1}` turned out to be buggy
+(END overrides body-block exit code — always exits 1). C1 shipped
+the buggy version; C2's mirror-test caught it; the fix (revert to
+`{found=1} END{exit found ? 0 : 1}`) went into C2 with a scarred
+comment in `_alias_has_own_proxy` documenting the gotcha for future
+maintainers. Net LOC increase: ~7 lines of comment. The pre-execution
+§7 A4 finding that flagged the "cleaner" idiom was WRONG.
+
+**Fourth `resolve_username` caller found by grep.** §2.2 enumerated
+3 callers (`_client_common_setup`, `mode_configure`, `mode_run`).
+Grep during C2 execution found a fourth: `update_argoproxy_component`
+at engine :8631. All four now use the globals-based API correctly.
+
+**`_alias_proxy_notice_dedup` landed in C1, not C2.** §5's Track E
+row assigned the dedup helper to C2 (alongside the wire-in of
+`ssh_jump_args`). In practice it made more sense to land as a helper
+alongside `_alias_has_own_proxy` in C1 since it's a helper for the
+same functional area. Net LOC across C1+C2 unchanged; just shifted
+by ~20 lines.
+
+### 11.2 Test-coverage additions from the post-execution audit
+
+The pre-execution §4.2 test list covered the primary paths; the
+post-execution audit (`notes/audit_v3_1_0_post_execution.md` Pass 2)
+found 5 coverage gaps. 4 of the 5 were closed in the A2 fix commit:
+
+- `test_B_ssh_config_skipped_on_compute_node` — the on-node guard in
+  `resolve_username` is now explicitly tested (was untested;
+  refactor could have silently removed the guard).
+- `test_C_scp_branch_gated_by_alias_has_own_proxy` — grep-invariant
+  test that Sub-fix C's SCP-branch guard is present + adjacent to
+  the `ProxyJump=` line (runtime-testing the SCP branch would need
+  a scp+network stub).
+- `test_launch_external_passes_d032_flags_through` +
+  `test_launch_external_omits_empty_d032_fields` +
+  `test_launch_external_rejects_bad_node` — the `/api/launch-external`
+  endpoint's threading of the four D-032 fields to `build_launch_argv`
+  is now explicitly tested (was only unit-tested at the pure-function
+  layer).
+- `test_ws_passes_d032_query_params_through` +
+  `test_ws_rejects_bad_d032_query_params` — same for the `/ws`
+  intake.
+
+The 5th gap (renderPreview() client-side JS) is deferred; would
+require Playwright, and other UI-only regressions would benefit
+from that infrastructure too.
+
+### 11.3 Deferred items (documented follow-ups)
+
+- **`sanitize_for_log` helper** (pre-execution §7 C2): did NOT
+  land. Only two log sites echo raw ssh_config-derived values (the
+  `pick_node` alias-notice `log` lines that render
+  `${_resolved}` from `_ssh_config_hostname`). Real-threat
+  assessment: user-config self-harm (attacker who can write the
+  user's `~/.ssh/config` already has SSH-arbitrary-code). Fix
+  deferred; not urgent.
+- **`_build_scp_opts` extraction** (Refactor-1): the SCP options
+  block in `remote_bootstrap` is inline; extracting to a helper
+  would enable runtime-testing the SCP-branch guard instead of
+  the grep-invariant. Deferred.
+- **`renderPreview()` client JS split** (Refactor-4): monolithic
+  function rendering 5 state branches; would benefit from splitting
+  per state. Not urgent.
+
+### 11.4 Live-verify gate (still pending — Ahmed's manual action)
+
+Scenario X (real ANL alias flow) is documented in
+`notes/test_plan_v3_1_0.md` T6. The pre-execution plan's §9 gated
+Track W start on this gate passing. In practice Track W landed
+without waiting (per user direction "go all the way through") since
+Track W adds UI surface + validation over engine paths that are
+already unit-tested; a Scenario-X failure would land as an amendment
+to C2 (the wire-in commit).
+
+If Ahmed runs Scenario X and it FAILS, the fix path is:
+1. Diagnose the failure (which of Sub-fixes A/B/C didn't behave as
+   expected in the real-infra flow).
+2. Amend C2 (`git commit --amend` or a fixup commit).
+3. Re-run the full pytest + Scenario X.
+4. If needed, propagate the fix to Track W (C4-C6) — but the mirror
+   test in `tests/test_preview_launch.py` should catch any
+   engine-side change that Track W didn't already reflect.
+
+### 11.5 Fix-commit trail
+
+- **A1** — `99f1e46` — `docs(audit): post-execution audit of the
+  v3.1.0 D-032 + PyYAML sequence`. The audit doc itself.
+- **A2** — this commit — `fix(D-032): post-audit test coverage +
+  doc drift`. Closes 4 test gaps + 1 doc drift.
+- **A3** — this commit — this addendum section (§11) landed as
+  part of A2.
+
+---

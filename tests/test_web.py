@@ -695,3 +695,170 @@ def test_api_ssh_hosts_host_guard(client: TestClient) -> None:
         headers={"host": "evil.example.com"},
     )
     assert r.status_code == 403
+
+
+# ===========================================================================
+# D-032 (2026-07-15) end-to-end threading tests: /api/launch-external and
+# /ws intake must pass node/user/jump_host/no_jump through to the engine
+# argv.
+#
+# Post-audit fix (Gap-3, Gap-4 from
+# notes/audit_v3_1_0_post_execution.md). Before this, only
+# build_launch_argv itself was unit-tested; the endpoint threading was
+# unverified.
+# ===========================================================================
+
+
+def test_launch_external_passes_d032_flags_through(
+    monkeypatch, client: TestClient, tmp_path,
+) -> None:
+    """POST /api/launch-external?verb=connect&node=X&user=Y&jump_host=Z
+    &no_jump=true results in the spawned engine argv containing the four
+    corresponding flags. Uses monkeypatch on open_external_terminal to
+    capture the argv without actually spawning."""
+    from argo_anywhere import external_terminal as ext
+
+    captured = {}
+
+    def fake_open(argv, terminal=None, cwd=None):
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+        return {
+            "ok": True, "terminal": "iterm", "terminal_id": "iterm",
+            "command": " ".join(argv), "error": None,
+        }
+
+    monkeypatch.setattr(ext, "open_external_terminal", fake_open)
+    monkeypatch.setattr(
+        ext, "available_terminals",
+        lambda system=None: [{"id": "iterm", "label": "iTerm"}],
+    )
+
+    r = client.post(
+        f"/api/launch-external?verb=connect&node=polaris-login"
+        f"&user=example-user&jump_host=bastion.example.com&no_jump=true"
+        f"&terminal=iterm&cwd={tmp_path}"
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+    # The spawned argv has a console-script prefix; the tail is what
+    # build_launch_argv produced. Assert each D-032 flag is present.
+    argv = captured["argv"]
+    assert "--node" in argv, f"missing --node in: {argv}"
+    idx = argv.index("--node")
+    assert argv[idx + 1] == "polaris-login"
+
+    assert "--user" in argv
+    idx = argv.index("--user")
+    assert argv[idx + 1] == "example-user"
+
+    assert "--jump-host" in argv
+    idx = argv.index("--jump-host")
+    assert argv[idx + 1] == "bastion.example.com"
+
+    assert "--no-jump" in argv, f"--no-jump=true should emit --no-jump flag: {argv}"
+
+
+def test_launch_external_omits_empty_d032_fields(
+    monkeypatch, client: TestClient, tmp_path,
+) -> None:
+    """Empty strings for node/user/jump_host are OMITTED (not passed as
+    `--node ""`). The engine's argv parser would reject the empty value
+    if we passed it; the launcher's contract is "blank == let the engine
+    resolve it."""
+    from argo_anywhere import external_terminal as ext
+
+    captured = {}
+
+    def fake_open(argv, terminal=None, cwd=None):
+        captured["argv"] = argv
+        return {
+            "ok": True, "terminal": "iterm", "terminal_id": "iterm",
+            "command": " ".join(argv), "error": None,
+        }
+
+    monkeypatch.setattr(ext, "open_external_terminal", fake_open)
+    monkeypatch.setattr(
+        ext, "available_terminals",
+        lambda system=None: [{"id": "iterm", "label": "iTerm"}],
+    )
+
+    r = client.post(
+        f"/api/launch-external?verb=connect&node=&user=&jump_host=&no_jump=false"
+        f"&terminal=iterm&cwd={tmp_path}"
+    )
+    assert r.status_code == 200
+    argv = captured["argv"]
+    assert "--node" not in argv, f"empty --node should be omitted: {argv}"
+    assert "--user" not in argv
+    assert "--jump-host" not in argv
+    assert "--no-jump" not in argv
+
+
+def test_launch_external_rejects_bad_node(
+    monkeypatch, client: TestClient, tmp_path,
+) -> None:
+    """Shell-hostile input in `node` reaches build_launch_argv, which
+    raises ValueError; endpoint translates to 400."""
+    from argo_anywhere import external_terminal as ext
+
+    monkeypatch.setattr(
+        ext, "available_terminals",
+        lambda system=None: [{"id": "iterm", "label": "iTerm"}],
+    )
+
+    from urllib.parse import quote
+    bad_node = quote("user@host;rm -rf /")
+    r = client.post(
+        f"/api/launch-external?verb=connect&node={bad_node}"
+        f"&terminal=iterm&cwd={tmp_path}"
+    )
+    assert r.status_code == 400
+    assert "bad node" in r.json()["error"]
+
+
+def test_ws_passes_d032_query_params_through(client: TestClient) -> None:
+    """WebSocket intake threads node/user/jump_host/no_jump query params
+    through to the engine argv. Uses `verb=help` so no ANL/SSH is
+    touched; asserts the help text (proving help ran) AND doesn't crash
+    (proving the D-032 params were accepted, not rejected)."""
+    with client.websocket_connect(
+        "/ws?verb=help&node=polaris-login&user=example-user"
+        "&jump_host=bastion.example.com&no_jump=1",
+        headers={"host": "127.0.0.1"},
+    ) as ws:
+        # Drain the WS stream. Should exit cleanly with the help text.
+        out = b""
+        exit_status: object = "missing"
+        for _ in range(5000):
+            msg = ws.receive()
+            if msg["type"] == "websocket.close":
+                break
+            if msg.get("bytes") is not None:
+                out += msg["bytes"]
+            elif msg.get("text") is not None and msg["text"].startswith("\x00EXIT"):
+                import json as _json
+                exit_status = _json.loads(msg["text"][len("\x00EXIT"):])["exitstatus"]
+                break
+
+    # Help ran (proves the D-032 params didn't crash the intake).
+    assert b"connect" in out, "help text should mention 'connect' subcommand"
+    # The engine exited cleanly (rc=0 for help).
+    assert exit_status == 0, f"engine should exit 0 for help; got {exit_status!r}"
+
+
+def test_ws_rejects_bad_d032_query_params(client: TestClient) -> None:
+    """Shell-hostile input in a D-032 query param → ws close code 1008
+    (rejected launch spec; mirrors the existing bad-verb behavior)."""
+    from starlette.websockets import WebSocketDisconnect
+    from urllib.parse import quote
+
+    bad = quote("user@host;evil")
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            f"/ws?verb=help&node={bad}",
+            headers={"host": "127.0.0.1"},
+        ):
+            pass
+    assert exc.value.code == 1008

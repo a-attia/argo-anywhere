@@ -11,8 +11,11 @@
 - `b80970c` — fix(engine): guarantee PyYAML in venv + drop dead [m] menu option
 - `4b8c445` — feat(engine): D-032 ssh-config helpers + --jump-host plumbing (no-op patch)
 - `86d2845` — feat(engine): D-032 Sub-fixes A/B/C wired in (ssh-config-native support live)
-- `<C3-sha>` — docs(engine): D-032 docs + PLAN.md D-032 + this file (post-execution: replace `<C3-sha>` with the actual commit hash)
-- Track W commits (C4-C6) TBD — will be appended to this list as they land.
+- `9d45344` — docs(engine): D-032 docs + PLAN.md D-032 + this file
+- `68e4a00` — feat(web): D-032 launcher node/user/jump-host fields + build_launch_argv extension (C4)
+- `0626659` — feat(web): D-032 /api/ssh-hosts alias picker + refresh button (C5)
+- `643de22` — feat(web): D-032 /api/preview-launch panel + AGENTS.md coupling subsection (C6)
+- `99f1e46` — docs(audit): post-execution audit of the v3.1.0 D-032 + PyYAML sequence
 
 ## CSPO discipline (read first)
 
@@ -139,7 +142,7 @@ Steps (requires an existing tunnel; combine with T4):
 
 ---
 
-## Track 3: D-032 ssh-config engine (commits `4b8c445`, `86d2845`, `<C3-sha>`)
+## Track 3: D-032 ssh-config engine (commits `4b8c445`, `86d2845`, `9d45344`)
 
 **T6 (Scenario X) — `--node <ssh-config-alias>` end-to-end.**
 
@@ -208,22 +211,78 @@ Steps:
 
 ---
 
-## Track 4: D-032 ssh-config web UI (commits `<C4-sha>`, `<C5-sha>`, `<C6-sha>`) — TBD
+## Track 4: D-032 ssh-config web UI (commits `68e4a00`, `0626659`, `643de22`)
 
-*These tests get added when Track W commits (C4-C6) land.*
+**Precondition**: your `~/.ssh/config` has the Track-3 T6 alias block
+(a `Host polaris-login` entry, or whatever alias you tested with in T6).
+Web tests reuse the same alias for consistency.
 
-**W1 (planned) — launcher fields end-to-end.**
-Open the app, type `polaris-login` into the new "compute node" field, leave
-"ANL username" + "jump-host" empty, click Launch. Expect preview panel + engine
-uses the ssh_config values.
+**W1 — launcher fields end-to-end.**
 
-**W2 (planned) — divergence highlighted.**
-Type `polaris-login` in node AND `some-other-user` in ANL-username. Expect preview
-panel auto-expands with amber "Divergence — review before launch" chip.
+Steps:
+1. `argo-anywhere app --port 8801` (or `argo-anywhere web --port 8801` +
+   open `http://127.0.0.1:8801` in a browser).
+2. Click the "Launch" button in the top-right to open the launcher popover.
+3. Verify the "SSH target overrides" `<details>` element is present + collapsed
+   below the working-directory field.
+4. Expand it. Type `polaris-login` into the "compute node" field; leave
+   "ANL username" and "jump-host" empty; leave "skip jump host" unchecked.
+5. Verify the compute-node field's datalist populates with your ssh_config
+   alias list (should include `polaris-login`).
+6. Click Launch (target = embedded terminal by default).
 
-**W3 (planned) — picker offers ssh_config aliases.**
-Focus the node field on a machine with a populated `~/.ssh/config`. Expect the
-datalist shows aliases (wildcards absent).
+**Expect:**
+- The launcher POST reaches the engine with `--node polaris-login` in argv
+  (verify via the Channel or Utility panel's opening log lines).
+- Same ssh-config-native behavior as Track 3 T6: single Duo prompt,
+  `Note: 'polaris-login' is an ssh_config alias ...` log line,
+  `Using ANL username: <ANL-username> (source: ssh-config:polaris-login)`.
+- ALL GREEN status in the embedded terminal.
+
+**W2 — divergence highlighted in preview panel.**
+
+Steps:
+1. Reopen the launcher popover.
+2. Type `polaris-login` in "compute node".
+3. Type `some-other-user` in "ANL username" (deliberately different from
+   the alias's `User <name>`).
+4. Wait ~1 second for the debounced `/api/preview-launch` to fire.
+
+**Expect:**
+- The preview panel auto-expands with an amber summary chip
+  `⚠ Divergence — review before launch`.
+- The preview body shows the `User: some-other-user ⚠ ssh_config says
+  <ANL-username>` divergence line in the theme's warn color.
+- Clicking Launch WOULD proceed with `some-other-user` (engine's
+  precedence: explicit --user wins over ssh_config inference); the
+  preview is informational.
+
+**W3 — picker offers ssh_config aliases.**
+
+Steps:
+1. Reopen the launcher popover.
+2. Focus the compute-node field. Verify the datalist dropdown shows
+   your aliases from `~/.ssh/config`.
+
+**Expect:**
+- Aliases like `polaris-login` present.
+- Wildcard patterns (`*`, `?`, `[abc]`) and negated patterns (`!gateway`)
+  absent.
+- Click the refresh button (↻) — verify `curl -s
+  http://127.0.0.1:8801/api/ssh-hosts?refresh=1` succeeds and the
+  datalist repopulates.
+
+**W4 — `/api/preview-launch` IP-block safety smoke.**
+
+Steps:
+1. `curl -s -X POST -H 'content-type: application/json' -d '{"node":
+   "some-random-unresolvable-alias"}' http://127.0.0.1:8801/api/preview-launch`
+
+**Expect:**
+- Response: `{"state": "unresolved"}`.
+- Zero Duo prompts triggered by the request.
+- `~/.config/argo_anywhere/ssh-fail-lock` NOT created (D-012 tracker
+  untouched).
 
 ---
 

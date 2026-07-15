@@ -328,13 +328,16 @@ Ordered from most-urgent to least:
 | 8 | NICE TO HAVE | Refactor-1: extract `_build_scp_opts` helper | Defer to future refactor cycle |
 | 9 | NICE TO HAVE | Refactor-4: split `renderPreview()` | Defer |
 
-**Recommended fix commit(s)**:
-- **A1** (this audit doc): commit the audit doc itself as `docs(audit)`.
-- **A2** (fixes 1-5): one commit `fix(D-032): post-audit test coverage +
-  doc drift` covering items 1-5. Small, focused, easy to review.
-- **A3** (fix 6): amendment to `notes/impl_ssh_config_native.md` adding
-  a "post-execution addendum" section. Could land with A2.
-- Items 7-9 stay as documented follow-ups.
+**Fix commits landed** (2026-07-15):
+- **A1** — `99f1e46` — `docs(audit)`: this audit doc.
+- **A2** — (next commit) — `fix(D-032): post-audit test coverage + doc
+  drift`. Closes items 1-5 (real SHAs in test plan + 4 new tests) AND
+  item 6 (post-execution addendum §11 in `impl_ssh_config_native.md`).
+  409 pytest tests passing after A2 (was 402; +7 new tests, 0
+  regressions).
+- Items 7-9 remain as documented follow-ups (S-4 sanitize_for_log
+  deferred; Refactor-1 SCP extraction deferred; Refactor-4 renderPreview
+  split deferred).
 
 ---
 

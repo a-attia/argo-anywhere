@@ -499,6 +499,57 @@ echo "RESULT=<${result}>"
     assert "RESULT=<>" in out, "--no-jump should return empty regardless of alias state"
 
 
+def test_C_scp_branch_gated_by_alias_has_own_proxy() -> None:
+    """Sub-fix C's second call site (SCP options block in
+    remote_bootstrap) must skip our `-o ProxyJump=...` when the target
+    alias has its own proxy. Runtime-testing this would require faking
+    scp + the whole bootstrap flow; a grep-invariant is deterministic
+    and catches the regression class we care about (a future refactor
+    silently drops the alias guard).
+
+    Post-audit fix (Gap-2 from notes/audit_v3_1_0_post_execution.md).
+    The engine's SCP options block lives around line 4627-4644 today;
+    the grep looks for the specific pattern rather than a line number
+    so it survives edits to nearby code.
+    """
+    src = _engine_source()
+    # The SCP block should contain BOTH the ProxyJump line AND the
+    # _alias_has_own_proxy guard around it. The guard was added in C2.
+    scp_pattern = r"scp_opts\+=\s*\(\s*-o\s+\"ProxyJump="
+    guard_pattern = r"if\s+!\s+_alias_has_own_proxy\s+\"\$node\""
+    assert re.search(scp_pattern, src), (
+        "the SCP ProxyJump= line has moved or been removed; find its new "
+        "location and confirm _alias_has_own_proxy still guards it (or "
+        "update this test's pattern)."
+    )
+    assert re.search(guard_pattern, src), (
+        "the SCP block's `if ! _alias_has_own_proxy \"$node\"; then` guard "
+        "is missing. Without it, alias-based bootstraps (e.g. "
+        "argo-anywhere --node polaris-login) will add a redundant -J on "
+        "top of the alias's own ProxyJump, causing scp to fail with a "
+        "jump-loop error. Sub-fix C requires this guard."
+    )
+    # Belt + braces: verify the guard and the ProxyJump line are within
+    # 5 lines of each other (so a refactor that moves them apart doesn't
+    # silently break the intent).
+    lines = src.splitlines()
+    guard_line = None
+    scp_line = None
+    for i, line in enumerate(lines, start=1):
+        if re.search(guard_pattern, line):
+            guard_line = i
+        if re.search(scp_pattern, line):
+            scp_line = i
+    assert guard_line is not None and scp_line is not None
+    assert 0 <= (scp_line - guard_line) <= 5, (
+        f"the alias-proxy guard (line {guard_line}) and the SCP "
+        f"ProxyJump= line (line {scp_line}) should be adjacent (within "
+        f"5 lines); got {scp_line - guard_line} lines apart. Someone may "
+        f"have inserted logic between them that breaks the intended "
+        f"if/then relationship."
+    )
+
+
 def test_C_notice_dedup_across_multiple_ssh_jump_args_calls(tmp_path: Path) -> None:
     """Sub-fix C dedup: calling ssh_jump_args 10x for the same alias
     fires the notice exactly once. Documents the per-alias-per-invocation
@@ -676,6 +727,61 @@ fi
     cache_path = fake_home / ".config" / "argo_anywhere" / "user"
     assert cache_path.exists(), "USER_CACHE should be written for prompted values"
     assert cache_path.read_text().strip() == "prompted-user"
+
+
+def test_B_ssh_config_skipped_on_compute_node(tmp_path: Path) -> None:
+    """Sub-fix B: when running ON an ANL compute node, resolve_username
+    must skip the ssh-config lookup (self-alias resolution would return
+    the OS user, which is the wrong answer for the Argonne identity).
+
+    Post-audit fix (Gap-1 from notes/audit_v3_1_0_post_execution.md):
+    the on_anl_compute_node guard is load-bearing but was previously
+    untested -- a future refactor could remove it and mode_server would
+    silently start caching OS-user values as Argonne usernames.
+
+    Test strategy: shadow the on_anl_compute_node function inside the
+    sourced engine to return "yes", then verify resolve_username
+    falls through to USER_CACHE / prompt without consulting ssh-config
+    (even when a shim would return a value).
+    """
+    shim_dir = tmp_path / "bin"
+    # Fake ssh -G returns a User line -- but the on-node guard should
+    # prevent us from ever reading it.
+    ssh_g = {"polaris-login": "hostname foo\nuser wrong-user\n"}
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    # Pre-populate USER_CACHE with the "correct" answer so we can prove
+    # the resolver got there (didn't short-circuit into ssh-config).
+    cache_dir = fake_home / ".config" / "argo_anywhere"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "user").write_text("cached-user\n")
+    env["HOME"] = str(fake_home)
+    env.pop("ARGO_ANYWHERE_USER", None)
+    env["ARGO_ANYWHERE_NODE"] = "polaris-login"
+
+    # Shadow on_anl_compute_node to force the "on-node" path. This is a
+    # bash function override -- redefine it BEFORE calling resolve_username.
+    snippet = """
+on_anl_compute_node() { echo yes; }
+resolve_username
+echo "RESULT=${_USERNAME_RESULT}"
+echo "SOURCE=${_USERNAME_SOURCE}"
+"""
+    rc, out, _err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0, f"snippet failed:\n{_err}"
+    # On-node: MUST have fallen through to cache, NOT ssh-config.
+    assert "RESULT=cached-user" in out, (
+        f"on-node path should have used USER_CACHE; got:\n{out}"
+    )
+    assert "SOURCE=cache" in out, (
+        f"expected source=cache; got:\n{out}"
+    )
+    # Extra defence: ssh-config source string must NOT appear anywhere.
+    assert "ssh-config" not in out, (
+        f"on-node path should NOT consult ssh-config; got:\n{out}"
+    )
 
 
 # --- Sub-fix A: pick_node alias-notice upgrade -----------------------------
