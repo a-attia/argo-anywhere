@@ -1615,12 +1615,30 @@
           `ProxyJump skip) won't apply.`;
         return;
       }
+      if (data.state === 'bare_hostname') {
+        // A6 (2026-07-15): ssh -G succeeded but found no ~/.ssh/config entry
+        // for this target -- it just filled in defaults. Show the user what
+        // argo will actually do (which is what the pre-D-032 flow always did).
+        target.innerHTML =
+          `Node:      ${_escHtml(data.hostname)}\n` +
+          `\n` +
+          `<em>No matching ~/.ssh/config entry.</em> argo will connect using\n` +
+          `its defaults: your explicit --user (or prompt), our default jump\n` +
+          `host (logins.cels.anl.gov), and no ssh_config-specific routing.`;
+        return;
+      }
       // state === 'resolved'
       const divs = data.divergences || [];
       const divByField = {};
       for (const d of divs) { divByField[d.field] = d; }
       const lines = [];
       const nodeInput = el('lNode').value.trim();
+      // A6: show detection_reason so the user understands WHY we think
+      // this is an alias (which of the 3 signals fired).
+      if (data.detection_reason) {
+        lines.push(`Detected as ssh_config alias: ${_escHtml(data.detection_reason)}`);
+        lines.push(``);
+      }
       lines.push(`Node:      ${_escHtml(nodeInput)} → ${_escHtml(data.hostname || '(unresolved)')}`);
       const userLine = divByField.user
         ? `<span class="div-warn">User:      ${_escHtml(divByField.user.yours)}  ⚠  ssh_config says ${_escHtml(divByField.user.ssh_config)}</span>`

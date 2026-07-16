@@ -71,6 +71,82 @@ def test_sshgresult_no_proxy_when_absent() -> None:
     assert not r.has_own_proxy
 
 
+# --- is_meaningful_alias (A6 amendment 2026-07-15) -------------------------
+
+
+def test_is_meaningful_alias_signal_1_hostname_rewrite() -> None:
+    """Signal 1: `HostName foo` under `Host alias` -> is_alias=True."""
+    r = SshGResult(hostname="resolved-host.example.com", user="", proxyjump="")
+    is_alias, reason = r.is_meaningful_alias("my-alias")
+    assert is_alias
+    assert "resolves to resolved-host.example.com" in reason
+
+
+def test_is_meaningful_alias_signal_2_proxyjump() -> None:
+    """Signal 2: no HostName rewrite but ProxyJump attached -> is_alias=True."""
+    r = SshGResult(
+        hostname="compute-01",         # same as input -> no rewrite
+        user="",
+        proxyjump="me@logins.cels.anl.gov",
+    )
+    is_alias, reason = r.is_meaningful_alias("compute-01")
+    assert is_alias
+    assert "ProxyJump" in reason
+
+
+def test_is_meaningful_alias_signal_3_user_attached() -> None:
+    """Signal 3: no HostName rewrite, no proxy, but User differs from
+    local $USER -> is_alias=True."""
+    import getpass
+    local = getpass.getuser()
+    other_user = "definitely-not-" + local
+    r = SshGResult(
+        hostname="my-alias",
+        user=other_user,
+        proxyjump="",
+    )
+    is_alias, reason = r.is_meaningful_alias("my-alias")
+    assert is_alias
+    assert other_user in reason
+    assert "identity attached" in reason
+
+
+def test_is_meaningful_alias_bare_hostname_no_signals() -> None:
+    """A6 REGRESSION GUARD: ssh -G on a target with NO ~/.ssh/config
+    entry fills defaults (hostname=input, user=$USER, proxyjump=empty).
+    is_meaningful_alias MUST return False in this case -- otherwise a
+    bogus alias like `xyzzy-42` would be treated as a resolved alias
+    and rendered as such in the preview panel."""
+    import getpass
+    r = SshGResult(
+        hostname="xyzzy-42",     # equal to input -> no signal 1
+        user=getpass.getuser(),  # equal to local $USER -> no signal 3
+        proxyjump="",            # no proxy -> no signal 2
+    )
+    is_alias, reason = r.is_meaningful_alias("xyzzy-42")
+    assert not is_alias, (
+        f"bare hostname with default ssh -G values should NOT be a "
+        f"meaningful alias; got is_alias={is_alias}, reason={reason!r}"
+    )
+    assert reason == ""
+
+
+def test_is_meaningful_alias_signal_priority_hostname_wins() -> None:
+    """When multiple signals fire, the FIRST one in priority order
+    (hostname rewrite) wins the `reason` string."""
+    r = SshGResult(
+        hostname="rewritten.example.com",   # signal 1 fires
+        user="different-user",              # signal 3 would fire too
+        proxyjump="somewhere",              # signal 2 would fire too
+    )
+    is_alias, reason = r.is_meaningful_alias("my-alias")
+    assert is_alias
+    assert "resolves to rewritten.example.com" in reason
+    # Signal 2/3 reasons should NOT be in the string.
+    assert "ProxyJump" not in reason
+    assert "identity attached" not in reason
+
+
 def test_parse_ssh_G_basic() -> None:
     raw = textwrap.dedent("""\
         hostname compute-01.cels.anl.gov
@@ -453,6 +529,45 @@ def test_api_preview_state_resolved(client: TestClient, monkeypatch) -> None:
     # Alias has its own ProxyJump -> our extras should be empty.
     assert body["our_extra_jump_args"] == []
     assert body["divergences"] == []
+    # A6: detection_reason present + describes signal 1 (hostname rewrite).
+    assert "resolves to compute-01.cels.anl.gov" in body["detection_reason"]
+
+
+def test_api_preview_state_bare_hostname(client: TestClient, monkeypatch) -> None:
+    """A6 REGRESSION GUARD (2026-07-15 live-verify): a bogus hostname
+    that has NO entry in ~/.ssh/config must return state=bare_hostname,
+    NOT state=resolved. ssh -G returns rc=0 with default values for
+    any valid hostname, so we can't rely on run_ssh_G returning None."""
+    import getpass
+
+    def fake_run_ssh_G(alias, timeout=2.0):
+        # Simulate what ssh -G returns for an unknown alias: defaults.
+        return SshGResult(
+            hostname=alias,                # no rewrite
+            user=getpass.getuser(),        # local OS user (default)
+            proxyjump="",                  # no proxy
+        )
+
+    import argo_anywhere.web.preview as prev
+    monkeypatch.setattr(prev, "run_ssh_G", fake_run_ssh_G)
+
+    r = client.post("/api/preview-launch",
+                    json={"node": "xyzzy-not-in-ssh-config-42"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "bare_hostname", (
+        f"bogus alias must return state=bare_hostname, not "
+        f"{body.get('state')!r}. Response: {body!r}"
+    )
+    assert body["hostname"] == "xyzzy-not-in-ssh-config-42"
+    # The response must NOT include the misleading fields from
+    # state=resolved (user, proxyjump, our_extra_jump_args, divergences).
+    assert "user" not in body
+    assert "proxyjump" not in body
+    assert "our_extra_jump_args" not in body
+    # A helpful note IS included.
+    assert "note" in body
+    assert "no meaningful" in body["note"].lower()
 
 
 def test_api_preview_divergence_detected(client: TestClient, monkeypatch) -> None:

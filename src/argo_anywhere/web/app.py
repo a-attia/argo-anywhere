@@ -525,11 +525,31 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             })
 
         # Resolve via ssh -G. Returns None on timeout / non-zero exit / bad
-        # input -- collapse all failure modes to "unresolved" (never leak
-        # stderr to the response, per §7 W3).
+        # input; collapse those to "unresolved" (never leak stderr to the
+        # response, per §7 W3).
         result = run_ssh_G(node)
         if result is None:
             return JSONResponse({"state": "unresolved"})
+
+        # A6 amendment (2026-07-15 live-verify): ssh -G returns rc=0 for
+        # ANY syntactically-valid hostname, filling in defaults for
+        # unknown targets (hostname=input, user=$USER, proxyjump=empty).
+        # Before this check, a bogus alias like "xyzzy-42" got a false
+        # state=resolved response with $USER as the "resolved user." Use
+        # SshGResult.is_meaningful_alias to distinguish "real ssh_config
+        # entry" from "bare hostname with default values."
+        is_alias, detection_reason = result.is_meaningful_alias(node)
+        if not is_alias:
+            # No meaningful ssh_config entry for this target -- treat as
+            # a bare hostname. argo will still try (per the pre-D-032
+            # flow); UI can show "argo will connect using its defaults."
+            return JSONResponse({
+                "state": "bare_hostname",
+                "hostname": node,   # what argo will target
+                "note": "no meaningful ~/.ssh/config entry for this target; "
+                        "argo will use its defaults (jump host + your "
+                        "explicit --user if given, else prompt)",
+            })
 
         # Divergence detection: user's explicit input differs from what
         # ssh_config says. Load-bearing for the auto-expand-on-divergence
@@ -572,6 +592,7 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             "proxyjump": result.proxyjump,
             "our_extra_jump_args": our_jump_args,
             "divergences": divergences,
+            "detection_reason": detection_reason,
         })
 
     @app.get("/api/ssh-hosts")

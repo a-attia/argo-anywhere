@@ -25,6 +25,7 @@ byte-equivalent output on any given input. A stub-ssh test in
 
 from __future__ import annotations
 
+import getpass
 import re
 import subprocess
 from dataclasses import dataclass
@@ -42,7 +43,15 @@ _SAFE_HOSTLIKE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 
 @dataclass(frozen=True)
 class SshGResult:
-    """A parsed ``ssh -G`` response for one target."""
+    """A parsed ``ssh -G`` response for one target.
+
+    Important: ``ssh -G`` ALWAYS returns rc=0 for any syntactically-valid
+    hostname, even if that hostname has NO entry in ``~/.ssh/config``.
+    It fills in defaults (hostname == input; user == $USER; proxyjump ==
+    empty; port == 22; etc.). Distinguishing "real alias" from "bare
+    hostname" requires comparing the returned values to the defaults --
+    see :meth:`is_meaningful_alias`.
+    """
 
     hostname: str = ""
     user: str = ""
@@ -57,6 +66,50 @@ class SshGResult:
         if self.proxycommand and self.proxycommand != "none":
             return True
         return False
+
+    def is_meaningful_alias(self, input_target: str) -> tuple[bool, str]:
+        """Mirror of engine's ``_is_ssh_config_alias``.
+
+        Returns ``(is_alias, reason)`` where ``reason`` is a human-
+        readable description of which signal fired (empty when
+        ``is_alias`` is False). Order of signal checks matches the
+        engine.
+
+        Signal union (must stay in lockstep with the engine's
+        ``_is_ssh_config_alias`` per D-032 coupling contract):
+
+          (1) HostName rewrite -- ``hostname`` field differs from
+              ``input_target``. Classic alias.
+          (2) ProxyJump / ProxyCommand attached (via
+              :meth:`has_own_proxy`). Alias exists to attach routing.
+          (3) User attached -- ``user`` field differs from the local
+              OS user (``$USER``). Alias exists to attach identity.
+
+        A6 amendment (2026-07-15 live-verify): before this method
+        existed, ``/api/preview-launch`` used ``run_ssh_G`` returning
+        non-None as the "is a resolved alias" signal. That was wrong
+        because ssh -G returns non-None for ANY valid hostname (it
+        just fills defaults). Xyzzy test alias came back as
+        state=resolved with our $USER as the "resolved user" -- a
+        classic false positive.
+        """
+        # Signal 1: HostName rewrite.
+        if self.hostname and self.hostname != input_target:
+            return True, f"resolves to {self.hostname}"
+        # Signal 2: ProxyJump/ProxyCommand.
+        if self.has_own_proxy:
+            return True, "no hostname rewrite; routing via ~/.ssh/config's ProxyJump/ProxyCommand"
+        # Signal 3: User attached (differs from local OS user).
+        try:
+            local_user = getpass.getuser()
+        except Exception:
+            local_user = ""
+        if self.user and self.user != local_user:
+            return True, (
+                f"no hostname rewrite; identity attached via ~/.ssh/config "
+                f"(User {self.user})"
+            )
+        return False, ""
 
 
 def _parse_ssh_G(stdout: str) -> SshGResult:
