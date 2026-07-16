@@ -375,8 +375,20 @@ def _write_ssh_G_shim(shim_dir: Path, ssh_g_output: dict[str, str]) -> str:
     other invocation to the real `ssh`.
 
     ``ssh_g_output`` maps alias name → the multi-line stdout to emit for
-    ``ssh -G <alias>``. Unknown aliases exit 0 with no output (matches
-    OpenSSH behavior for a resolvable-but-unrewritten hostname).
+    ``ssh -G <alias>``. Unknown aliases exit 0 with no output.
+
+    CAVEAT (learned from the 2026-07-16 field report): "unknown alias →
+    no output" does NOT match real OpenSSH, which always dumps the full
+    effective config -- including ``hostname`` (echoing the input) and
+    ``user`` (defaulting to the local OS username) -- for any target,
+    configured or not. This shim is deliberately more forgiving so that
+    per-signal tests can isolate one field at a time, and that gap let a
+    real bug through: ``_ssh_config_user`` returned the local username
+    for every host and silently outranked the cached Argonne username.
+    When a test's subject is "did ssh_config actually configure this?",
+    spell out the defaults ssh would really emit (see
+    ``test_B_ssh_G_default_user_does_NOT_outrank_cache``) rather than
+    relying on the empty-output shortcut.
 
     Returns the PATH to use (shim_dir prepended, real /usr/bin etc. after
     for tr/awk/cp/etc.).
@@ -750,6 +762,97 @@ echo "SOURCE=${_USERNAME_SOURCE}"
     assert rc == 0, f"snippet failed:\n{_err}"
     assert "RESULT=jump-user" in out, (
         f"expected jump-host fallback; got:\n{out}"
+    )
+    assert "SOURCE=ssh-config:logins.cels.anl.gov" in out
+
+
+def test_B_ssh_G_default_user_does_NOT_outrank_cache(tmp_path: Path) -> None:
+    """Regression (field report 2026-07-16): `ssh -G` ALWAYS prints a
+    `user` line, defaulting to the local OS username when no ssh_config
+    sets one. `_ssh_config_user` must treat that default as "nothing
+    configured" and return empty -- otherwise the laptop username
+    outranks the cached Argonne username (resolve_username consults
+    ssh-config ABOVE USER_CACHE), argo SSHes as the wrong account,
+    publickey auth fails, and sshd falls back to a password prompt.
+
+    This is the engine-side twin of the Python A6 amendment (f65d0d6),
+    which fixed the same false positive in `SshGResult.is_alias`
+    (Signal 3 compares `self.user != local_user`). Kept in lockstep per
+    the D-032 coupling contract.
+
+    Models the real-world config that triggered it: `User` set on
+    `compute-*` but NOT on the jump host.
+    """
+    local_user = subprocess.run(
+        ["id", "-un"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    shim_dir = tmp_path / "bin"
+    ssh_g = {
+        # Faithful to real ssh -G: a `user` line is ALWAYS present. The
+        # jump host has no `User` in ssh_config, so ssh fills in the
+        # local OS username as its default.
+        "logins.cels.anl.gov": (
+            f"hostname logins.cels.anl.gov\nuser {local_user}\n"
+        ),
+    }
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    fake_home = tmp_path / "home"
+    (fake_home / ".config" / "argo_anywhere").mkdir(parents=True)
+    (fake_home / ".config" / "argo_anywhere" / "user").write_text(
+        "anl-user\n"
+    )
+    env["HOME"] = str(fake_home)
+    env.pop("ARGO_ANYWHERE_USER", None)
+    env.pop("ARGO_ANYWHERE_NODE", None)
+    snippet = """
+u="$(_ssh_config_user 'logins.cels.anl.gov')"
+echo "HELPER=<${u}>"
+resolve_username
+echo "RESULT=${_USERNAME_RESULT}"
+echo "SOURCE=${_USERNAME_SOURCE}"
+"""
+    rc, out, _err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0, f"snippet failed:\n{_err}"
+    assert "HELPER=<>" in out, (
+        f"_ssh_config_user must return EMPTY when ssh -G merely echoed "
+        f"the local OS user ({local_user!r}) as its default; got:\n{out}"
+    )
+    assert "RESULT=anl-user" in out, (
+        f"cached Argonne username must win over ssh -G's local-user "
+        f"default; got:\n{out}"
+    )
+    assert "SOURCE=cache" in out, f"expected cache as source; got:\n{out}"
+
+
+def test_B_explicit_ssh_config_user_still_wins_over_cache(
+    tmp_path: Path,
+) -> None:
+    """Complement to the regression above: the local-user guard must not
+    over-correct. A User line that genuinely differs from the local OS
+    user is real configuration and still outranks the cache (plan §8 Q5
+    permissive-plus-attribution)."""
+    shim_dir = tmp_path / "bin"
+    ssh_g = {
+        "logins.cels.anl.gov": "hostname logins.cels.anl.gov\nuser real-anl-user\n",
+    }
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    fake_home = tmp_path / "home"
+    (fake_home / ".config" / "argo_anywhere").mkdir(parents=True)
+    (fake_home / ".config" / "argo_anywhere" / "user").write_text("stale\n")
+    env["HOME"] = str(fake_home)
+    env.pop("ARGO_ANYWHERE_USER", None)
+    env.pop("ARGO_ANYWHERE_NODE", None)
+    snippet = """
+resolve_username
+echo "RESULT=${_USERNAME_RESULT}"
+echo "SOURCE=${_USERNAME_SOURCE}"
+"""
+    rc, out, _err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0, f"snippet failed:\n{_err}"
+    assert "RESULT=real-anl-user" in out, (
+        f"an explicit ssh_config User must still be honored; got:\n{out}"
     )
     assert "SOURCE=ssh-config:logins.cels.anl.gov" in out
 

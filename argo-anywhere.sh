@@ -1861,10 +1861,46 @@ _ssh_config_hostname() {
   ssh -G "$target" 2>/dev/null | awk '/^hostname / {print $2; exit}'
 }
 
+# `ssh -G` ALWAYS prints a `user` line: absent an explicit `User` in
+# ssh_config, it fills in the local OS username as the default. So a
+# bare `awk '/^user /'` cannot distinguish "ssh_config says User X"
+# from "ssh defaulted to $USER" -- it returns non-empty for every
+# valid target. Because resolve_username consults this helper ABOVE
+# USER_CACHE, that made the local laptop username silently outrank the
+# cached Argonne username for any host with no `User` line (e.g. a
+# ~/.ssh/config that sets `User` on `compute-*` but not on the jump
+# host). The wrong account then fails publickey auth and sshd falls
+# back to a password prompt -- the exact "the Argonne username is
+# distinct from the laptop's $USER" confusion the project has warned
+# about since inception.
+#
+# Fix: compare against the local OS user and treat a match as "not
+# configured". This mirrors the Python side's Signal-3 check in
+# `SshGResult.is_alias` (`self.user != local_user`), which got this
+# right in the A6 amendment (f65d0d6) but was never back-ported here.
+# Keep the two in lockstep per the D-032 coupling contract.
+#
+# Trade-off: a user whose Argonne username genuinely EQUALS their
+# laptop username gets no inference from this helper and falls through
+# to cache/prompt. That is the safe direction -- the value resolved is
+# identical either way, we just decline to guess it.
+#
+# Every early return here is an explicit `return 0`: a bare `return`
+# inherits the status of the preceding `[` test, so "no user
+# configured" would surface as exit 1 and trip `set -e` inside the
+# caller's `_u="$(_ssh_config_user ...)"` assignment. Empty stdout --
+# not a non-zero status -- is this helper's "nothing configured"
+# signal, per the Section 8 contract ("silently return empty ...
+# never die; the ssh-config path is a capability, not a requirement").
 _ssh_config_user() {
   local target="$1"
-  [ -n "$target" ] || return
-  ssh -G "$target" 2>/dev/null | awk '/^user / {print $2; exit}'
+  [ -n "$target" ] || return 0
+  local configured local_user
+  configured="$( { ssh -G "$target" 2>/dev/null | awk '/^user / {print $2; exit}'; } || true )"
+  [ -n "$configured" ] || return 0
+  local_user="$( { id -un 2>/dev/null; } || true )"
+  [ "$configured" = "$local_user" ] && return 0
+  printf '%s\n' "$configured"
 }
 
 _alias_has_own_proxy() {
