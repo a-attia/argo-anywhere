@@ -12,6 +12,151 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
+## v3.2.1 — 2026-07-16
+
+Hotfix. **Upgrade if you are on v3.2.0** and your laptop username
+differs from your Argonne username — the common case, and the one
+v3.2.0 got wrong.
+
+**Symptom**: `connect` asks for a password after Duo is accepted.
+Reported from the field 2026-07-16.
+
+**Cause**: `ssh -G <host>` always prints a `user` line — absent an
+explicit `User` in `~/.ssh/config`, it fills in your **local OS
+username** as the default, the same way it echoes the input back as
+`hostname` for an unconfigured host. v3.2.0's D-032 username
+inference read that line without checking whether ssh_config had
+actually configured anything, so it treated the laptop username as a
+resolved Argonne username. Since the inference sits *above* the
+username cache in the priority order, it outranked the correct cached
+value. argo-anywhere then SSHed to an account whose key isn't
+authorized, publickey auth failed, and sshd fell back to asking for a
+password. Duo passing first is consistent with this — the account was
+wrong, not the second factor.
+
+**Blast radius** was wider than a stale cache. On a machine with no
+cache yet, the same bad inference **suppressed the interactive
+"Enter your ANL username" prompt entirely**: a brand-new v3.2.0 user
+was never asked, and silently got their laptop username. Anyone whose
+`~/.ssh/config` sets `User` on the compute nodes but not on the jump
+host was affected even with a correct cache on disk.
+
+### Fixed
+
+- **`_ssh_config_user` no longer mistakes ssh's default for
+  configuration.** It now compares the resolved user against the
+  local OS user (`id -un`) and treats a match as "nothing configured",
+  returning empty so the caller falls through to the cache or the
+  prompt. This mirrors the Python side's identical check in
+  `SshGResult.is_alias`, which got it right in v3.2.0's A6 amendment
+  but was never back-ported to the engine; the two are now in lockstep
+  per the D-032 coupling contract. Pre-D-032 behavior is restored for
+  every case where ssh_config has nothing to say.
+
+  *Trade-off*: if your Argonne username genuinely equals your laptop
+  username, the helper no longer infers it and you fall through to the
+  cache or prompt. The resolved value is identical either way.
+
+- **`_is_ssh_config_alias` no longer reports every bare hostname as an
+  ssh_config alias.** Its third detection signal consumes
+  `_ssh_config_user` and inherits the fix.
+
+- **A latent `set -e` trap in the same helper.** A bare `return`
+  inherits the status of the preceding `[` test, so "no user
+  configured" surfaced as exit 1 and tripped `set -euo pipefail`
+  inside the caller's `$(...)` assignment. Early returns are now
+  explicit `return 0`; empty stdout is the "nothing configured"
+  signal, per the Section 8 helper contract.
+
+### Added
+
+- **Two regression tests** (`tests/test_engine_ssh_config.py`), one
+  verified to fail against the unfixed engine and reproduce the
+  reported symptom exactly, the other guarding the opposite direction
+  so the local-user comparison can't over-correct and start ignoring
+  a genuinely-configured `User`.
+
+- **A corrected test-harness docstring.** The `ssh -G` stub emitted
+  *nothing* for unconfigured hosts and claimed that matched OpenSSH.
+  It doesn't — real `ssh -G` always dumps a full effective config.
+  The stub being more forgiving than reality is why 419 passing tests
+  never saw this bug; the docstring now says so and points at the
+  guard.
+
+Workaround if you are staying on v3.2.0 for now:
+
+```bash
+export ARGO_ANYWHERE_USER=<your-anl-username>   # highest priority; beats the bad inference
+```
+
+Verified against real ANL infrastructure 2026-07-16: `connect`
+resolves the correct username from cache and completes with a single
+Duo prompt and no password prompt.
+
+---
+
+## v3.2.0 — 2026-07-15
+
+*(Changelog entry backfilled 2026-07-16; the release shipped without
+one. Content reconstructed from the release commit `cd8bbdd`.)*
+
+Feature-adding release. **Superseded by v3.2.1** — see above; this
+release has a username-resolution bug affecting most users. Install
+v3.2.1 instead.
+
+**One-line summary**: argo-anywhere learns to respect your
+`~/.ssh/config` — `argo-anywhere --node <ssh-config-alias>` now "just
+works", with alias detection, username inference, and automatic
+suppression of our `-J` when the alias already carries its own
+routing.
+
+Full design record:
+[`notes/impl_ssh_config_native.md`](notes/impl_ssh_config_native.md);
+locked design decision: **D-032** in [`PLAN.md`](PLAN.md).
+
+### Added
+
+- **Native `~/.ssh/config` support (D-032)** in the engine: new
+  helpers (`_ssh_config_hostname`, `_ssh_config_user`,
+  `_alias_has_own_proxy`, `_is_ssh_config_alias`), alias-aware
+  `pick_node`, and automatic skip of our `-J` when the target alias
+  has its own `ProxyJump` / `ProxyCommand` (which would otherwise be
+  redundant at best and a jump-loop error at worst).
+- **`--jump-host HOST`** / **`ARGO_ANYWHERE_JUMP_HOST=HOST`** for
+  pointing argo-anywhere at a non-default jump host. An explicitly
+  empty `ARGO_ANYWHERE_JUMP_HOST=""` is treated as `--no-jump`,
+  matching shell convention for opt-out env vars.
+- **Web-UI launcher SSH-target overrides** — compute node, ANL
+  username, jump host, and no-jump fields, with an ssh_config alias
+  picker (`/api/ssh-hosts`) and a resolved-launch preview panel
+  (`/api/preview-launch`) that shows what argo-anywhere will actually
+  run, including divergence between what you typed and what
+  ssh_config resolves. Both endpoints are IP-block-safe by contract:
+  neither authenticates against any SSH server.
+
+### Fixed
+
+- **PyYAML self-heal** in `ensure_argoproxy_installed`, which now
+  probes for PyYAML and installs it rather than assuming `argo-proxy`
+  pulls it transitively — an assumption falsified by a field report
+  from a fresh compute node, where the user hit "Refusing to write
+  argo-proxy config without PyYAML for safe merge".
+- **`handle_config_file`'s `[k/b/d/m/a]` prompt** only offers `[m]`
+  when merge can actually work (never for YAML; for JSON only when
+  `jq` is on `PATH`). Previously the option was offered and then
+  silently rejected after the user picked it.
+
+### Changed
+
+- **Install extras consolidated to a single-mode default.** `fastapi`,
+  `uvicorn`, and `pywebview` are now plain dependencies; the
+  `[web]` / `[app]` / `[all]` / `[test]` / `[screenshots]` extras are
+  gone. `pipx install argo-anywhere` delivers the web UI, native app,
+  and `install-launcher` out of the box — no more
+  `argo-anywhere[app]` to remember. Only `[dev]` remains.
+
+---
+
 ## v3.1.1 — 2026-07-13
 
 Hotfix. iTerm2 was smoke-tested during the v3.1.0 release cycle;
