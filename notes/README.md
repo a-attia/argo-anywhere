@@ -18,13 +18,12 @@ This directory holds working notes for the project:
   completes. Migrated from `docs/PHASE*_LIVE_TEST_PLAN.md` on
   2026-05-14 per the framework's `notes/` convention for
   working-document scratch space.
-- **`impl_<component>.md`** — per-component implementation plans. Used
-  once the project grew standalone-ish components: `impl_codex_aider.md`
-  (aider/codex as `--cli-tool` targets), `impl_lifecycle_commands.md`
-  (the connect/configure/run + install/uninstall reshape), and
-  `impl_python_webui.md` (the Model-A Python-package + web-UI rebuild,
-  merged to `main` 2026-07-12; promoted 2026-07-10 from the out-of-tree
-  `spike/` exploration docs, now stubs).
+- **`impl_<component>.md`** — per-component implementation plans, used
+  once the project grew standalone-ish components. Each records the
+  design, the trade-offs considered, and the decision it earns in
+  [`PLAN.md`](../PLAN.md). See the [index below](#index-of-impl--section-notes)
+  for the current set and their status; that table is the single source
+  of truth, so this bullet does not enumerate them.
 - **`section_<topic>.md`** (none today) — working notes for
   cross-cutting concerns. Not used today; reserved for future use.
 
@@ -52,6 +51,9 @@ Conventions follow
 | [`impl_lifecycle_commands.md`](impl_lifecycle_commands.md) | impl | designing (decisions locked 2026-07-08) | Plan for the three-level UX reshape: connect/configure/run verb split (D-024) + symmetric install/uninstall anchored at `~/.argo_anywhere/bin/` with an install manifest for honest config-restore (D-025). Phased A (manifest) -> B (verbs) -> C (install/uninstall). |
 | [`impl_python_webui.md`](impl_python_webui.md) | impl | **MERGED to `main` (2026-07-12)**; P0–P4 code-complete + `pytest` green; pre-publish live-test gate + PyPI publish pending | Model-A Python-package + web-UI rebuild: package owns the runtime, wraps the unchanged bash engine (vendored verbatim), two-lane driver (Lane-1 captured subprocess / Lane-2 PTY→browser terminal), FastAPI web UI + native app. Single source of truth; consolidates the former `spike/HANDOFF.md` + `spike/RESULTS.md` (now stubs). Records decisions D-026..D-030, the cold-Duo PASS, the P0–P4 layout, and the stdlib-PTY parity residual. `spike/` retains the proof-of-concept code the P0 web layer was lifted from. |
 | [`impl_launcher_cwd.md`](impl_launcher_cwd.md) | impl | **EXECUTED + USER-VERIFIED (2026-07-13)**; targets v3.1.0 | Web-UI launcher gets an explicit cwd field (absolute; MRU-pre-filled); scope free-text → dropdown; embedded terminal splits horizontally into persistent Channel (owns `connect`) + ephemeral Utility (`configure`/`setup`/`tunnel`); `run`/`client` hard-blocked from embedded (external terminals only); `project` scope forbid-list (`$HOME` + system dirs); engine `--cwd <path>` flag for CLI parity; light/dark theme toggle; multi-instance guard; cross-platform focus-follow-window. Records decision **D-031**. 133 baseline tests → **266 passing** (+133 new). Archive after first v3.1.0 release cycle. |
+| [`impl_ssh_config_native.md`](impl_ssh_config_native.md) | impl | **SHIPPED in v3.2.0** (`cd8bbdd`, 2026-07-15); live-verified with amendments A4/A5/A6, plus A7 (`ff89d8e`, 2026-07-16) post-release | Native `~/.ssh/config` respect: engine helpers (`_ssh_config_hostname` / `_ssh_config_user` / `_alias_has_own_proxy` / `_is_ssh_config_alias`), `resolve_username` refactored to a globals-based API, `--jump-host HOST` / `ARGO_ANYWHERE_JUMP_HOST`, mutable `ANL_JUMP`, plus the web-UI surface (`/api/ssh-hosts` alias picker + `/api/preview-launch` panel). Records decision **D-032** and its tri-lockstep coupling contract. **The doc's own header still reads "READY TO EXECUTE" — stale; the work shipped.** |
+| [`impl_pyyaml_and_menu_fix.md`](impl_pyyaml_and_menu_fix.md) | impl | **SHIPPED in v3.2.0** (`b80970c`, 2026-07-15) | PyYAML self-heal in `ensure_argoproxy_installed` (probes + installs rather than assuming argo-proxy pulls it transitively — falsified by a 2026-07-15 field report on `compute-386-02`), plus `handle_config_file`'s `[k/b/d/m/a]` prompt only offering `[m]` when merge can actually work (never for YAML; JSON only with `jq` on PATH). **The doc's own header still reads "DRAFT — not executed" — stale; the work shipped.** |
+| [`impl_command_echo.md`](impl_command_echo.md) | impl | **designing** (2026-07-16); no code committed | Proposal to echo the composed `ssh`/`scp` argv before execution (`--show-commands` / `ARGO_ANYWHERE_SHOW_COMMANDS`), so a wrong resolved identity is visible at a glance instead of inferred. Motivated by the A7 wrong-username bug (`ff89d8e`), where the existing `Using ANL username:` log named the culprit and still did not land. Recommends targeted echoes at 4 call sites over a 13-site `_run_ssh` refactor; the echo must never live inside `ssh_args` (its stdout IS the argv — the A5 subshell trap). Two decisions gate code: opt-in flag vs. auto-echo on SSH retry, and the redaction story. Would earn **D-033** if it ships. |
 
 ## Archive + resolution log
 
