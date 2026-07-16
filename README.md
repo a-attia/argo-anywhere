@@ -22,13 +22,21 @@ monitor, and run tools from a browser window without touching a terminal.
 
 ## TL;DR
 
-Two commands get you the full experience — CLI, web UI, and a
+Two commands, using [`pipx`](https://pipx.pypa.io/) (a standard
+installer for Python CLIs — isolated environment, still on your
+`PATH`), get you the full experience — CLI, web UI, and a
 double-clickable desktop app:
 
 ```sh
 pipx install argo-anywhere         # everything: CLI, web UI, native app
 argo-anywhere install-launcher     # + a double-clickable launcher (Desktop + Applications)
 ```
+
+Plain `pip install argo-anywhere` works identically if you'd rather
+share your Python environment. Use `--desktop` or `--app-bundle` on
+`install-launcher` if you want just one artifact instead of both. No
+extras to pick, no separate `[web]` step — everything a user needs is
+installed by default.
 
 Then double-click **argo-anywhere** in your Applications folder (macOS)
 or app menu (Linux), or run `argo-anywhere client` from a terminal for
