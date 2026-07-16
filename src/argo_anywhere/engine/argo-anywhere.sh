@@ -1886,25 +1886,92 @@ _alias_has_own_proxy() {
 }
 
 # _alias_proxy_notice_dedup <alias> <user>: log the "routes via ssh_config"
-# notice at most ONCE per alias per invocation. ssh_jump_args (which will
-# call this helper in a follow-up commit) is invoked ~10+ times per
-# `client` run (from every ssh_reachable / ssh_mux_open / SCP branch);
-# without dedup the user sees the same notice a dozen times per session.
+# notice at most ONCE per alias per invocation. ssh_jump_args is invoked
+# ~10+ times per `client` run (from every ssh_reachable / ssh_mux_open /
+# SCP branch / bootstrap ssh / tunnel-forward ssh / monitor loop). Without
+# dedup the user sees the same notice at least a half-dozen times per
+# session.
 #
 # Bash-3.2-compatible naming: use ${var//pat/replacement} to scrub the
 # alias into a valid identifier (bash 3.2 supports the two-slash form;
 # only the ${var,,} lowercasing is a bash-4 feature). Indirect read via
 # eval on the scrubbed variable name (safe: no attacker-supplied content
 # reaches the eval).
+#
+# Cross-subshell contract (bug fix 2026-07-15 live-verify): the sentinel
+# MUST be `export`ed so subshells spawned later in the `client` flow
+# (mode_client's tee-then-continue; the monitor loop; the tunnel-forward
+# subshell; etc.) inherit it and skip the duplicate log. Without
+# `export`, the sentinel is a plain shell variable that dies at each
+# subshell boundary and the notice fires per-subshell (~5x in a real
+# client run; observed on Attias-MacBook-Pro 2026-07-15 with compute-01).
+# The scrubbed variable name is safe to export -- only [a-zA-Z0-9_]
+# characters remain after the pattern substitution, so no shell
+# metachars reach `eval`.
 _alias_proxy_notice_dedup() {
   local alias="$1" user="$2"
   local safe="${alias//[^a-zA-Z0-9]/_}"
   local seen_var="_ALIAS_PROXY_NOTICE_SEEN_${safe}"
   eval "local seen=\${${seen_var}:-0}"
   if [ "$seen" = 1 ]; then return; fi
-  eval "${seen_var}=1"
+  eval "export ${seen_var}=1"
   log "Note: ${alias} already routes via ~/.ssh/config;"
   log "  not adding our -J ${user}@${ANL_JUMP}."
+}
+
+# _is_ssh_config_alias <target>: returns 0 (success) if ~/.ssh/config has
+# a meaningful entry for <target>, else 1 (no such entry / unresolvable).
+# Also sets `_ALIAS_DETECTION_REASON` (a human-readable snippet the
+# caller can embed in a log line) when returning 0.
+#
+# Signal union (introduced live-verify 2026-07-15; refined from the
+# initial `_ssh_config_hostname` rewrite-only check that missed the
+# common ANL pattern of `Host compute-* / HostName %h / ProxyJump ...`
+# where the alias exists to attach routing rather than to rewrite the
+# hostname):
+#
+#   (1) ssh -G rewrote the hostname (HostName foo.example.com under a
+#       `Host alias` block). Classic alias.
+#   (2) ssh -G shows a ProxyJump/ProxyCommand for this target
+#       (`ProxyJump user@bastion` under a `Host <target>` block). Alias
+#       exists to attach a specific route.
+#   (3) ssh -G shows a User for this target (`User <name>`). Alias
+#       exists to attach an identity.
+#
+# Any of (1)/(2)/(3) → detection succeeds. The three cover ~all
+# real-world ANL alias patterns; exotic cases (port-only, identity-file-
+# only, forward-only aliases) fall through to the caller's generic warn
+# ("not in ANL_NODES (proceeding anyway)"), which is what today does.
+#
+# `_ALIAS_DETECTION_REASON` variants:
+#   "resolves to <fqdn>"                             for signal (1)
+#   "no hostname rewrite; routing via ssh_config"   for signal (2) or (3)
+#
+# Each check is a separate `ssh -G` invocation (~5ms on macOS OpenSSH
+# 10.2). Not memoized -- called once per pick_node call site; the
+# repeated ssh_jump_args-driven dedup is handled by
+# `_alias_proxy_notice_dedup` above.
+_is_ssh_config_alias() {
+  local target="$1"
+  [ -n "$target" ] || return 1
+  _ALIAS_DETECTION_REASON=""
+  local _resolved
+  _resolved="$(_ssh_config_hostname "$target")"
+  if [ -n "$_resolved" ] && [ "$_resolved" != "$target" ]; then
+    _ALIAS_DETECTION_REASON="resolves to ${_resolved}"
+    return 0
+  fi
+  if _alias_has_own_proxy "$target"; then
+    _ALIAS_DETECTION_REASON="no hostname rewrite; routing via ~/.ssh/config's ProxyJump/ProxyCommand"
+    return 0
+  fi
+  local _resolved_user
+  _resolved_user="$(_ssh_config_user "$target")"
+  if [ -n "$_resolved_user" ]; then
+    _ALIAS_DETECTION_REASON="no hostname rewrite; identity attached via ~/.ssh/config (User ${_resolved_user})"
+    return 0
+  fi
+  return 1
 }
 
 # ============================================================================
@@ -4399,18 +4466,16 @@ pick_node() {
       [ "$n" = "$req" ] && in_list=1 && break
     done
     if [ "$in_list" -eq 0 ]; then
-      # D-032 Sub-fix A (2026-07-15): distinguish "user typed an
-      # ssh_config alias" from "user typed an unknown hostname."
-      # If ssh -G resolves the string to a rewritten hostname, it IS
-      # an alias -- emit a helpful log line ("routes via ~/.ssh/config")
-      # instead of the generic warn ("not in ANL_NODES"). If ssh -G
-      # doesn't rewrite (bare hostname or resolution fails), keep the
-      # historical warn verbatim.
-      local _resolved
-      _resolved="$(_ssh_config_hostname "$req")"
-      if [ -n "$_resolved" ] && [ "$_resolved" != "$req" ]; then
+      # D-032 Sub-fix A (2026-07-15; refined post-live-verify 2026-07-15):
+      # distinguish "user typed an ssh_config alias" from "user typed an
+      # unknown hostname." Delegates the detection to
+      # `_is_ssh_config_alias` (see Section 8) which checks a union of
+      # three signals (HostName rewrite, ProxyJump/ProxyCommand, User);
+      # sets `_ALIAS_DETECTION_REASON` so we can render the right log
+      # message. If none fire, keep the historical warn.
+      if _is_ssh_config_alias "$req"; then
         log "Note: '${req}' is an ssh_config alias"
-        log "  (resolves to ${_resolved}); proceeding via ~/.ssh/config."
+        log "  (${_ALIAS_DETECTION_REASON}); proceeding via ~/.ssh/config."
       else
         warn "Requested node '${req}' is not in ANL_NODES (proceeding anyway)."
       fi
@@ -4560,13 +4625,11 @@ EOF
       done
       if [ "$in_list" -eq 0 ]; then
         # D-032 Sub-fix A: same alias-detection as the --node branch
-        # above -- if ssh -G resolves it, promote the warn to a
-        # helpful log line.
-        local _resolved
-        _resolved="$(_ssh_config_hostname "$choice")"
-        if [ -n "$_resolved" ] && [ "$_resolved" != "$choice" ]; then
+        # above (via `_is_ssh_config_alias`). See Section 8 for the
+        # helper's detection logic.
+        if _is_ssh_config_alias "$choice"; then
           log "Note: '${choice}' is an ssh_config alias"
-          log "  (resolves to ${_resolved}); proceeding via ~/.ssh/config."
+          log "  (${_ALIAS_DETECTION_REASON}); proceeding via ~/.ssh/config."
         else
           warn "Typed node '${choice}' is not in ANL_NODES (proceeding anyway)."
         fi

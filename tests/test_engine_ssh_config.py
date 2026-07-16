@@ -857,3 +857,166 @@ fi
         f"expected generic warn for bare hostname; got:\n{err}"
     )
     assert "is an ssh_config alias" not in err
+
+
+# ===========================================================================
+# Post-live-verify fixes (2026-07-15) — see
+# notes/audit_v3_1_0_post_execution.md §11 and the commit message on the
+# amendment.
+# ===========================================================================
+
+
+def test_A_is_ssh_config_alias_signal_1_hostname_rewrite(tmp_path: Path) -> None:
+    """Signal 1: `HostName foo.example.com` under `Host alias` (classic
+    alias with hostname rewrite). _is_ssh_config_alias returns 0 and
+    sets _ALIAS_DETECTION_REASON to "resolves to <fqdn>".
+    """
+    shim_dir = tmp_path / "bin"
+    ssh_g = {"my-alias": "hostname resolved-host.example.com\n"}
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    snippet = """
+if _is_ssh_config_alias my-alias; then
+  echo "IS_ALIAS=yes"
+  echo "REASON=${_ALIAS_DETECTION_REASON}"
+else
+  echo "IS_ALIAS=no"
+fi
+"""
+    rc, out, _err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0
+    assert "IS_ALIAS=yes" in out
+    assert "REASON=resolves to resolved-host.example.com" in out
+
+
+def test_A_is_ssh_config_alias_signal_2_proxyjump(tmp_path: Path) -> None:
+    """Signal 2: `HostName %h` (no rewrite) + `ProxyJump ...` — the
+    common ANL pattern the live-verify surfaced 2026-07-15. Before this
+    fix, only signal 1 was checked and this case fell through to the
+    generic warn.
+    """
+    shim_dir = tmp_path / "bin"
+    ssh_g = {"compute-01": (
+        "hostname compute-01\n"          # no rewrite (%h → self)
+        "user example-user\n"
+        "proxyjump example-user@logins.cels.anl.gov\n"
+    )}
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    snippet = """
+if _is_ssh_config_alias compute-01; then
+  echo "IS_ALIAS=yes"
+  echo "REASON=${_ALIAS_DETECTION_REASON}"
+else
+  echo "IS_ALIAS=no"
+fi
+"""
+    rc, out, _err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0
+    assert "IS_ALIAS=yes" in out, (
+        f"live-verify regression: signal 2 (ProxyJump without hostname "
+        f"rewrite) should be detected as an alias; got:\n{out}"
+    )
+    assert "no hostname rewrite" in out
+    assert "ProxyJump" in out
+
+
+def test_A_is_ssh_config_alias_signal_3_user_only(tmp_path: Path) -> None:
+    """Signal 3: alias exists only to attach a User (no HostName rewrite,
+    no ProxyJump/ProxyCommand). Rare but legitimate — e.g., a user with
+    a different account on a specific host but the same routing.
+    """
+    shim_dir = tmp_path / "bin"
+    ssh_g = {"my-alias": (
+        "hostname my-alias\n"     # no rewrite
+        "user special-account\n"  # User attached
+        "proxycommand none\n"     # explicit no-proxy sentinel
+    )}
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    snippet = """
+if _is_ssh_config_alias my-alias; then
+  echo "IS_ALIAS=yes"
+  echo "REASON=${_ALIAS_DETECTION_REASON}"
+else
+  echo "IS_ALIAS=no"
+fi
+"""
+    rc, out, _err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0
+    assert "IS_ALIAS=yes" in out, (
+        f"signal 3 (User-only alias) should be detected; got:\n{out}"
+    )
+    assert "User special-account" in out
+
+
+def test_A_is_ssh_config_alias_returns_false_for_bare_hostname(tmp_path: Path) -> None:
+    """A bare hostname with no ssh_config entry: `ssh -G bare-node` returns
+    only defaults (hostname == input, no User, no ProxyJump). Detection
+    should return 1 (not an alias)."""
+    shim_dir = tmp_path / "bin"
+    # ssh -G on a target with no config: returns only defaults matching input.
+    # Our shim returns empty for unknown aliases; the engine's helpers see
+    # empty output and treat it as "no signal fires."
+    ssh_g = {}
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    snippet = """
+if _is_ssh_config_alias unknown-host; then
+  echo "IS_ALIAS=yes"
+else
+  echo "IS_ALIAS=no"
+fi
+"""
+    rc, out, _err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0
+    assert "IS_ALIAS=no" in out
+
+
+def test_C_notice_dedup_persists_across_subshells(tmp_path: Path) -> None:
+    """Sub-fix C dedup: sentinel MUST survive subshell boundaries so the
+    notice fires ONCE per client-run, not per-subshell.
+
+    Live-verify 2026-07-15 (Attias-MacBook-Pro against compute-01):
+    without `export`, the sentinel died at each subshell boundary and
+    the notice fired ~5x per client run (pick_node's ssh_reachable,
+    ssh_mux_open, scp bootstrap, ssh bootstrap, tunnel-forward).
+
+    Test strategy: fire the dedup helper in the parent shell, then in a
+    subshell (via `bash -c ""` or `( ... )`), then again in the parent.
+    Assert the notice appears exactly ONCE across all three calls.
+    """
+    # Three-phase test:
+    # 1. Fire the dedup in the parent shell.
+    # 2. Fire it in a parenthesized subshell.
+    # 3. Fork a full bash subprocess and check that the sentinel is in
+    #    that subprocess's environment (which is the actual multi-
+    #    subshell scenario a real `client` run hits).
+    # 4. Fire it in the parent again.
+    #
+    # If dedup is broken (sentinel not exported), we'd see the notice
+    # 2-3 times. If dedup works, exactly once.
+    snippet = r"""
+_alias_proxy_notice_dedup compute-01 example-user
+(
+  _alias_proxy_notice_dedup compute-01 example-user
+)
+bash -c 'if [ "${_ALIAS_PROXY_NOTICE_SEEN_compute_01:-0}" = "1" ]; then echo "SUBSHELL_INHERITED=yes" >&2; else echo "SUBSHELL_INHERITED=no" >&2; fi'
+_alias_proxy_notice_dedup compute-01 example-user
+"""
+    rc, _out, err = _source_engine_and_run(snippet)
+    assert rc == 0, f"snippet failed:\n{err}"
+    # The `log "Note: ..."` line must appear exactly once across the
+    # parent + subshell + parent-again invocations.
+    count = err.count("compute-01 already routes via")
+    assert count == 1, (
+        f"expected exactly ONE dedup notice across parent+subshell+parent; "
+        f"got {count}. The sentinel isn't being exported (fix: change "
+        f"`eval \"${{seen_var}}=1\"` to `eval \"export ${{seen_var}}=1\"` "
+        f"in _alias_proxy_notice_dedup).\n\nCaptured stderr:\n{err}"
+    )
+    # The subshell should have inherited the exported sentinel.
+    assert "SUBSHELL_INHERITED=yes" in err, (
+        f"the exported sentinel didn't propagate into a `bash -c` subshell "
+        f"-- the export isn't working. err:\n{err}"
+    )
