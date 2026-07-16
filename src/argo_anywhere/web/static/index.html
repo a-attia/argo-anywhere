@@ -452,8 +452,8 @@
            (--jump-host). Popover-collapsed by default via <details>
            so the launcher isn't overwhelming on first use; expands with
            a click. See notes/impl_ssh_config_native.md §10.2. -->
-      <details class="ssh-target-details" style="margin-top:8px">
-        <summary style="cursor:pointer">SSH target overrides <span class="pop-note">(optional; usually leave blank)</span></summary>
+      <details id="sshOverridesPanel" class="ssh-target-details" style="margin-top:8px">
+        <summary style="cursor:pointer">SSH target overrides <span id="sshOverridesHint" class="pop-note">(optional; usually leave blank)</span></summary>
         <div class="two" style="margin-top:8px">
           <div class="field">
             <label for="lNode">compute node</label>
@@ -472,7 +472,7 @@
             <label for="lUser">ANL username</label>
             <input id="lUser" type="text" autocomplete="off"
                    placeholder="(auto — from ~/.ssh/config or cache)" />
-            <span class="pop-note" style="margin-put:4px">explicit --user; overrides ssh_config inference</span>
+            <span class="pop-note" style="margin-top:4px">explicit --user; overrides ssh_config inference</span>
           </div>
         </div>
         <div class="two" style="margin-top:8px">
@@ -498,7 +498,7 @@
            /api/preview-launch (debounced 750ms per §8 Q12; ssh -G is
            non-authenticating so no Duo/IP-block risk per §7 W3/C5). -->
       <details id="previewPanel" class="preview-panel" style="margin-top:8px">
-        <summary id="previewSummary" style="cursor:pointer">Show resolved launch</summary>
+        <summary id="previewSummary" style="cursor:pointer">Show resolved launch<span id="previewHint" class="pop-note"></span></summary>
         <div id="launchPreview" aria-live="polite"
              style="margin-top:8px; font-family: monospace; white-space: pre-wrap;"></div>
       </details>
@@ -834,6 +834,12 @@
       // when it drops. Steady-state polling is handled by the interval below.
       if (tunnelUp && liveHealth && !prevTunnelUp) doHealthCheck();
       if (!tunnelUp) { lastHealthTs = 0; el('liveDot').classList.remove('on'); }
+      // If the tunnel state changed AND the launcher popover is open,
+      // refresh the SSH-overrides + preview hints so they reflect the new
+      // channel-up-ness (matters for conditional-use verbs: configure/run).
+      if (tunnelUp !== prevTunnelUp && !el('launchBackdrop').hasAttribute('hidden')) {
+        try { updateOverridesHint(); } catch (e) { /* function may not be defined yet on boot */ }
+      }
       prevTunnelUp = tunnelUp;
 
       renderSessions(lastSessions); renderListeners(listeners);
@@ -1067,6 +1073,41 @@
     // Any verb change may flip which target options are legal, so rebuild.
     el('lVerb').addEventListener('change', rebuildTargets);
 
+    // Contextual hints for the SSH-target-overrides and preview panels.
+    // Different verbs consume the overrides differently:
+    //   * connect / tunnel / setup     -- always use them (open the channel)
+    //   * configure / run              -- use them ONLY if the channel is down
+    //                                     and needs to be brought up
+    // Rather than hide the fields for the conditional-use verbs (which would
+    // silently break the "channel dropped, need to reconnect" flow), we keep
+    // them visible but update the summary text to make the conditional
+    // relationship explicit. See notes/impl_ssh_config_native.md for the
+    // trade-off analysis (Option B).
+    function updateOverridesHint() {
+      const verb = el('lVerb').value;
+      const channelVerbs = new Set(['connect', 'tunnel', 'setup']);
+      const conditionalVerbs = new Set(['configure', 'run']);
+      const sshHint = el('sshOverridesHint');
+      const previewHint = el('previewHint');
+      if (channelVerbs.has(verb)) {
+        sshHint.textContent = ' (used to open the channel; usually leave blank)';
+        previewHint.textContent = '';
+      } else if (conditionalVerbs.has(verb)) {
+        if (tunnelUp) {
+          sshHint.textContent = ' (channel is up; overrides won\u2019t be used)';
+          previewHint.textContent = ' (informational only \u2014 channel is up)';
+        } else {
+          sshHint.textContent = ' (only used if the channel needs to be opened)';
+          previewHint.textContent = '';
+        }
+      } else {
+        // Unknown verb (defensive): fall back to the neutral default.
+        sshHint.textContent = ' (optional; usually leave blank)';
+        previewHint.textContent = '';
+      }
+    }
+    el('lVerb').addEventListener('change', updateOverridesHint);
+
     function openLaunch() {
       el('popNote').textContent = ''; el('popNote').className = 'pop-note';
       // D-031 D3b: pre-fill cwd with a visible default so the field is never
@@ -1087,6 +1128,9 @@
       // `project` (which would write config into ~). Project markers do NOT
       // auto-switch to `project` (safer to leave user's explicit choice alone).
       applyScopeDefault();
+      // Refresh the SSH-overrides + preview hints for the current verb +
+      // channel state (see updateOverridesHint's design doc above).
+      updateOverridesHint();
       el('launchBackdrop').removeAttribute('hidden');
       el('lVerb').focus();
     }
