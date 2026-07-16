@@ -10,6 +10,6 @@ from __future__ import annotations
 
 # Package version = the single source of release identity (D-029). This is
 # distinct from the vendored engine's internal ``SCRIPT_VERSION``.
-__version__ = "3.1.1"
+__version__ = "3.2.0"
 
 __all__ = ["__version__"]
