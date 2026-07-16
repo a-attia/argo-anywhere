@@ -2016,14 +2016,20 @@ environments (see [`notes/impl_ssh_config_native.md`](../notes/impl_ssh_config_n
 
 **Contract.**
 
-- **Engine (Track E; commits C1-C3)**: three new helpers in
-  Section 8 (`_ssh_config_hostname`, `_ssh_config_user`,
-  `_alias_has_own_proxy`) + a dedup helper
-  (`_alias_proxy_notice_dedup`). `ssh_jump_args` and the SCP
-  branch check `_alias_has_own_proxy` and skip our `-J` when
-  the alias routes itself. `pick_node`'s "not in ANL_NODES"
-  warn upgrades to a helpful log line when the string is an
-  ssh_config alias. `resolve_username` refactored to
+- **Engine (Track E; commits C1-C3, refined by A5 amendment
+  2026-07-15)**: helpers in Section 8 -- `_ssh_config_hostname`,
+  `_ssh_config_user`, `_alias_has_own_proxy`,
+  `_is_ssh_config_alias` (union-of-3-signals: HostName rewrite OR
+  ProxyJump/ProxyCommand OR User), `_announce_alias_routing_once`
+  (fires the "routes via ssh_config" notice from the parent shell
+  in `_client_common_setup`, exactly once per client-setup).
+  `ssh_jump_args` and the SCP branch check `_alias_has_own_proxy`
+  and skip our `-J` when the alias routes itself; both stay
+  silent (the earlier `_alias_proxy_notice_dedup` was removed in
+  the A5 amendment because dedup from inside a `$()` subshell is
+  broken by design -- the sentinel never propagated to the parent).
+  `pick_node`'s "not in ANL_NODES" warn upgrades to a helpful log
+  line when the string is an ssh_config alias. `resolve_username` refactored to
   set globals (`_USERNAME_RESULT` + `_USERNAME_SOURCE` +
   `_USERNAME_SHOULD_CACHE`) instead of echoing; callers must NOT
   use `$(...)` capture (D-005 pattern). ssh-config-inferred

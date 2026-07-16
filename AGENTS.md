@@ -501,8 +501,13 @@ Resolution precedence at `main()` (post-argv, pre-mode-dispatch):
 5. Per-target `~/.ssh/config` `ProxyJump`/`ProxyCommand` on the alias
    → `ssh_jump_args` detects via `_alias_has_own_proxy` and skips
    our `-J` even when steps 1-4 didn't fire, deferring to the
-   alias's own routing. Notice deduped per-alias-per-invocation
-   via `_alias_proxy_notice_dedup`.
+   alias's own routing. The user-facing "routes via ssh_config"
+   notice fires ONCE per client-setup from
+   `_announce_alias_routing_once` in `_client_common_setup` (parent
+   shell); `ssh_jump_args` itself is silent. Design history: A5
+   amendment 2026-07-15 replaced an earlier `_alias_proxy_notice_dedup`
+   that tried to dedup from within a `$()` subshell (broken by design;
+   the sentinel never propagated to the parent).
 6. Default: `ANL_JUMP="logins.cels.anl.gov"` (declared in Section 5).
 
 **Load-bearing invariant**: `ANL_JUMP` must NEVER be declared
@@ -818,7 +823,8 @@ reviewers verify by grep or the mirror-test suite.
 
     2. **Engine helpers** (`_ssh_config_hostname` /
        `_ssh_config_user` / `_alias_has_own_proxy` /
-       `_alias_proxy_notice_dedup` in Section 8 of the engine) ↔
+       `_is_ssh_config_alias` / `_announce_alias_routing_once` in
+       Section 8 of the engine) ↔
        **Python mirror** (`argo_anywhere.web.preview.reflect_jump_args`
        + `SshGResult.has_own_proxy`) in
        `src/argo_anywhere/web/preview.py`. The mirror reflects

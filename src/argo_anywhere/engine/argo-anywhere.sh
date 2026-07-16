@@ -1788,13 +1788,20 @@ ssh_jump_args() {
   # our -J on top would either be redundant (best case) or trigger a
   # jump-loop error if the alias's proxy IS the same host we'd add.
   # This is what makes `argo-anywhere --node <ssh-config-alias>`
-  # actually work -- without the skip, our unconditional -J on top of
-  # the alias's own ProxyJump causes ssh_reachable to fail and
-  # pick_node dies. The notice is deduped (~10+ ssh_jump_args calls
-  # per client run; dedup keeps the log line to one per alias per
-  # invocation).
+  # actually work.
+  #
+  # SILENT (v3.1.0-post-A4 amendment): this function is called ~10x
+  # per `client` run from `ssh_args` via `$(...)` command substitution
+  # (see line ~2298). That means EVERY call runs in a subshell, so any
+  # attempt to dedup a log line from here via a sentinel env var
+  # fails: the export propagates parent -> child, but never child ->
+  # parent, so the "have we notified?" check always sees "no." The
+  # A4 amendment tried `export`ing the sentinel; it didn't work
+  # (surfaced in live-verify -- notice fired 5x still). Fix: don't
+  # log from here at all. `_client_common_setup` announces the alias
+  # ONCE at the top of the run via `_announce_alias_routing_once`;
+  # this function stays purely functional (returns argv fragment).
   if [ -n "$target" ] && _alias_has_own_proxy "$target"; then
-    _alias_proxy_notice_dedup "$target" "$user"
     return
   fi
   printf -- '-J %s@%s' "$user" "$ANL_JUMP"
@@ -1885,38 +1892,42 @@ _alias_has_own_proxy() {
   return 1
 }
 
-# _alias_proxy_notice_dedup <alias> <user>: log the "routes via ssh_config"
-# notice at most ONCE per alias per invocation. ssh_jump_args is invoked
-# ~10+ times per `client` run (from every ssh_reachable / ssh_mux_open /
-# SCP branch / bootstrap ssh / tunnel-forward ssh / monitor loop). Without
-# dedup the user sees the same notice at least a half-dozen times per
-# session.
+# _announce_alias_routing_once <alias> <user>: emit the "routes via
+# ~/.ssh/config" notice ONCE per client-setup, from the parent shell
+# (never from within a subshell). Called by _client_common_setup right
+# after pick_node returns; no dedup logic needed because the call site
+# is inherently once-per-run.
 #
-# Bash-3.2-compatible naming: use ${var//pat/replacement} to scrub the
-# alias into a valid identifier (bash 3.2 supports the two-slash form;
-# only the ${var,,} lowercasing is a bash-4 feature). Indirect read via
-# eval on the scrubbed variable name (safe: no attacker-supplied content
-# reaches the eval).
+# Design history (2026-07-15 amendment A5): the initial design put a
+# dedup wrapper (`_alias_proxy_notice_dedup`) around a `log` call
+# inside `ssh_jump_args`. That was broken by design because
+# `ssh_jump_args` is called via `$(...)` command substitution from
+# `ssh_args` (line ~2298), which spawns a subshell for every call.
+# Environment mutations in subshells never propagate to the parent,
+# so no sentinel-based dedup could ever work from within that
+# subshell. Fix (this function): move the notice OUT of ssh_jump_args
+# entirely and emit it from `_client_common_setup` in the parent
+# shell. `ssh_jump_args` stays silent + purely functional.
 #
-# Cross-subshell contract (bug fix 2026-07-15 live-verify): the sentinel
-# MUST be `export`ed so subshells spawned later in the `client` flow
-# (mode_client's tee-then-continue; the monitor loop; the tunnel-forward
-# subshell; etc.) inherit it and skip the duplicate log. Without
-# `export`, the sentinel is a plain shell variable that dies at each
-# subshell boundary and the notice fires per-subshell (~5x in a real
-# client run; observed on Attias-MacBook-Pro 2026-07-15 with compute-01).
-# The scrubbed variable name is safe to export -- only [a-zA-Z0-9_]
-# characters remain after the pattern substitution, so no shell
-# metachars reach `eval`.
-_alias_proxy_notice_dedup() {
+# Trade-off: the notice only fires when the client-setup path knows
+# the alias-routing decision at startup (i.e. --node was an alias, or
+# pick_node's interactive branch resolved to one). If pick_node picks
+# a non-alias node interactively, no notice fires -- which is correct
+# (there's no alias-routing to announce). The picker-interactive
+# alias case is handled by pick_node's own "Note: ... is an
+# ssh_config alias" log line (from _is_ssh_config_alias); the
+# routing-specific notice below is redundant with that in the
+# alias-and-has-own-proxy case, so we skip it if pick_node already
+# printed the alias notice.
+_announce_alias_routing_once() {
   local alias="$1" user="$2"
-  local safe="${alias//[^a-zA-Z0-9]/_}"
-  local seen_var="_ALIAS_PROXY_NOTICE_SEEN_${safe}"
-  eval "local seen=\${${seen_var}:-0}"
-  if [ "$seen" = 1 ]; then return; fi
-  eval "export ${seen_var}=1"
-  log "Note: ${alias} already routes via ~/.ssh/config;"
-  log "  not adding our -J ${user}@${ANL_JUMP}."
+  [ -n "$alias" ] || return 0
+  # Only announce if the alias actually has its own proxy (i.e. we
+  # DID skip our -J). No-proxy aliases route via our default -J and
+  # need no special announcement.
+  _alias_has_own_proxy "$alias" || return 0
+  log "Note: '${alias}' routes via ~/.ssh/config;"
+  log "  argo is NOT adding a -J on top ('${user}@${ANL_JUMP}' would be redundant)."
 }
 
 # _is_ssh_config_alias <target>: returns 0 (success) if ~/.ssh/config has
@@ -4694,10 +4705,10 @@ remote_bootstrap() {
     # ProxyJump/ProxyCommand if present. Mirrors the same skip in
     # ssh_jump_args (see comment there). Without this, scp bootstrap
     # would fail the same way ssh does for ssh_config-alias nodes.
-    # Notice already fired via ssh_jump_args -> _alias_proxy_notice_dedup
-    # earlier in the same run (pick_node's ssh_reachable calls ssh_args
-    # which calls ssh_jump_args); dedup keeps the log line to one per
-    # alias per invocation.
+    # The user-facing announcement of alias routing was moved to
+    # _announce_alias_routing_once in _client_common_setup (A5
+    # amendment 2026-07-15) so it fires exactly once per client run
+    # in the parent shell -- this branch runs silently.
     if ! _alias_has_own_proxy "$node"; then
       scp_opts+=( -o "ProxyJump=${user}@${ANL_JUMP}" )
     fi
@@ -6278,11 +6289,16 @@ _client_common_setup() {
   if mfa_enabled; then
     node="$(pick_node "$ANL_USERNAME")"
     log "Selected node: ${node}" >&2
+    # D-032 (A5 amendment 2026-07-15): announce alias routing ONCE
+    # in the parent shell, BEFORE any ssh_args-driven subshell can
+    # miss the notice due to the parent -> child export barrier.
+    _announce_alias_routing_once "$node" "$ANL_USERNAME"
     ssh_preflight "$ANL_USERNAME" "$node"
   else
     ssh_preflight "$ANL_USERNAME"
     node="$(pick_node "$ANL_USERNAME")"
     log "Selected node: ${node}" >&2
+    _announce_alias_routing_once "$node" "$ANL_USERNAME"
   fi
 
   # On-node short-circuit. If the picked node is THIS host, the SSH tunnel

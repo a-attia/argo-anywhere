@@ -6,7 +6,6 @@ Structure follows the plan's commit sequence
 - **C1 tests** (helpers exist; --jump-host plumbing; grep invariants):
   test_ssh_config_helpers_are_defined,
   test_ssh_config_helpers_return_empty_on_ssh_G_failure,
-  test_alias_proxy_notice_dedup_*,
   test_jump_host_*,
   test_no_local_ANL_JUMP_shadow,
   test_ANL_JUMP_readers_use_expansion.
@@ -15,12 +14,23 @@ Structure follows the plan's commit sequence
   drop a stub `ssh` binary into a scratch PATH so the helpers see
   synthetic `ssh -G` output. Cover:
     * Sub-fix C: ssh_jump_args skips -J when alias has own ProxyJump;
-      adds -J when it doesn't; dedup fires once per alias.
+      adds -J when it doesn't; is SILENT (A5 amendment moved the
+      "routes via ssh_config" notice to _announce_alias_routing_once).
     * Sub-fix B: resolve_username reads ssh-config User; NEVER caches
       the inferred value; --user flag wins over ssh-config.
     * Sub-fix A: pick_node's warn upgrades to a helpful log line
       when the string is an ssh_config alias (verified via a smaller
       unit-level slice, not a full pick_node run which needs live SSH).
+
+- **A5 amendment tests** (post-live-verify 2026-07-15): the initial
+  `_alias_proxy_notice_dedup` was broken by design (called from
+  within $() subshell so the sentinel never propagated back to the
+  parent). Replaced with `_announce_alias_routing_once` called from
+  `_client_common_setup` in the parent shell. Corresponding tests:
+  test_C_ssh_jump_args_is_silent,
+  test_C_announce_alias_routing_once_from_parent,
+  test_C_announce_skipped_for_non_alias_node,
+  test_A_is_ssh_config_alias_signal_* (union-of-3-signals broadening).
 
 See notes/impl_ssh_config_native.md §4.2 for the full test-case list.
 """
@@ -90,16 +100,20 @@ def _run_engine(argv: list[str], env: dict[str, str] | None = None,
 
 
 def test_ssh_config_helpers_are_defined() -> None:
-    """All three helpers + the dedup wrapper are defined by sourcing the engine.
+    """All D-032 helpers are defined by sourcing the engine.
 
     C1 guarantees the helpers exist; C2 exercises their behavior via
-    real ssh -G output (mocked with fixture ssh binaries).
+    real ssh -G output (mocked with fixture ssh binaries). The A5
+    amendment (2026-07-15) replaced `_alias_proxy_notice_dedup` with
+    `_announce_alias_routing_once` (see design history in Section 8
+    of the engine).
     """
     snippet = """
-declare -f _ssh_config_hostname >/dev/null || { echo MISSING _ssh_config_hostname >&2; exit 1; }
-declare -f _ssh_config_user     >/dev/null || { echo MISSING _ssh_config_user     >&2; exit 1; }
-declare -f _alias_has_own_proxy >/dev/null || { echo MISSING _alias_has_own_proxy >&2; exit 1; }
-declare -f _alias_proxy_notice_dedup >/dev/null || { echo MISSING _alias_proxy_notice_dedup >&2; exit 1; }
+declare -f _ssh_config_hostname          >/dev/null || { echo MISSING _ssh_config_hostname          >&2; exit 1; }
+declare -f _ssh_config_user              >/dev/null || { echo MISSING _ssh_config_user              >&2; exit 1; }
+declare -f _alias_has_own_proxy          >/dev/null || { echo MISSING _alias_has_own_proxy          >&2; exit 1; }
+declare -f _announce_alias_routing_once  >/dev/null || { echo MISSING _announce_alias_routing_once  >&2; exit 1; }
+declare -f _is_ssh_config_alias          >/dev/null || { echo MISSING _is_ssh_config_alias          >&2; exit 1; }
 echo OK
 """
     rc, out, err = _source_engine_and_run(snippet)
@@ -132,40 +146,17 @@ echo "P=${{p}}"
     assert "P=NO" in out, f"expected P=NO for bogus alias; got:\n{out}"
 
 
-def test_alias_proxy_notice_dedup_fires_once_per_alias() -> None:
-    """Call _alias_proxy_notice_dedup ten times with the same alias;
-    the log line should appear exactly once in captured stderr.
-    """
-    snippet = """
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  _alias_proxy_notice_dedup polaris-login <ANL-username>
-done
-"""
-    # Use a scrubbed <ANL-username> to avoid embedding a real value.
-    snippet = snippet.replace("<ANL-username>", "example-user")
-    rc, _out, err = _source_engine_and_run(snippet)
-    assert rc == 0, f"dedup helper failed:\n{err}"
-    # The notice starts with 'Note: polaris-login already routes via'.
-    # Count occurrences in stderr.
-    notice_count = err.count("polaris-login already routes via")
-    assert notice_count == 1, (
-        f"expected exactly ONE notice per invocation; got {notice_count}:\n{err}"
-    )
-
-
-def test_alias_proxy_notice_dedup_fires_once_per_distinct_alias() -> None:
-    """Different aliases should each get their own single notice."""
-    snippet = """
-_alias_proxy_notice_dedup polaris-login example-user
-_alias_proxy_notice_dedup polaris-login example-user
-_alias_proxy_notice_dedup swing         example-user
-_alias_proxy_notice_dedup swing         example-user
-_alias_proxy_notice_dedup polaris-login example-user
-"""
-    rc, _out, err = _source_engine_and_run(snippet)
-    assert rc == 0, f"dedup helper failed:\n{err}"
-    assert err.count("polaris-login already routes via") == 1
-    assert err.count("swing already routes via") == 1
+# NOTE: the pre-A5 tests `test_alias_proxy_notice_dedup_fires_once_per_alias`
+# and `test_alias_proxy_notice_dedup_fires_once_per_distinct_alias` were
+# DELETED by the A5 amendment (2026-07-15 live-verify aftermath). Those
+# tests exercised a helper (`_alias_proxy_notice_dedup`) that could
+# never work correctly: it was called from within `$(...)` command
+# substitution (via `ssh_args` -> `ssh_jump_args` -> the dedup), and no
+# environment mutation inside a subshell propagates back to the parent
+# to be seen by the NEXT `$(...)` invocation. The A5 replacement is
+# `_announce_alias_routing_once` (see below) which is called from the
+# parent shell in `_client_common_setup` -- inherently once-per-run,
+# no sentinel logic needed.
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +339,23 @@ def test_ssh_config_helpers_and_flag_present_in_source() -> None:
     """
     src = _engine_source()
     for helper in ("_ssh_config_hostname", "_ssh_config_user",
-                   "_alias_has_own_proxy", "_alias_proxy_notice_dedup"):
+                   "_alias_has_own_proxy", "_announce_alias_routing_once",
+                   "_is_ssh_config_alias"):
         assert f"{helper}()" in src, f"{helper} definition missing from engine"
+    # A5 amendment (2026-07-15): the DEFINITION of `_alias_proxy_notice_dedup`
+    # was removed (the helper was broken by design -- called from within
+    # $() subshell so the sentinel never propagated back to the parent).
+    # Guard against a resurrection that would re-introduce the pattern.
+    # Comment/docstring mentions of the old name are FINE (they're
+    # historical explanation); we only reject an actual function definition.
+    assert "_alias_proxy_notice_dedup()" not in src, (
+        "_alias_proxy_notice_dedup was removed by A5 (broken by design: "
+        "was called from within $() subshell so the sentinel never "
+        "propagated back to the parent). The replacement is "
+        "_announce_alias_routing_once called from _client_common_setup "
+        "in the parent shell. If you're re-adding sentinel dedup, please "
+        "read the design history comment in Section 8 first."
+    )
     assert "--jump-host)" in src, "--jump-host argv arm missing"
     assert 'ARGO_ANYWHERE_JUMP_HOST+set' in src, (
         "ARGO_ANYWHERE_JUMP_HOST resolution block missing"
@@ -550,11 +556,19 @@ def test_C_scp_branch_gated_by_alias_has_own_proxy() -> None:
     )
 
 
-def test_C_notice_dedup_across_multiple_ssh_jump_args_calls(tmp_path: Path) -> None:
-    """Sub-fix C dedup: calling ssh_jump_args 10x for the same alias
-    fires the notice exactly once. Documents the per-alias-per-invocation
-    contract that prevents log-spam in a real `client` run (which invokes
-    ssh_jump_args ~10+ times)."""
+def test_C_ssh_jump_args_is_silent(tmp_path: Path) -> None:
+    """A5 amendment (2026-07-15): ssh_jump_args must NOT log the
+    "routes via ssh_config" notice from within its own body. That
+    notice is now handled ONCE per client-setup by
+    _announce_alias_routing_once in the parent shell.
+
+    ssh_jump_args is called from `$(...)` command substitution via
+    ssh_args (line ~2298); anything it logged from within would fire
+    in a subshell and be output-captured or dropped depending on how
+    the caller consumed the result. Making ssh_jump_args purely
+    functional (returns argv fragment; no side effects) is the
+    correct D-005 pattern.
+    """
     shim_dir = tmp_path / "bin"
     ssh_g = {
         "polaris-login": (
@@ -572,10 +586,57 @@ done
 """
     rc, _out, err = _source_engine_and_run(snippet, env=env)
     assert rc == 0
-    count = err.count("polaris-login already routes via")
-    assert count == 1, (
-        f"expected exactly one dedup notice across 10 ssh_jump_args calls; "
-        f"got {count}:\n{err}"
+    # Zero log output from ssh_jump_args itself, regardless of alias state.
+    assert "already routes via" not in err, (
+        f"ssh_jump_args must be SILENT (A5 amendment); "
+        f"the notice belongs in _announce_alias_routing_once, not here. "
+        f"Got:\n{err}"
+    )
+    assert "routes via ~/.ssh/config" not in err
+
+
+def test_C_announce_alias_routing_once_from_parent(tmp_path: Path) -> None:
+    """A5 amendment: the "routes via ssh_config" notice fires when
+    _announce_alias_routing_once is called (from the parent shell in
+    _client_common_setup), exactly once per call. No subshell involved.
+    """
+    shim_dir = tmp_path / "bin"
+    ssh_g = {
+        "polaris-login": (
+            "hostname compute-386-02.cels.anl.gov\n"
+            "user example-user\n"
+            "proxyjump example-user@logins.cels.anl.gov\n"
+        ),
+    }
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    snippet = """
+_announce_alias_routing_once polaris-login example-user
+"""
+    rc, _out, err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0
+    count = err.count("polaris-login")
+    assert count >= 1, f"expected at least one log line mentioning polaris-login; got:\n{err}"
+    assert "routes via ~/.ssh/config" in err
+
+
+def test_C_announce_skipped_for_non_alias_node(tmp_path: Path) -> None:
+    """A5 amendment: _announce_alias_routing_once must NOT fire for a
+    bare hostname that has no ssh_config-defined proxy. Otherwise
+    every `client --node compute-XX.cels.anl.gov` call would get a
+    misleading "routes via ssh_config" notice.
+    """
+    shim_dir = tmp_path / "bin"
+    ssh_g = {}  # No aliases -> ssh -G returns empty for any target.
+    env = os.environ.copy()
+    env["PATH"] = _write_ssh_G_shim(shim_dir, ssh_g)
+    snippet = """
+_announce_alias_routing_once compute-99.cels.anl.gov example-user
+"""
+    rc, _out, err = _source_engine_and_run(snippet, env=env)
+    assert rc == 0
+    assert "routes via" not in err, (
+        f"non-alias node should NOT trigger the routing notice; got:\n{err}"
     )
 
 
@@ -973,50 +1034,12 @@ fi
     assert "IS_ALIAS=no" in out
 
 
-def test_C_notice_dedup_persists_across_subshells(tmp_path: Path) -> None:
-    """Sub-fix C dedup: sentinel MUST survive subshell boundaries so the
-    notice fires ONCE per client-run, not per-subshell.
-
-    Live-verify 2026-07-15 (Attias-MacBook-Pro against compute-01):
-    without `export`, the sentinel died at each subshell boundary and
-    the notice fired ~5x per client run (pick_node's ssh_reachable,
-    ssh_mux_open, scp bootstrap, ssh bootstrap, tunnel-forward).
-
-    Test strategy: fire the dedup helper in the parent shell, then in a
-    subshell (via `bash -c ""` or `( ... )`), then again in the parent.
-    Assert the notice appears exactly ONCE across all three calls.
-    """
-    # Three-phase test:
-    # 1. Fire the dedup in the parent shell.
-    # 2. Fire it in a parenthesized subshell.
-    # 3. Fork a full bash subprocess and check that the sentinel is in
-    #    that subprocess's environment (which is the actual multi-
-    #    subshell scenario a real `client` run hits).
-    # 4. Fire it in the parent again.
-    #
-    # If dedup is broken (sentinel not exported), we'd see the notice
-    # 2-3 times. If dedup works, exactly once.
-    snippet = r"""
-_alias_proxy_notice_dedup compute-01 example-user
-(
-  _alias_proxy_notice_dedup compute-01 example-user
-)
-bash -c 'if [ "${_ALIAS_PROXY_NOTICE_SEEN_compute_01:-0}" = "1" ]; then echo "SUBSHELL_INHERITED=yes" >&2; else echo "SUBSHELL_INHERITED=no" >&2; fi'
-_alias_proxy_notice_dedup compute-01 example-user
-"""
-    rc, _out, err = _source_engine_and_run(snippet)
-    assert rc == 0, f"snippet failed:\n{err}"
-    # The `log "Note: ..."` line must appear exactly once across the
-    # parent + subshell + parent-again invocations.
-    count = err.count("compute-01 already routes via")
-    assert count == 1, (
-        f"expected exactly ONE dedup notice across parent+subshell+parent; "
-        f"got {count}. The sentinel isn't being exported (fix: change "
-        f"`eval \"${{seen_var}}=1\"` to `eval \"export ${{seen_var}}=1\"` "
-        f"in _alias_proxy_notice_dedup).\n\nCaptured stderr:\n{err}"
-    )
-    # The subshell should have inherited the exported sentinel.
-    assert "SUBSHELL_INHERITED=yes" in err, (
-        f"the exported sentinel didn't propagate into a `bash -c` subshell "
-        f"-- the export isn't working. err:\n{err}"
-    )
+# NOTE: `test_C_notice_dedup_persists_across_subshells` was DELETED by
+# the A5 amendment. It tried to test the (broken-by-design) sentinel-
+# based dedup in `_alias_proxy_notice_dedup`. That helper is gone; the
+# notice now fires from `_announce_alias_routing_once` in the parent
+# shell, which doesn't need dedup logic at all (called once per
+# client-setup by construction). The replacement test coverage lives
+# in `test_C_ssh_jump_args_is_silent`,
+# `test_C_announce_alias_routing_once_from_parent`, and
+# `test_C_announce_skipped_for_non_alias_node` above.
