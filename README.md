@@ -181,11 +181,17 @@ Section 4 for the rationale.
 
 ## Status
 
-**v3.0.0 is on PyPI** — `pipx install argo-anywhere` works. It is the
-Python-package + web-UI rebuild (Model A; design decisions D-026..D-030): the
-package owns the runtime, wraps the vendored bash engine, and adds the web UI /
-native app. **v3.0.1** (docs, screenshots, CI, packaging polish) is on `main`
-and published from CI via PyPI Trusted Publishing on its version tag.
+**v3.2.1 is the current release** — `pipx install argo-anywhere` installs it.
+The installable unit is the Python package (Model A; design decisions
+D-026..D-030): the package owns the runtime, vendors the bash engine verbatim,
+and ships the web UI and native app alongside the CLI. Releases are published
+from CI via PyPI Trusted Publishing on their version tag.
+
+Per-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the design decision
+behind each change (D-001..D-032) lives in [`PLAN.md`](PLAN.md). This section
+names the current release and points at those two documents rather than
+restating them — it drifted four releases behind by trying to be a changelog
+before one existed.
 
 Older tags — `v1.0.0`–`v1.2.0` and the v2.x line (`v2.0.0`, `v2.1.0`, `v2.2.0`,
 the last `.sh`-era release) — still resolve, and legacy pinned `.sh` URLs keep
@@ -545,7 +551,7 @@ names, producing two different socket paths for one logical connection. See
 
 Turn this off for non-Duo hosts with `--no-mfa` or `ARGO_ANYWHERE_NO_MFA=1`.
 
-### Using your own `~/.ssh/config` route (D-032, v3.1.0+)
+### Using your own `~/.ssh/config` route (D-032, v3.2.0+)
 
 If your `~/.ssh/config` already routes ANL compute nodes for you (an
 alias with `HostName`, `User`, and its own on/off-site

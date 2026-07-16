@@ -7,26 +7,29 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: **v3.0.0 RELEASED on PyPI** — the Model-A Python-package +
-web-UI rebuild (D-026..D-030): package owns the runtime, wraps the
-vendored engine, web UI + native app; CI + tag-gated OIDC publish;
-Q11 ratified in `docs/SECURITY.md`; D-028/D-030 live-test gate PASSED
-(2026-07-12). **v3.0.1** (version set to `3.0.1`) is on `main` —
-docs re-ground + README screenshots + install-launcher docs — published
-from CI on its `v3.0.1` tag. **Post-v3.1.0 on `main`**: extras layout
-consolidated to single-mode default install (fastapi + uvicorn +
-pywebview folded into `dependencies`; the old `[web]`/`[app]`/`[all]`/
-`[test]`/`[screenshots]` extras dropped; only `[dev]` remains, now
-absorbing `rich` + `playwright` for the maintainer-only screenshot
-regeneration). `pipx install argo-anywhere` now delivers the web UI +
-native app + `install-launcher` out of the box. **Also on `main`
-post-v3.1.0**: PyYAML self-heal in `ensure_argoproxy_installed` +
-`handle_config_file`'s `[m]` menu accuracy fix (both triggered by a
-2026-07-15 field report); AND D-032 native `~/.ssh/config` respect
-(new engine helpers + refactored `resolve_username` + `--jump-host` /
-`ARGO_ANYWHERE_JUMP_HOST` — every existing invocation continues to
-behave identically; ssh-config path activates only when there is one
-to consult).
+**Status**: **v3.2.1 RELEASED on PyPI** (2026-07-16) — a hotfix for a
+username-resolution bug in v3.2.0, where `ssh -G`'s *default* `User`
+(the local OS username, emitted for every host whether ssh_config
+configures one or not) outranked the username cache and suppressed the
+interactive username prompt. See [`CHANGELOG.md`](CHANGELOG.md) for the
+full account; the fix is recorded as amendment **A7** under **D-032**
+in Section 7 (Design decisions log) below.
+
+The project is the Model-A Python package (D-026..D-030): the package
+owns the runtime, vendors the bash engine verbatim, and ships a web UI +
+native app; CI + tag-gated OIDC publish; Q11 ratified in
+[`docs/SECURITY.md`](docs/SECURITY.md); D-028/D-030 live-test gate PASSED
+(2026-07-12).
+
+Release history and per-version detail live in
+[`CHANGELOG.md`](CHANGELOG.md). This block names the current release and
+the project's shape; it does **not** restate the changelog. That
+discipline is new as of 2026-07-16: the previous habit of accreting
+"on `main`, pending tag" prose here is exactly what let this block drift
+four releases behind (it still claimed v3.0.0/v3.0.1 while v3.2.0 was
+live on PyPI). When a release ships, re-ground this block to name it —
+do not append to it.
+
 Prior tags: **v2.2.0 (2026-05-18)** last `.sh`-era release; v2.0.0 /
 v2.1.0 (both 2026-05-15); v1.x line v1.0.0 / v1.1.0 / v1.2.0; legacy
 URLs redirect forever.
@@ -1496,7 +1499,7 @@ pre-test install in place pending the v2.2.1 tag.
 ### D-024 — Lifecycle-command split: connect / configure / run (2026-07-08)
 
 **Status**: accepted; designing. Full plan in
-[`notes/impl_lifecycle_commands.md`](../notes/impl_lifecycle_commands.md).
+[`notes/impl_lifecycle_commands.md`](notes/impl_lifecycle_commands.md).
 
 **Context.** argo-anywhere manages three levels: (1) the shared channel
 (SSH tunnel + remote argo-proxy), (2) install + configure ONE client,
@@ -1533,7 +1536,7 @@ no new required function (the verbs dispatch through the existing
 ### D-025 — Install manifest + symmetric install / uninstall (2026-07-08)
 
 **Status**: accepted; designing. Full plan in
-[`notes/impl_lifecycle_commands.md`](../notes/impl_lifecycle_commands.md).
+[`notes/impl_lifecycle_commands.md`](notes/impl_lifecycle_commands.md).
 
 **Context.** D-023 gave the script a canonical install at
 `~/.argo_anywhere/` with a self-update path but NO uninstall, and
@@ -1585,7 +1588,7 @@ install/uninstall. Each independently shippable + live-tested.
 `notes/test_plan_v3_branch.md`)**. Supersedes [D-001](#d-001--single-file-distribution-curl-and-run-ux-2025-inception).
 Make-or-break gate (P1 — Duo/connect driven from a browser terminal) PASSED
 (2026-07-09; cold-Duo residual closed 2026-07-10). Implementation record in
-[`notes/impl_python_webui.md`](../notes/impl_python_webui.md); the `spike/`
+[`notes/impl_python_webui.md`](notes/impl_python_webui.md); the `spike/`
 exploration docs (`spike/RESULTS.md`, `spike/HANDOFF.md`) are now stubs pointing
 there.
 
@@ -1983,7 +1986,7 @@ without losing user state).
 
 **Design record.** Full implementation plan +
 contract diffs + test plan + task order in
-[`notes/impl_launcher_cwd.md`](../notes/impl_launcher_cwd.md).
+[`notes/impl_launcher_cwd.md`](notes/impl_launcher_cwd.md).
 Ready to execute (status: designing → executing 2026-07-13).
 
 **Related decisions.** D-017 / D-018 / D-019 (scope framework);
@@ -1992,7 +1995,7 @@ D-024 (connect/configure/run split — this decision is the
 web-UI teaching of that split); D-026..D-030 (Python package
 + web UI foundation — this decision is the natural next step).
 
-### D-032 — Native `~/.ssh/config` respect (engine + web UI) (2026-07-15 [v3.1.0-in-progress])
+### D-032 — Native `~/.ssh/config` respect (engine + web UI) (2026-07-15 [shipped v3.2.0; amended A7 in v3.2.1])
 
 **Decision.** argo-anywhere resolves per-target ssh_config via
 `ssh -G <alias>` and uses the results as fallback signals for
@@ -2011,7 +2014,7 @@ that handle on-site vs. off-site routing themselves; `ssh
 either duplicated a hop or triggered a jump-loop error and
 `ssh_reachable` failed. Preserves the ANL-Duo-plus-argo-proxy
 assumption; does not generalize the engine to non-ANL
-environments (see [`notes/impl_ssh_config_native.md`](../notes/impl_ssh_config_native.md)
+environments (see [`notes/impl_ssh_config_native.md`](notes/impl_ssh_config_native.md)
 §7 E4 for the rejected alternative).
 
 **Contract.**
@@ -2086,6 +2089,47 @@ decision — replaced by the grep-based invariants above +
 `test_jump_host_override`. Users hitting real `--jump-host`
 issues are invited via `docs/UPGRADING.md` to open an issue
 with their setup.
+
+**Amendment A7** (2026-07-16, shipped v3.2.1). Sub-fix B as
+originally shipped was wrong, and wrong in the way this project
+has warned about since inception: it substituted the laptop's
+`$USER` for the Argonne username. `ssh -G <host>` ALWAYS prints
+a `user` line — absent an explicit `User` in ssh_config it fills
+in the local OS username as the default, exactly as it echoes
+the input back as `hostname` for an unconfigured host. The
+original `_ssh_config_user` read that line without asking
+whether ssh_config had configured anything, so it returned a
+value for *every* target. Because Sub-fix B placed it above
+`USER_CACHE` in the priority order, the laptop username
+outranked the correct cached Argonne username; argo-anywhere
+SSHed to an unauthorized account and sshd fell back to a
+password prompt. On a machine with no cache the same inference
+suppressed the interactive username prompt entirely, so new
+users were never asked.
+
+The fix compares the resolved user against `id -un` and treats
+a match as "nothing configured" (return empty; fall through to
+cache or prompt). `_is_ssh_config_alias`'s Signal 3 consumes the
+same helper and inherits it, so bare hostnames no longer
+self-report as aliases.
+
+Two lessons worth carrying forward, both cheap to re-learn the
+hard way:
+
+* **The Python mirror had this right and the engine didn't.**
+  `SshGResult.is_alias` compares `self.user != local_user` — the
+  A6 amendment fixed precisely this false positive one day
+  earlier, on the other side of the tri-lockstep contract, and
+  the insight was never back-ported. The coupling rule above
+  says the two sides must move together; A6 moved one side. When
+  amending either side of a mirrored pair, check whether the
+  *reasoning* transfers, not just whether the tests pass.
+* **The test stub was more forgiving than reality.** The
+  `ssh -G` shim emitted nothing for unconfigured hosts and its
+  docstring claimed that matched OpenSSH. It doesn't. 419
+  passing tests could not see this bug because the fixture
+  disagreed with the tool it was standing in for. Docstring
+  corrected; regression test models real `ssh -G` output.
 
 **Related decisions.** D-005 ($()-capture-of-globals-mutator
 pattern; underpins the resolve_username refactor). D-012 (SSH
@@ -2305,7 +2349,7 @@ remaining sub-questions block the publish.
     **local-process / browser-CSRF residual** is documented, and a loopback
     token / `Origin` (same-origin) check is **queued as post-3.0 hardening**
     (not a publish blocker). The threat-model row + a dedicated "Local web UI"
-    section landed in [`docs/SECURITY.md`](../docs/SECURITY.md).
+    section landed in [`docs/SECURITY.md`](docs/SECURITY.md).
 12. **Lane-2 PTY concurrency model (gates `driver.py`)**. Lane 2 streams a PTY
     to "the browser terminal", but a `configure`/`run` action can hit a
     Lane-2 prompt (config-conflict / scope-conflict, D-026) while `connect`'s

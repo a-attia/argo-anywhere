@@ -70,9 +70,20 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.0.0 RELEASED on PyPI**; **v3.1.0 execution
-  complete + user-verified (2026-07-13)** on `main` — awaiting the
-  tag. D-031 shipped: web-UI launcher cwd + dual embedded terminals
+- **Status**: **v3.2.1 RELEASED on PyPI (2026-07-16)** — the current
+  release. It hotfixes a username-resolution bug in v3.2.0 where
+  `ssh -G`'s *default* `User` (the local OS username, which it emits
+  for every host whether ssh_config configures one or not) outranked
+  the username cache and suppressed the interactive username prompt;
+  recorded as amendment **A7** under D-032 in `PLAN.md`.
+  **Per-release history belongs in [`CHANGELOG.md`](CHANGELOG.md), not
+  here.** The remainder of this bullet is accumulated *project facts*
+  (what exists and how it works) — useful, but it drifted into
+  changelog-shaped "on `main`, awaiting the tag" prose across
+  v3.0–v3.2 and ended up four releases stale. Do not extend it that
+  way: when a release ships, re-ground the status claim above and put
+  the narrative in `CHANGELOG.md`.
+  D-031 shipped: web-UI launcher cwd + dual embedded terminals
   (Channel + Utility) + scope-aware forbid-list + scope dropdown +
   MRU history + light/dark theme toggle + engine `--cwd` parity +
   multi-instance guard + cross-platform focus-follow-window (macOS
@@ -146,8 +157,10 @@ loading set for normal sessions.
   is `2.2.1-dev` — intentionally distinct from the package version per
   D-029 (package version = release identity; engine version = internal
   component tag). Historical v2.x record below (preserved for
-  provenance). **Last tagged release: v2.2.0 RELEASED 2026-05-18** (tag
-  at commit `737563d`). Phase 4 lands the per-tool scope framework +
+  provenance). **Last `.sh`-era tag: v2.2.0, released 2026-05-18**
+  (tag at commit `737563d`) — this is the end of the v2.x line, NOT
+  the project's latest release (see the Status bullet above and
+  [`CHANGELOG.md`](CHANGELOG.md)). Phase 4 lands the per-tool scope framework +
   port-
   as-transport-state + OpenCode project-scope + cross-client
   port-coherence on top of v2.1.0's defensive-hardening base; five
@@ -246,8 +259,9 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: **v3.0.0 (released on PyPI)**; **v3.0.1** on
-  `main` (`3.0.1`, published from CI on its tag — see Status)
+- **Current release**: **v3.2.1** (2026-07-16, on PyPI). Release
+  history: [`CHANGELOG.md`](CHANGELOG.md) — the single source of
+  truth for "what shipped when"; do not restate it here.
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
 
 ### Human-facing doc map
@@ -258,7 +272,8 @@ Section 6.4):
 | Doc | Audience | When to read |
 |:----|:---------|:-------------|
 | [`README.md`](README.md) | New + returning humans | Project overview; quick start |
-| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-021 |
+| [`CHANGELOG.md`](CHANGELOG.md) | Users upgrading; maintainer | **Single source of truth for "what shipped when"** (per-release, since v3.1.0). Re-ground the status claims in `README.md` / `PLAN.md` / this file at tag time; put the narrative here. |
+| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-032 |
 | [`docs/UPGRADING.md`](docs/UPGRADING.md) | v1.x users upgrading | What changes for them across v2.0 / v2.1 / v2.2 |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |
 | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Prospective users + contributors | Known limitations + rationale (includes "Upstream stack" section for argo-proxy / Claude Code limitations as of v2.2.0) |
@@ -485,7 +500,7 @@ NODE, not the jump host. `mode_client` reorders pick-node before
 preflight under MFA. **Do not** try to
 `ssh -O ... <user>@logins.cels.anl.gov true` — it always fails.
 
-### Jump-host resolution (D-032, v3.1.0)
+### Jump-host resolution (D-032, v3.2.0; amended A7 in v3.2.1)
 
 `ANL_JUMP` is a **mutable script global**, not a `readonly` constant.
 Resolution precedence at `main()` (post-argv, pre-mode-dispatch):
