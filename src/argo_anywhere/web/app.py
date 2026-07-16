@@ -829,17 +829,46 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
                 await ws.close(code=1008)  # policy violation
                 return
             # D-031 Task 3: validate the launcher-supplied cwd server-side
-            # (defense in depth; the UI already refused blanks + relatives).
-            # Blank cwd is still accepted at the ws level for backward compat
-            # with pre-Task-3 callers (test_ws_bridge... uses no cwd); the UI's
-            # own workflow always sends one.
+            # (defense in depth; the launcher popover already refused
+            # blanks + relatives client-side). Blank cwd is deliberately
+            # accepted at this level -- it is the intended shape for
+            # several LIVE callers, not just legacy or test paths:
+            #
+            #   * The top-level "Connect" CTA
+            #     (`el('connectBtn').addEventListener('click',
+            #      () => openTerminal('verb=connect', 'connect'))` at
+            #     web/static/index.html:884) sends `?verb=connect` with
+            #     no cwd. It is the UI's fast-path for the returning-
+            #     user case (reuse the cached identity + node + port)
+            #     and mirrors typing `argo-anywhere connect` at a
+            #     terminal.
+            #   * The launcher's `doLaunch` handler (index.html:1398)
+            #     builds a full URLSearchParams and always includes cwd.
+            #
+            # Both are "the UI's own workflow." Do NOT tighten this
+            # gate into a hard reject on blank cwd on the theory that
+            # "the UI always sends one" -- that would silently break the
+            # top-level Connect button. `connect` writes no per-tool
+            # config, so the forbid-list (which exists to stop
+            # scope=project writes landing in $HOME or system dirs) has
+            # nothing to enforce here regardless. `PtySession(cwd=None)`
+            # inherits the web server's cwd (~/.argo_anywhere/ under
+            # `argo-anywhere app`; the launch dir under
+            # `argo-anywhere web`), which is harmless for `connect`.
+            #
+            # (Tests `test_ws_bridge_streams_engine_output_and_exit`
+            # and the second-Channel-guard test at tests/test_web.py:616
+            # also depend on this permissive behavior, which is why
+            # tightening it would fail the suite before it hit users.)
             raw_cwd = q.get("cwd")
             if raw_cwd is not None and raw_cwd.strip():
                 cv = validate_cwd(raw_cwd)
                 if not cv.ok:
                     # 1008 policy-violation; the browser's onerror will surface it.
-                    # The UI does its own pre-flight validation, so this path only
-                    # fires for scripted clients or an out-of-date UI.
+                    # The launcher popover does its own pre-flight validation, so
+                    # this path only fires for scripted clients or an out-of-date
+                    # UI. Note: the top-level Connect CTA does not reach here
+                    # (it sends no cwd; the `if` above is False for it).
                     await ws.close(code=1008)
                     return
                 resolved_cwd = cv.resolved
