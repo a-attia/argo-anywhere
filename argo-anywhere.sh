@@ -35,7 +35,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/a-attia/argo-anywhere/v2.0.0/argo-anywhere.sh -o argo-anywhere.sh
 #   bash argo-anywhere.sh
 #
-# Author: Ahmed Attia (attia@anl.gov)
+# Author: Ahmed Attia (aattia@anl.gov)
 # License: same as the surrounding repo.
 
 # Re-exec under bash if the script was invoked via 'sh' or another POSIX shell.
@@ -4388,7 +4388,7 @@ setup_aider_cli_tool() {
 # Why we don't open the master against the jump host (ANL_JUMP):
 #   logins.cels.anl.gov is a "jump-only" host -- its login shell rejects all
 #   command execution with "This account is currently not available", even
-#   for valid users with valid Duo. So `ssh aattia@logins.cels.anl.gov true`
+#   for valid users with valid Duo. So `ssh jdoe@logins.cels.anl.gov true`
 #   exits non-zero, and ssh_mux_open fails. The jump host is meant to be used
 #   ONLY as a ProxyJump target. ControlMaster therefore must be opened against
 #   the actual destination (a compute node), with the jump host on the path.
@@ -5323,8 +5323,8 @@ monitor_tunnel_loop() {
 #
 # The script's mux sockets are named per the literal-tokens template
 # `argo-anywhere-%r-%h-%p` (see ssh_mux_args). So a master to
-# `aattia@compute-01.cels.anl.gov:22` lives at the path
-# `~/.ssh/sockets/argo-anywhere-aattia-compute-01.cels.anl.gov-22`.
+# `jdoe@compute-01.cels.anl.gov:22` lives at the path
+# `~/.ssh/sockets/argo-anywhere-jdoe-compute-01.cels.anl.gov-22`.
 # A foreground `ssh -N -L PORT:...` opened with ControlMaster=auto
 # also has that ControlPath in its `ps` command-line.
 #
@@ -10968,7 +10968,7 @@ REFERENCES
   OpenCode:          https://opencode.ai/
   ANL AI4Dev notes:  https://web.cels.anl.gov/~jacob/ai4dev.html
   This script:       https://github.com/a-attia/argo-anywhere
-  Maintainer:        Ahmed Attia (attia@anl.gov)
+  Maintainer:        Ahmed Attia (aattia@anl.gov)
 
 SECURITY NOTE
 -------------

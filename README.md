@@ -646,7 +646,7 @@ To handle this gracefully, the engine:
 
   ```text
   [warn] Port 64742 on compute-01 is in use by another user
-         (pid 12345, owned by 'alice'; you are 'aattia').
+         (pid 12345, owned by 'alice'; you are 'jdoe').
 
          Two users can't share an argo-proxy on the same port; each needs
          their own. Options:

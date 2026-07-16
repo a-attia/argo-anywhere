@@ -323,7 +323,7 @@ def test_shadow_check_no_op_for_unknown_tool() -> None:
 # file already matches the proposed shape and cmp -s returns "up to date".
 
 
-def _run_migrator(target: Path, user: str = "aattia") -> tuple[int, str, str]:
+def _run_migrator(target: Path, user: str = "jdoe") -> tuple[int, str, str]:
     """Invoke the migrator against ``target`` with the given ANL user."""
     snippet = (
         f'ARGO_ANYWHERE_USER={user!s} '
@@ -339,15 +339,15 @@ def test_migrator_upgrades_our_pre_fix_auth_token(tmp_path: Path) -> None:
     target.write_text(json.dumps({
         "env": {
             "ANTHROPIC_BASE_URL": "http://localhost:64742",
-            "ANTHROPIC_AUTH_TOKEN": "aattia",
+            "ANTHROPIC_AUTH_TOKEN": "jdoe",
         },
     }))
-    rc, out, err = _run_migrator(target, user="aattia")
+    rc, out, err = _run_migrator(target, user="jdoe")
     assert rc == 0
     # Migrator prints a confirmation on stdout so the user sees it.
     assert "migrated" in out
     result = json.loads(target.read_text())
-    assert result["env"]["ANTHROPIC_API_KEY"] == "aattia"
+    assert result["env"]["ANTHROPIC_API_KEY"] == "jdoe"
     assert "ANTHROPIC_AUTH_TOKEN" not in result["env"]
     assert result["env"]["ANTHROPIC_BASE_URL"] == "http://localhost:64742"
 
@@ -360,11 +360,11 @@ def test_migrator_noop_when_already_migrated(tmp_path: Path) -> None:
     original = {
         "env": {
             "ANTHROPIC_BASE_URL": "http://localhost:64742",
-            "ANTHROPIC_API_KEY": "aattia",
+            "ANTHROPIC_API_KEY": "jdoe",
         },
     }
     target.write_text(json.dumps(original))
-    rc, out, err = _run_migrator(target, user="aattia")
+    rc, out, err = _run_migrator(target, user="jdoe")
     assert rc == 0
     assert "migrated" not in out
     assert json.loads(target.read_text()) == original
@@ -381,7 +381,7 @@ def test_migrator_preserves_user_owned_auth_token(tmp_path: Path) -> None:
             "ANTHROPIC_AUTH_TOKEN": "my-personal-oauth-token",
         },
     }))
-    rc, out, err = _run_migrator(target, user="aattia")
+    rc, out, err = _run_migrator(target, user="jdoe")
     assert rc == 0
     result = json.loads(target.read_text())
     # User's own token survives untouched.
@@ -403,11 +403,11 @@ def test_migrator_preserves_top_level_user_keys(tmp_path: Path) -> None:
         "permissions": {"allow": ["Read", "Bash(npm test)"]},
         "hooks": {"PreToolUse": []},
         "env": {
-            "ANTHROPIC_AUTH_TOKEN": "aattia",
+            "ANTHROPIC_AUTH_TOKEN": "jdoe",
             "MY_CUSTOM_VAR": "keep-me",
         },
     }))
-    rc, out, err = _run_migrator(target, user="aattia")
+    rc, out, err = _run_migrator(target, user="jdoe")
     assert rc == 0
     result = json.loads(target.read_text())
     assert result["model"] == "sonnet"
@@ -416,7 +416,7 @@ def test_migrator_preserves_top_level_user_keys(tmp_path: Path) -> None:
     assert result["env"]["MY_CUSTOM_VAR"] == "keep-me"
     # Migration happened.
     assert "ANTHROPIC_AUTH_TOKEN" not in result["env"]
-    assert result["env"]["ANTHROPIC_API_KEY"] == "aattia"
+    assert result["env"]["ANTHROPIC_API_KEY"] == "jdoe"
 
 
 def test_migrator_noop_when_target_absent(tmp_path: Path) -> None:
@@ -424,7 +424,7 @@ def test_migrator_noop_when_target_absent(tmp_path: Path) -> None:
     (setup_claudecode_cli_tool) always call this before handle_config_file,
     which is where the "no existing file -> write fresh" branch lives."""
     target = tmp_path / "does-not-exist.json"
-    rc, out, err = _run_migrator(target, user="aattia")
+    rc, out, err = _run_migrator(target, user="jdoe")
     assert rc == 0
     assert not target.exists()
 
@@ -437,7 +437,7 @@ def test_migrator_noop_on_malformed_json(tmp_path: Path) -> None:
     a fresh config that discards the user's recoverable content."""
     target = tmp_path / "broken.json"
     target.write_text("{not-json{")
-    rc, out, err = _run_migrator(target, user="aattia")
+    rc, out, err = _run_migrator(target, user="jdoe")
     assert rc == 0
     # File contents unchanged.
     assert target.read_text() == "{not-json{"
@@ -450,9 +450,9 @@ def test_migrator_atomic_write_leaves_no_tempfile(tmp_path: Path) -> None:
     ``.argo-migrate.*`` files would fire diagnostics elsewhere)."""
     target = tmp_path / "settings.local.json"
     target.write_text(json.dumps({
-        "env": {"ANTHROPIC_AUTH_TOKEN": "aattia"},
+        "env": {"ANTHROPIC_AUTH_TOKEN": "jdoe"},
     }))
-    rc, out, err = _run_migrator(target, user="aattia")
+    rc, out, err = _run_migrator(target, user="jdoe")
     assert rc == 0
     # Only the target exists; no sibling tempfile left behind.
     residue = [p.name for p in tmp_path.iterdir() if p != target]
