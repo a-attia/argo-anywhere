@@ -20,8 +20,26 @@ monitor, and run tools from a browser window without touching a terminal.
 > **[install & migrate guide](docs/UPGRADING.md#start-here-install-and-migrate)** —
 > one short path each for new users, v2.x upgraders, and v1.x upgraders.
 
+## TL;DR
+
+Two commands get you the full experience — CLI, web UI, and a
+double-clickable desktop app:
+
+```sh
+pipx install argo-anywhere         # everything: CLI, web UI, native app
+argo-anywhere install-launcher     # + a double-clickable launcher (Desktop + Applications)
+```
+
+Then double-click **argo-anywhere** in your Applications folder (macOS)
+or app menu (Linux), or run `argo-anywhere client` from a terminal for
+the CLI flow. See [Install](#install) and
+[Web UI and desktop app](#web-ui-and-desktop-app) for what each command
+does + the underlying pieces; see [Quick start](#quick-start) for the
+CLI-only path.
+
 ## Contents
 
+- [TL;DR](#tldr)
 - [Heads up before you start](#heads-up-before-you-start)
 - [Install](#install)
 - [Quick start](#quick-start)
@@ -71,6 +89,9 @@ Two things worth knowing in the first thirty seconds:
 
 ## Install
 
+The [TL;DR](#tldr) above has the two commands for the full experience.
+This section covers install alternatives, prerequisites, and pointers.
+
 The recommended install is [`pipx`](https://pipx.pypa.io/) — it puts the
 `argo-anywhere` command on your `PATH` in its own isolated environment:
 
@@ -78,10 +99,10 @@ The recommended install is [`pipx`](https://pipx.pypa.io/) — it puts the
 pipx install argo-anywhere            # everything included -- CLI, web UI, native app
 ```
 
-That's the whole install. The FastAPI web server (`argo-anywhere web`) and the
-native desktop window (`argo-anywhere app` + the double-clickable launcher from
-`install-launcher`) are bundled in the default install — no extras to remember,
-no follow-up commands to enable the UI.
+The FastAPI web server (`argo-anywhere web`), the native desktop window
+(`argo-anywhere app`), and the `install-launcher` command are all bundled
+in the default install — no extras to remember, no follow-up commands to
+enable the UI.
 
 Plain `pip install argo-anywhere` (ideally into a virtual environment) works
 too. Requires Python 3.10+. See [Prerequisites](#prerequisites) for the SSH /
