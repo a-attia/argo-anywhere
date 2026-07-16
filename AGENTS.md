@@ -830,7 +830,7 @@ reviewers verify by grep or the mirror-test suite.
        `src/argo_anywhere/web/preview.py`. The mirror reflects
        the engine's ssh_jump_args decision back to the launcher's
        preview panel; if the two disagree, the panel lies about
-       what argo will do at Launch. Enforced by
+       what argo-anywhere will do at Launch. Enforced by
        `tests/test_preview_launch.py::test_reflect_jump_args_matches_engine`
        — a byte-equivalent-mirror test using the same stub-ssh
        fixture on both sides.

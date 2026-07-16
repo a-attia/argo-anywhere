@@ -541,14 +541,15 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         is_alias, detection_reason = result.is_meaningful_alias(node)
         if not is_alias:
             # No meaningful ssh_config entry for this target -- treat as
-            # a bare hostname. argo will still try (per the pre-D-032
-            # flow); UI can show "argo will connect using its defaults."
+            # a bare hostname. argo-anywhere will still try (per the pre-
+            # D-032 flow); UI shows "argo-anywhere will connect using its
+            # defaults."
             return JSONResponse({
                 "state": "bare_hostname",
-                "hostname": node,   # what argo will target
+                "hostname": node,   # what argo-anywhere will target
                 "note": "no meaningful ~/.ssh/config entry for this target; "
-                        "argo will use its defaults (jump host + your "
-                        "explicit --user if given, else prompt)",
+                        "argo-anywhere will use its defaults (jump host + "
+                        "your explicit --user if given, else prompt)",
             })
 
         # Divergence detection: user's explicit input differs from what

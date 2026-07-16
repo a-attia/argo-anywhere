@@ -1611,20 +1611,22 @@
       if (data.state === 'unresolved') {
         target.textContent =
           `ssh -G could not resolve this alias / hostname on the local machine.\n` +
-          `argo will still try -- but the alias-specific behaviors (user inference,\n` +
-          `ProxyJump skip) won't apply.`;
+          `argo-anywhere will still try -- but the alias-specific behaviors\n` +
+          `(user inference, ProxyJump skip) won't apply.`;
         return;
       }
       if (data.state === 'bare_hostname') {
         // A6 (2026-07-15): ssh -G succeeded but found no ~/.ssh/config entry
         // for this target -- it just filled in defaults. Show the user what
-        // argo will actually do (which is what the pre-D-032 flow always did).
+        // argo-anywhere will actually do (which is what the pre-D-032 flow
+        // always did).
         target.innerHTML =
           `Node:      ${_escHtml(data.hostname)}\n` +
           `\n` +
-          `<em>No matching ~/.ssh/config entry.</em> argo will connect using\n` +
-          `its defaults: your explicit --user (or prompt), our default jump\n` +
-          `host (logins.cels.anl.gov), and no ssh_config-specific routing.`;
+          `<em>No matching ~/.ssh/config entry.</em> argo-anywhere will\n` +
+          `connect using its defaults: your explicit --user (or prompt),\n` +
+          `our default jump host (logins.cels.anl.gov), and no ssh_config-\n` +
+          `specific routing.`;
         return;
       }
       // state === 'resolved'
@@ -1647,22 +1649,22 @@
       const pj = data.proxyjump || '';
       let jumpLine;
       if (pj === 'none') {
-        jumpLine = `Jump host: (ProxyJump=none in ssh_config; argo will not add its own)`;
+        jumpLine = `Jump host: (ProxyJump=none in ssh_config; argo-anywhere will not add its own)`;
       } else if (pj) {
         jumpLine = divByField.jump_host
           ? `<span class="div-warn">Jump host: ${_escHtml(divByField.jump_host.yours)}  ⚠  ssh_config says ${_escHtml(divByField.jump_host.ssh_config)}</span>`
-          : `Jump host: (routed via your ssh_config: ${_escHtml(pj)}; argo will not add its own)`;
+          : `Jump host: (routed via your ssh_config: ${_escHtml(pj)}; argo-anywhere will not add its own)`;
       } else {
-        jumpLine = `Jump host: (default: logins.cels.anl.gov; argo adds its own -J)`;
+        jumpLine = `Jump host: (default: logins.cels.anl.gov; argo-anywhere adds its own -J)`;
       }
       lines.push(jumpLine);
       const extras = data.our_extra_jump_args || [];
       if (extras.length === 0) {
         lines.push(``);
-        lines.push(`(argo will NOT add an extra -J; ssh_config's own routing takes over)`);
+        lines.push(`(argo-anywhere will NOT add an extra -J; ssh_config's own routing takes over)`);
       } else {
         lines.push(``);
-        lines.push(`argo will add: ${_escHtml(extras.join(' '))}`);
+        lines.push(`argo-anywhere will add: ${_escHtml(extras.join(' '))}`);
       }
       target.innerHTML = lines.join('\n');
       // Auto-expand on divergence.

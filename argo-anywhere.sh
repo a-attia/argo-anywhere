@@ -1927,7 +1927,7 @@ _announce_alias_routing_once() {
   # need no special announcement.
   _alias_has_own_proxy "$alias" || return 0
   log "Note: '${alias}' routes via ~/.ssh/config;"
-  log "  argo is NOT adding a -J on top ('${user}@${ANL_JUMP}' would be redundant)."
+  log "  argo-anywhere is NOT adding a -J on top ('${user}@${ANL_JUMP}' would be redundant)."
 }
 
 # _is_ssh_config_alias <target>: returns 0 (success) if ~/.ssh/config has
