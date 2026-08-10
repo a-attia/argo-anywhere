@@ -719,7 +719,8 @@ flag, and is strictly correct under either Option A or Option B.
 | 2 | Confirm our own session/pid before trusting `/health` at `:7557` | 4 | pending | Stops a stranger's proxy from satisfying our liveness check |
 | 3 | `status` honesty via `local_tunnel_destination` | 3 | pending | Stops `ALL GREEN` overclaiming; pure reporting change |
 
-**Item 1 shipped 2026-08-10.** All three launchers (`screen`, `tmux`,
+**Item 1 shipped 2026-08-10 (in two commits — see the durability
+correction below).** All three launchers (`screen`, `tmux`,
 `nohup`) now run argo-proxy with stdin redirected from `/dev/null`
 under a `NO-INTERACTIVE-PROMPT INVARIANT` comment block in
 `mode_server`; the `screen` branch passes the binary as `$0` to `sh -c`
@@ -747,6 +748,42 @@ directory from `$HOME`, and the autouse `_isolate_home` fixture
 repoints `HOME` per test — so a harness inheriting the ambient
 environment starts sessions it cannot then see. `_run_screen_harness`
 pins a private `HOME` inside its own tmpdir.
+
+#### Durability correction — the two halves of item 1 initially cancelled out
+
+The first implementation shipped (a) and (b) as written above and was
+**subtly wrong**, caught the same day while checking the interaction
+rather than the parts. The defect:
+
+> (a) makes a prompting argo-proxy die in about **one** second. The
+> start-timeout fires at **twenty**. `screen` and `tmux` reap a session
+> as soon as its child exits — so by the time (b) ran, there was no
+> session left to capture from, and `screen -X hardcopy` failed with
+> `No screen session found`. **In the common case the fix produced no
+> diagnostic at all**, which is precisely the outcome it existed to
+> prevent. Verified directly: the session is gone within 2s of the
+> EOF death.
+
+The two halves only compose if the output outlives the session. All
+three launchers therefore also `tee` stdout+stderr to `$_PROXY_LOG`
+(`~/argoproxy.out` — the path the `nohup` branch already used, so
+`clean`'s existing removal entry stays correct), truncated per launch
+so the current failure is not buried under old ones. The timeout branch
+reads that file **first** and only falls back to a live-session capture
+when the log came back empty — the disjoint case where the process is
+genuinely hung at 20s rather than long dead.
+
+`tee` rather than `screen -L -Logfile`: `-Logfile` requires screen
+≥ 4.06 and we do not control the version on an arbitrary node; `tee`
+also keeps output visible to anyone attaching with `screen -r`.
+
+The lesson generalises past this change: **a fix that makes something
+fail *faster* can invalidate the mechanism that was supposed to report
+the failure.** Both halves passed their own tests; only the end-to-end
+sequence exposed it. `test_log_survives_the_session_that_dies_from_the_redirect`
+now pins exactly that interaction — it asserts the session *is* reaped
+(so the hazard stays real, not hypothetical) and that the prompt text
+is still recoverable afterwards.
 
 Item 1 is the keystone, and the reason is worth spelling out because it
 inverts the first draft's ordering. **Once a collision fails fast and

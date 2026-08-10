@@ -55,6 +55,19 @@ def _function_body(src: str, name: str) -> str:
     return match.group(0)
 
 
+def _screen_launch_line(body: str) -> str:
+    """Return mode_server's ``screen -dmS`` launch command, joined to one line.
+
+    The command spans three physical lines (backslash continuations) since the
+    tee was added, so tests must not assume a single-line match.
+    """
+    match = re.search(
+        r"^\s*screen -dmS (?:.*\\\n)*.*$", body, re.MULTILINE
+    )
+    assert match, "screen launch command not found in mode_server"
+    return match.group(0)
+
+
 def _run_screen_harness(harness: str) -> subprocess.CompletedProcess[str]:
     """Run a ``screen``-using bash harness with a private, self-consistent HOME.
 
@@ -96,6 +109,51 @@ def _run_screen_harness(harness: str) -> subprocess.CompletedProcess[str]:
 # ---------------------------------------------------------------------------
 
 
+def test_all_three_launchers_tee_to_a_durable_log() -> None:
+    """Every launcher must write argo-proxy's output to ``$_PROXY_LOG``.
+
+    This is the LOG-DURABILITY COROLLARY and it is not optional: the stdin
+    redirect makes a prompting argo-proxy die in ~1s, so the screen/tmux
+    session is reaped ~18s before the start-timeout fires. A session-only
+    capture therefore has nothing to read in the *common* failure -- the two
+    halves of the fix would cancel out. The log file outlives the session.
+    """
+    src = _engine_source()
+    body = _function_body(src, "mode_server")
+    assert re.search(r'^\s*local _PROXY_LOG=', body, re.MULTILINE), (
+        "_PROXY_LOG must be defined in mode_server"
+    )
+    for pattern, label in (
+        (r"^\s*screen -dmS .*\n?.*tee -a", "screen"),
+        (r"^\s*_tmux_cmd=.*tee -a", "tmux"),
+        (r"^\s*nohup .*argo-proxy.*_PROXY_LOG", "nohup"),
+    ):
+        assert re.search(pattern, body, re.MULTILINE), (
+            f"{label} launcher must persist output to _PROXY_LOG; without it "
+            "a fast-exiting argo-proxy leaves no diagnostic at all"
+        )
+
+
+def test_timeout_branch_prefers_the_durable_log() -> None:
+    """The log must be consulted BEFORE the live-session capture.
+
+    Ordering is the whole point: the log covers the fast-death case (common),
+    the session capture covers the still-hung case (rare). If the session
+    capture ran first it would usually print nothing and the real error would
+    follow confusingly, or be skipped.
+    """
+    src = _engine_source()
+    body = _function_body(src, "mode_server")
+    tail = body[body.index("did not start listening") :]
+    log_at = tail.index("_PROXY_LOG")
+    dump_at = tail.index("_dump_session_output_screen")
+    assert log_at < dump_at, "durable log must be surfaced before session capture"
+    # And the session capture must be conditional on the log having been empty.
+    assert re.search(r'\[ "\$_dumped" -eq 1 \] \|\| _dump_session_output', tail), (
+        "session capture should only run when the log produced nothing"
+    )
+
+
 def test_all_three_launchers_redirect_stdin_from_devnull() -> None:
     """screen, tmux AND nohup must all start argo-proxy with stdin at
     /dev/null.
@@ -108,14 +166,13 @@ def test_all_three_launchers_redirect_stdin_from_devnull() -> None:
     src = _engine_source()
     body = _function_body(src, "mode_server")
 
-    screen_launch = re.search(r"^\s*screen -dmS .*argo-proxy.*$", body, re.MULTILINE)
-    assert screen_launch, "screen launch line not found"
-    assert "/dev/null" in screen_launch.group(0), (
+    screen_launch = _screen_launch_line(body)
+    assert "/dev/null" in screen_launch, (
         "screen launcher lost its stdin redirect -- a port-collision prompt "
         "will hang forever inside the detached session"
     )
 
-    tmux_cmd = re.search(r"^\s*local _tmux_cmd;.*$", body, re.MULTILINE)
+    tmux_cmd = re.search(r"^\s*_tmux_cmd=.*$", body, re.MULTILINE)
     assert tmux_cmd, "tmux command construction not found"
     assert "/dev/null" in tmux_cmd.group(0), (
         "tmux launcher lost its stdin redirect -- see the screen case"
@@ -139,16 +196,18 @@ def test_screen_launcher_passes_binary_out_of_band() -> None:
     """
     src = _engine_source()
     body = _function_body(src, "mode_server")
-    launch = re.search(r"^\s*screen -dmS .*argo-proxy.*$", body, re.MULTILINE)
-    assert launch
-    line = launch.group(0)
-    assert 'sh -c \'exec "$0" serve < /dev/null\'' in line, (
-        "screen launcher must pass the binary as $0, not interpolate it"
+    line = _screen_launch_line(body)
+    assert '\'"$0" serve < /dev/null 2>&1 | tee -a "$1"\'' in line, (
+        "screen launcher must pass binary + log as $0/$1, not interpolate them"
     )
-    # The binary path must appear AFTER the quoted script (i.e. as the $0 arg).
+    # Both paths must appear AFTER the quoted script (i.e. as the $0/$1 args).
     script_end = line.index("'", line.index("sh -c '") + len("sh -c '"))
-    assert "argo-proxy" in line[script_end:], (
+    tail = line[script_end:]
+    assert "argo-proxy" in tail, (
         "argo-proxy path must be the $0 argument, outside the script string"
+    )
+    assert "_PROXY_LOG" in tail, (
+        "log path must be the $1 argument, outside the script string"
     )
 
 
@@ -174,20 +233,21 @@ def test_devnull_redirect_actually_prevents_the_hang() -> None:
     """
     engine_src = _engine_source()
     body = _function_body(engine_src, "mode_server")
-    launch = re.search(r"^\s*screen -dmS .*argo-proxy.*$", body, re.MULTILINE)
-    assert launch
     # Reuse the ENGINE'S OWN launch shape, with our fake binary substituted,
     # so this test tracks the real code rather than a copy of it.
-    real_launch = launch.group(0).strip()
-    fake_launch = real_launch.replace(
-        '"${SCREEN_SESSION}"', '"$SESSION"'
-    ).replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
+    real_launch = _screen_launch_line(body)
+    fake_launch = (
+        real_launch.replace('"${SCREEN_SESSION}"', '"$SESSION"')
+        .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
+        .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
+    )
     assert fake_launch != real_launch, "substitution failed; launch line changed shape"
 
     harness = textwrap.dedent(
         """
         set -uo pipefail
         FAKE="$PWD/fakeproxy"
+        LOGFILE="$PWD/argoproxy.out"
         cat > "$FAKE" <<'EOS'
         #!/bin/bash
         echo "WARNING | [config] Warning: Port 64742 is already in use."
@@ -264,6 +324,73 @@ def test_capture_helpers_never_fail_the_caller() -> None:
         assert "return 0" in body, f"{name} must have guarded early returns"
         assert " die " not in body, f"{name} must never die"
         assert "mktemp" in body, f"{name} should use mktemp for scratch"
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="screen not installed")
+def test_log_survives_the_session_that_dies_from_the_redirect() -> None:
+    """The regression that nearly shipped: (a) defeats (b) without the log.
+
+    Drives the engine's real screen launch line with a fake argo-proxy that
+    prompts. Because stdin is closed the fake dies at once and screen reaps
+    the session -- so this asserts BOTH that the session is gone (proving the
+    hazard is real, not hypothetical) AND that the prompt text is still
+    recoverable from the teed log afterwards.
+    """
+    src = _engine_source()
+    body = _function_body(src, "mode_server")
+    launch = re.search(
+        r"^\s*screen -dmS .*?\n(?:.*?\n)*?.*?\"\$\{_PROXY_LOG\}\"", body, re.MULTILINE
+    )
+    assert launch, "multi-line screen launch not found"
+    fake_launch = (
+        launch.group(0)
+        .replace('"${SCREEN_SESSION}"', '"$SESSION"')
+        .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
+        .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
+    )
+    assert "$FAKE" in fake_launch and "$LOGFILE" in fake_launch
+
+    harness = textwrap.dedent(
+        """
+        set -uo pipefail
+        FAKE="$PWD/fakeproxy"
+        LOGFILE="$PWD/argoproxy.out"
+        cat > "$FAKE" <<'EOS'
+        #!/bin/bash
+        echo "WARNING | [config] Warning: Port 64742 is already in use."
+        echo -n "Enter port [56617] [Y/n/number]: "
+        read -r answer || { echo; echo "EOFError: EOF when reading a line"; exit 1; }
+        EOS
+        chmod +x "$FAKE"
+        : > "$LOGFILE"
+        SESSION="argo_durable_$$"
+        %(fake_launch)s
+        sleep 3
+        if screen -ls 2>/dev/null | grep -q "\\.${SESSION}[[:space:]]"; then
+          echo "session=alive"
+          screen -S "$SESSION" -X quit >/dev/null 2>&1 || true
+        else
+          echo "session=reaped"
+        fi
+        echo "logbytes=$(wc -c < "$LOGFILE" | tr -d ' ')"
+        echo "--- LOG ---"
+        cat "$LOGFILE"
+        """
+    ) % {"fake_launch": fake_launch}
+
+    out = _run_screen_harness(harness)
+    results = dict(
+        line.split("=", 1) for line in out.stdout.splitlines() if "=" in line
+    )
+    assert results.get("session") == "reaped", (
+        "expected the session to be reaped after the fast EOF death -- if it "
+        "survives, the premise of the durable-log fix has changed"
+    )
+    assert int(results.get("logbytes", "0")) > 0, "log file is empty"
+    assert "Port 64742 is already in use" in out.stdout, (
+        f"prompt text did not survive in the log; stdout:\n{out.stdout}"
+    )
+    assert "EOFError" in out.stdout, "the EOF death itself should be logged"
 
 
 @pytest.mark.skipif(shutil.which("screen") is None, reason="screen not installed")

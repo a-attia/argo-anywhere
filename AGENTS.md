@@ -605,13 +605,25 @@ Two rules for anyone touching that launch block:
   path into the script string — a `$venv` containing spaces would
   otherwise word-split (the hazard the `tmux` branch solves with
   `printf %q`).
+- **All three launchers also `tee` to `$_PROXY_LOG` (`~/argoproxy.out`),
+  and the timeout branch reads that FIRST.** This is the
+  `LOG-DURABILITY COROLLARY` and it is load-bearing: the stdin redirect
+  makes a prompting argo-proxy die in ~1s, so `screen`/`tmux` reap the
+  session ~18s before the 20s timeout fires. A session-only capture has
+  nothing left to read in the common case — the two halves of the fix
+  would cancel out. The log outlives the session; historically only the
+  `nohup` branch wrote it. Use `tee`, not `screen -L -Logfile`
+  (`-Logfile` needs screen ≥4.06, which we cannot assume on an
+  arbitrary node, and `tee` keeps output visible to `screen -r`).
 - The start-timeout branch calls `_dump_session_output_screen` /
-  `_dump_session_output_tmux`, which capture the detached session's
-  visible output (`screen -X hardcopy` / `tmux capture-pane -p`) so the
-  real error reaches the user automatically. Both are **no-fail by
-  contract** — missing binary, dead session, or unwritable `TMPDIR`
-  degrades to a silent no-op, because they run inside a path that is
-  already dying. Never let them `die`.
+  `_dump_session_output_tmux` as a **fallback only** (when the log came
+  back empty), covering the disjoint case where the process is still
+  alive at 20s — a genuine hang rather than a fast death. They capture
+  the live session's visible buffer (`screen -X hardcopy` /
+  `tmux capture-pane -p`). Both are **no-fail by contract** — missing
+  binary, dead session, or unwritable `TMPDIR` degrades to a silent
+  no-op, because they run inside a path that is already dying. Never
+  let them `die`.
 
 Pinned by `tests/test_engine_no_interactive_prompt.py`, which also
 asserts the two engine copies stay byte-identical. Background:

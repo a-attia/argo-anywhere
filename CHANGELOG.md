@@ -27,9 +27,10 @@ decisions D-001 through D-030) and the tag messages on the repo.
   the node and attaching to the session by hand.
 
   Every launcher now starts argo-proxy with stdin closed, so a prompt
-  ends the process immediately with a clear error instead of waiting.
-  When startup does time out, argo-anywhere also captures whatever the
-  session printed and includes it in the error, so the actual message
+  ends the process immediately with a clear error instead of waiting,
+  and every launcher records argo-proxy's output to `~/argoproxy.out`
+  (previously only the `nohup` fallback did). When startup times out,
+  argo-anywhere prints the tail of that log, so the actual message
   (e.g. `Warning: Port 64742 is already in use`) reaches you without a
   manual `screen -r`. Nothing changes for a normal startup — the engine
   writes every config value argo-proxy needs, so a prompt should never

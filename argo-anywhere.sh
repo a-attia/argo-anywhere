@@ -7481,6 +7481,15 @@ mode_server() {
   else launcher="nohup"
   fi
 
+  # Single log path for ALL launchers (see LOG-DURABILITY COROLLARY below).
+  # Historically only the nohup branch wrote a file, at this same path, so
+  # keeping the name means `clean`'s existing removal entry and the docs that
+  # mention it stay correct. Truncated per launch: this is a diagnostic for
+  # THIS start attempt, and an ever-growing append would bury the current
+  # failure under old ones.
+  local _PROXY_LOG="${HOME}/argoproxy.out"
+  : > "$_PROXY_LOG" 2>/dev/null || true
+
   # Resolve the venv path for the launch commands below. This USED to be
   # in scope because the install work lived inline in mode_server; when
   # `ensure_argoproxy_installed` was extracted (D-022, v2.2.1 prep) the
@@ -7605,6 +7614,21 @@ mode_server() {
   # Field incident that motivated it + the full five-defect analysis:
   # notes/impl_shared_node_transport.md (Tier 1 item 1 of its S6 sequencing).
   #
+  # LOG-DURABILITY COROLLARY (2026-08-10, same change): because the redirect
+  # above makes a prompting argo-proxy die in ~1s, the screen/tmux SESSION is
+  # reaped long before the 20s start-timeout fires -- so `screen -X hardcopy`
+  # / `tmux capture-pane` at that point have nothing left to read (verified:
+  # the session is gone within 2s). The two halves of the fix would defeat
+  # each other. Every launcher therefore also tees stdout+stderr to a real
+  # file that OUTLIVES the session, and the timeout branch prefers that file,
+  # falling back to a live-session capture only when the process is somehow
+  # still up (a genuine hang unrelated to a prompt -- e.g. a wedged network
+  # mount -- which is exactly the case where the session IS still alive).
+  #
+  # `tee` rather than screen's own `-L -Logfile`: -Logfile requires screen
+  # >= 4.06, and we do not control the version on an arbitrary node. tee also
+  # keeps output visible to `screen -r` for anyone attaching live.
+  #
   # Past the multi-port + legacy-session checks. If a session by our
   # CURRENT name still exists, treat it as housekeeping (the process
   # inside it died, e.g. from a previous 'stop') and clean up calmly
@@ -7617,12 +7641,14 @@ mode_server() {
         screen -S "${SCREEN_SESSION}" -X quit || true
       fi
       log "Starting argo-proxy in screen session '${SCREEN_SESSION}'..."
-      # stdin from /dev/null: see the NO-INTERACTIVE-PROMPT note above.
-      # `sh -c 'exec "$0" serve < /dev/null' <path>` passes the binary path as
-      # $0 rather than interpolating it into the script string, so a $venv
-      # containing spaces (e.g. HOME=/home/Alice Smith) can't word-split --
-      # the same hazard the tmux branch below solves with printf %q.
-      screen -dmS "${SCREEN_SESSION}" sh -c 'exec "$0" serve < /dev/null' "${venv}/bin/argo-proxy"
+      # stdin from /dev/null + tee to the log: see the two notes above.
+      # The binary path and the log path are passed as $0/$1 rather than
+      # interpolated into the script string, so a $venv or $HOME containing
+      # spaces (e.g. HOME=/home/Alice Smith) can't word-split -- the same
+      # hazard the tmux branch below solves with printf %q.
+      screen -dmS "${SCREEN_SESSION}" \
+        sh -c '"$0" serve < /dev/null 2>&1 | tee -a "$1"' \
+        "${venv}/bin/argo-proxy" "${_PROXY_LOG}"
       ;;
     tmux)
       if tmux has-session -t "${SCREEN_SESSION}" 2>/dev/null; then
@@ -7636,13 +7662,14 @@ mode_server() {
       # args (unlike screen -dmS NAME ARG1 ARG2). If $venv contains
       # spaces (e.g. $HOME = '/Users/Alice Smith'), naively interpolating
       # would word-split. Use printf %q to shell-escape the binary path.
-      # stdin from /dev/null: see the NO-INTERACTIVE-PROMPT note above.
-      local _tmux_cmd; _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve < /dev/null"
+      # stdin from /dev/null + tee to the log: see the two notes above.
+      local _tmux_cmd
+      _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve < /dev/null 2>&1 | tee -a $(printf '%q' "${_PROXY_LOG}")"
       tmux new-session -d -s "${SCREEN_SESSION}" "$_tmux_cmd"
       ;;
     nohup)
       warn "Neither screen nor tmux available; falling back to nohup."
-      nohup "${venv}/bin/argo-proxy" serve > "${HOME}/argoproxy.out" 2>&1 < /dev/null &
+      nohup "${venv}/bin/argo-proxy" serve > "${_PROXY_LOG}" 2>&1 < /dev/null &
       disown || true
       ;;
   esac
@@ -7653,39 +7680,41 @@ mode_server() {
     sleep 1; waited=$((waited+1))
     if [ "$waited" -ge 20 ]; then
       err "argo-proxy did not start listening within ${waited}s."
-      # The diagnostic to surface depends on which launcher we used --
-      # earlier code paths only wrote a stdout/stderr log file in the
-      # nohup branch (line 'nohup ... > ${HOME}/argoproxy.out'). For
-      # screen and tmux, argo-proxy's output is captured INSIDE the
-      # session and there's no log file to tail. Tell the user how to
-      # see the actual error in each case.
+      # Diagnostic order matters. Every launcher now tees to $_PROXY_LOG, and
+      # that file OUTLIVES the session -- which is the only thing that works
+      # for the common failure (a prompt takes EOF, argo-proxy dies in ~1s,
+      # the session is reaped ~18s before we get here). Prefer it always.
+      #
+      # The live-session capture is the fallback, not the primary: it only
+      # has anything to show when the process is STILL running at the 20s
+      # mark, i.e. a genuine hang rather than a fast death. Both paths are
+      # attempted because they cover disjoint cases.
+      local _dumped=0
+      if [ -s "$_PROXY_LOG" ]; then
+        err ""
+        err "--- last 30 lines of ${_PROXY_LOG} ---"
+        tail -n 30 "$_PROXY_LOG" >&2
+        err "--- end log ---"
+        err ""
+        _dumped=1
+      fi
       case "$launcher" in
         screen)
-          # Try to surface the session's own output automatically rather than
-          # asking the user to go and find it. `screen -X hardcopy <file>`
-          # dumps the visible buffer of the (still-running) session; it is a
-          # no-op if the session already exited, which is why every failure
-          # below degrades to the manual instructions instead of dying.
-          _dump_session_output_screen "$SCREEN_SESSION"
-          err "argo-proxy's output is inside the screen session. Inspect with:"
+          # Only if the log was empty AND the session is somehow still alive
+          # (true hang). Reads the live buffer via `screen -X hardcopy`.
+          [ "$_dumped" -eq 1 ] || _dump_session_output_screen "$SCREEN_SESSION"
+          err "If argo-proxy is still running, its output is inside the screen session:"
           err "  screen -r ${SCREEN_SESSION}        # detach with Ctrl-A then d"
-          err "If the session has already exited (no screen for argo-proxy left),"
-          err "  the failure left no log; re-run with --force-reinstall to start fresh."
+          err "A fast exit (e.g. a port collision) leaves no session -- see the log above."
           ;;
         tmux)
-          _dump_session_output_tmux "$SCREEN_SESSION"
-          err "argo-proxy's output is inside the tmux session. Inspect with:"
+          [ "$_dumped" -eq 1 ] || _dump_session_output_tmux "$SCREEN_SESSION"
+          err "If argo-proxy is still running, its output is inside the tmux session:"
           err "  tmux attach -t ${SCREEN_SESSION}   # detach with Ctrl-B then d"
-          err "If the session has already exited (no tmux for argo-proxy left),"
-          err "  the failure left no log; re-run with --force-reinstall to start fresh."
+          err "A fast exit (e.g. a port collision) leaves no session -- see the log above."
           ;;
         nohup)
-          if [ -f "${HOME}/argoproxy.out" ]; then
-            err "Last 30 lines of ${HOME}/argoproxy.out:"
-            tail -n 30 "${HOME}/argoproxy.out" >&2
-          else
-            err "Expected ${HOME}/argoproxy.out but no log was written."
-          fi
+          [ "$_dumped" -eq 1 ] || err "Expected ${_PROXY_LOG} but no log was written."
           ;;
       esac
       die "Server bootstrap failed."
@@ -10199,7 +10228,7 @@ REMOTE  -  on ${cached_user}@${cached_node} $(jump_descr)
     ~/${REMOTE_SELF}                           (pushed copy of this script)
     ~/${REMOTE_LOG}                            (server bootstrap log)
     \$HOME/argovenv/                           (Python venv we created)
-    ~/argoproxy.out                            (only if nohup launcher was used)
+    ~/argoproxy.out                            (argo-proxy stdout/stderr log)
     screen/tmux session named '${SCREEN_SESSION}'   (running argo-proxy)
   risky:
     ~/.config/argoproxy/config.yaml            (our writes vs argo-proxy's own state)
