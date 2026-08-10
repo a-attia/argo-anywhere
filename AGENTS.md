@@ -90,7 +90,9 @@ loading set for normal sessions.
   AppleScript activate-last + Popen-path System Events raise; Linux
   wmctrl best-effort with Wayland no-op). Design record
   [`notes/impl_launcher_cwd.md`](notes/impl_launcher_cwd.md). Test
-  count: 133 baseline → **290 passing** (includes the 2026-07-13
+  count: 133 baseline → **290 passing** *(as of the D-031 work,
+  2026-07-13; the suite has grown since — run `pytest -q` for the
+  current number rather than trusting this one)* (includes the 2026-07-13
   claudecode-config cleanup: `write_claudecode_config` now emits
   Anthropic's canonical `ANTHROPIC_API_KEY` instead of the legacy
   alias `ANTHROPIC_AUTH_TOKEN` (both are honored by Claude Code;
@@ -578,6 +580,43 @@ preserves unknown YAML keys via a Python+PyYAML merge: only
 `config_version`, `user`, `host`, `port` are owned by the script;
 everything else (`argo_url`, `argo_embedding_url`,
 `concurrent_downloads`, etc.) survives a `[b]ackup+overwrite` choice.
+
+### No-interactive-prompt invariant (argo-proxy launch)
+
+**Every launcher in `mode_server` MUST run argo-proxy with stdin
+redirected from `/dev/null`** (`screen`, `tmux`, and `nohup` — the
+last has always had it; the first two were fixed 2026-08-10). Search
+the engine for `NO-INTERACTIVE-PROMPT INVARIANT`.
+
+Why: `screen -dm` / `tmux new-session -d` hand the child a pty, so an
+interactive prompt has something to read from and blocks forever inside
+a session nobody is watching. Upstream's `validate_port` tests the port
+with a real `socket.bind()` — so it sees cross-user collisions our
+unprivileged `lsof` probe cannot — and on failure drops into a bare
+`while True: input(...)` with no EOF handling and no timeout. The
+client-side wait then reports only `did not start listening within 20s`,
+naming a symptom rather than a cause. With stdin at `/dev/null` the same
+prompt raises `EOFError` in ~1s.
+
+Two rules for anyone touching that launch block:
+
+- The `screen` branch passes the binary as `$0` to
+  `sh -c 'exec "$0" serve < /dev/null'` rather than interpolating the
+  path into the script string — a `$venv` containing spaces would
+  otherwise word-split (the hazard the `tmux` branch solves with
+  `printf %q`).
+- The start-timeout branch calls `_dump_session_output_screen` /
+  `_dump_session_output_tmux`, which capture the detached session's
+  visible output (`screen -X hardcopy` / `tmux capture-pane -p`) so the
+  real error reaches the user automatically. Both are **no-fail by
+  contract** — missing binary, dead session, or unwritable `TMPDIR`
+  degrades to a silent no-op, because they run inside a path that is
+  already dying. Never let them `die`.
+
+Pinned by `tests/test_engine_no_interactive_prompt.py`, which also
+asserts the two engine copies stay byte-identical. Background:
+[`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md)
+(Tier 1 item 1).
 
 ### Server-mode logging trick
 

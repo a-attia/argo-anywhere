@@ -7127,6 +7127,68 @@ ensure_argoproxy_installed() {
   ok "PyYAML in ${venv}: ${_yaml_ver}"
 }
 
+# _dump_session_output_screen / _dump_session_output_tmux <session>:
+# best-effort capture of a detached session's visible output, printed to
+# stderr under a clear header. Used by mode_server's start-timeout branch so
+# the user sees WHY argo-proxy failed instead of instructions for finding out
+# (the 2026-08-10 field incident cost a manual `screen -r` to discover a port
+# prompt; see notes/impl_shared_node_transport.md S2.2).
+#
+# Contract for both: NEVER fail, never die, never emit anything when there is
+# nothing useful to show. Every step is guarded because all of them are
+# plausibly unavailable -- the session may have already exited, hardcopy may
+# be refused, $TMPDIR may be unwritable. Callers print the manual-inspection
+# hints regardless, so a silent no-op here just means the user follows the
+# same instructions they got before this existed. Trailing blank lines are
+# stripped: `screen -X hardcopy` pads to the full terminal height, so an
+# unstripped dump is ~20 empty lines with 3 useful ones at the top.
+_dump_session_output_capture() {
+  # $1 = human label for the header, $2 = file holding the captured text.
+  local label="$1" file="$2"
+  [ -s "$file" ] || return 0
+  local stripped
+  # Strip trailing blank lines (see above). The awk keeps a running count of
+  # pending blanks and only emits them if more non-blank content follows.
+  stripped="$( { awk 'NF {for(i=0;i<b;i++) print ""; b=0; print; next} {b++}' "$file"; } || true )"
+  [ -n "$stripped" ] || return 0
+  err ""
+  err "--- captured ${label} output (last 30 lines) ---"
+  printf '%s\n' "$stripped" | tail -n 30 >&2
+  err "--- end captured output ---"
+  err ""
+}
+
+_dump_session_output_screen() {
+  local session="$1"
+  command -v screen >/dev/null 2>&1 || return 0
+  # Only meaningful while the session still exists; hardcopy on a dead
+  # session is an error we deliberately swallow.
+  screen -ls 2>/dev/null | grep -q "\.${session}\b" || return 0
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/argo-anywhere-hardcopy.XXXXXX" 2>/dev/null)" || return 0
+  if screen -S "$session" -X hardcopy "$tmp" >/dev/null 2>&1; then
+    # hardcopy is asynchronous (the command is queued to the session); give
+    # it a moment to land before reading, or we race an empty file.
+    sleep 1
+    _dump_session_output_capture "screen session '${session}'" "$tmp"
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+_dump_session_output_tmux() {
+  local session="$1"
+  command -v tmux >/dev/null 2>&1 || return 0
+  tmux has-session -t "$session" 2>/dev/null || return 0
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/argo-anywhere-capture.XXXXXX" 2>/dev/null)" || return 0
+  # capture-pane -p prints to stdout (synchronously, unlike screen's
+  # hardcopy), so no sleep is needed here.
+  if tmux capture-pane -p -t "$session" > "$tmp" 2>/dev/null; then
+    _dump_session_output_capture "tmux session '${session}'" "$tmp"
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+}
+
 mode_server() {
   # Resolve identity (username + port) from one of three sources, in order:
   #   1. env / canonical (set by 'client' over SSH; never missing in that
@@ -7516,6 +7578,33 @@ mode_server() {
       ;;
   esac
 
+  # NO-INTERACTIVE-PROMPT INVARIANT (2026-08-10): every launcher below runs
+  # argo-proxy with stdin redirected from /dev/null.
+  #
+  # Why: `screen -dm` / `tmux new-session -d` give the child a pty, so an
+  # interactive prompt inside argo-proxy has something to read from and blocks
+  # FOREVER. Upstream's `validate_port` (config/validation.py) tests the port
+  # with a real socket.bind() -- so it sees cross-user collisions our lsof
+  # probe cannot (an unprivileged lsof can't attribute another user's socket)
+  # -- and on failure calls a bare `while True: input(...)` in
+  # config/interactive.py with no EOF handling and no timeout. Detached in a
+  # session nobody is watching, that hangs until the 20s client-side wait
+  # below gives up with "did not start listening within 20s", which names a
+  # symptom and not a cause. Diagnosing it requires a manual `screen -r`.
+  #
+  # With stdin at /dev/null the same input() raises EOFError in ~1s and
+  # argo-proxy dies with a traceback naming the port conflict, which the
+  # timeout branch then captures verbatim (see the hardcopy/capture-pane
+  # block below).
+  #
+  # This is safe because we write every REQUIRED_KEYS config value before
+  # launching, so no legitimate prompt should ever appear -- any prompt that
+  # does is a bug we want to fail loudly rather than wait on. The `nohup`
+  # branch has always had `< /dev/null`; this brings screen + tmux in line.
+  #
+  # Field incident that motivated it + the full five-defect analysis:
+  # notes/impl_shared_node_transport.md (Tier 1 item 1 of its S6 sequencing).
+  #
   # Past the multi-port + legacy-session checks. If a session by our
   # CURRENT name still exists, treat it as housekeeping (the process
   # inside it died, e.g. from a previous 'stop') and clean up calmly
@@ -7528,7 +7617,12 @@ mode_server() {
         screen -S "${SCREEN_SESSION}" -X quit || true
       fi
       log "Starting argo-proxy in screen session '${SCREEN_SESSION}'..."
-      screen -dmS "${SCREEN_SESSION}" "${venv}/bin/argo-proxy" serve
+      # stdin from /dev/null: see the NO-INTERACTIVE-PROMPT note above.
+      # `sh -c 'exec "$0" serve < /dev/null' <path>` passes the binary path as
+      # $0 rather than interpolating it into the script string, so a $venv
+      # containing spaces (e.g. HOME=/home/Alice Smith) can't word-split --
+      # the same hazard the tmux branch below solves with printf %q.
+      screen -dmS "${SCREEN_SESSION}" sh -c 'exec "$0" serve < /dev/null' "${venv}/bin/argo-proxy"
       ;;
     tmux)
       if tmux has-session -t "${SCREEN_SESSION}" 2>/dev/null; then
@@ -7542,7 +7636,8 @@ mode_server() {
       # args (unlike screen -dmS NAME ARG1 ARG2). If $venv contains
       # spaces (e.g. $HOME = '/Users/Alice Smith'), naively interpolating
       # would word-split. Use printf %q to shell-escape the binary path.
-      local _tmux_cmd; _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve"
+      # stdin from /dev/null: see the NO-INTERACTIVE-PROMPT note above.
+      local _tmux_cmd; _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve < /dev/null"
       tmux new-session -d -s "${SCREEN_SESSION}" "$_tmux_cmd"
       ;;
     nohup)
@@ -7566,12 +7661,19 @@ mode_server() {
       # see the actual error in each case.
       case "$launcher" in
         screen)
+          # Try to surface the session's own output automatically rather than
+          # asking the user to go and find it. `screen -X hardcopy <file>`
+          # dumps the visible buffer of the (still-running) session; it is a
+          # no-op if the session already exited, which is why every failure
+          # below degrades to the manual instructions instead of dying.
+          _dump_session_output_screen "$SCREEN_SESSION"
           err "argo-proxy's output is inside the screen session. Inspect with:"
           err "  screen -r ${SCREEN_SESSION}        # detach with Ctrl-A then d"
           err "If the session has already exited (no screen for argo-proxy left),"
           err "  the failure left no log; re-run with --force-reinstall to start fresh."
           ;;
         tmux)
+          _dump_session_output_tmux "$SCREEN_SESSION"
           err "argo-proxy's output is inside the tmux session. Inspect with:"
           err "  tmux attach -t ${SCREEN_SESSION}   # detach with Ctrl-B then d"
           err "If the session has already exited (no tmux for argo-proxy left),"

@@ -713,11 +713,40 @@ both options.
 self-contained, has no upstream dependency, changes no user-facing
 flag, and is strictly correct under either Option A or Option B.
 
-| # | Change | Defect | Why first |
-|:--|:---|:---|:---|
-| 1 | `< /dev/null` on launch + `screen -X hardcopy` in the timeout branch | 2 | Turns an indefinite silent hang into a ~1s diagnosable `EOFError` |
-| 2 | Confirm our own session/pid before trusting `/health` at `:7557` | 4 | Stops a stranger's proxy from satisfying our liveness check |
-| 3 | `status` honesty via `local_tunnel_destination` | 3 | Stops `ALL GREEN` overclaiming; pure reporting change |
+| # | Change | Defect | Status | Why first |
+|:--|:---|:---|:---|:---|
+| 1 | `< /dev/null` on launch + session-output capture in the timeout branch | 2 | **SHIPPED 2026-08-10** | Turns an indefinite silent hang into a ~1s diagnosable `EOFError` |
+| 2 | Confirm our own session/pid before trusting `/health` at `:7557` | 4 | pending | Stops a stranger's proxy from satisfying our liveness check |
+| 3 | `status` honesty via `local_tunnel_destination` | 3 | pending | Stops `ALL GREEN` overclaiming; pure reporting change |
+
+**Item 1 shipped 2026-08-10.** All three launchers (`screen`, `tmux`,
+`nohup`) now run argo-proxy with stdin redirected from `/dev/null`
+under a `NO-INTERACTIVE-PROMPT INVARIANT` comment block in
+`mode_server`; the `screen` branch passes the binary as `$0` to `sh -c`
+so a `$venv` containing spaces cannot word-split (the hazard the tmux
+branch already solved with `printf %q`). The start-timeout branch gained
+`_dump_session_output_screen` / `_dump_session_output_tmux`, which
+capture the detached session's visible output (`screen -X hardcopy` /
+`tmux capture-pane -p`) and print it under a header before the existing
+manual-inspection hints. Both helpers are no-fail by contract: missing
+binary, dead session, or unwritable `TMPDIR` degrades to a silent no-op,
+because they run inside a path that is already dying. Trailing blank
+padding is stripped (`hardcopy` pads to full terminal height).
+
+Pinned by `tests/test_engine_no_interactive_prompt.py` (9 tests):
+grep invariants for all three launchers plus behavioural harnesses that
+reproduce the hang with the un-redirected launch shape and prove the
+redirect prevents it, and that the captured text contains the actual
+`Port 64742 is already in use` prompt. The behavioural tests drive the
+engine's **own** launch line (extracted by regex, fake binary
+substituted) rather than a copy, so they track the real code. Verified
+to fail when the fix is reverted.
+
+One testing gotcha worth recording: `screen` derives its socket
+directory from `$HOME`, and the autouse `_isolate_home` fixture
+repoints `HOME` per test — so a harness inheriting the ambient
+environment starts sessions it cannot then see. `_run_screen_harness`
+pins a private `HOME` inside its own tmpdir.
 
 Item 1 is the keystone, and the reason is worth spelling out because it
 inverts the first draft's ordering. **Once a collision fails fast and
@@ -730,6 +759,12 @@ argo-proxy failing immediately and visibly when it loses the race,
 which is precisely what `< /dev/null` buys. The bind test then earns
 its place by moving the failure earlier and making the message better —
 which is worth having, but is not what keeps us correct.
+
+With item 1 shipped, the incident's *diagnosability* problem is closed:
+the same collision now fails in about a second with the upstream warning
+text quoted back to the user, instead of hanging for 20s behind a
+message that named only the symptom. The *misattachment* problem is
+untouched — that is items 2, 5 and the transport decision.
 
 **Tier 2 — small design decisions, no transport commitment.**
 

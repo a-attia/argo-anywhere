@@ -16,6 +16,29 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ### Fixed
 
+- **A port collision on the compute node now fails in ~1s with the real
+  reason, instead of hanging silently for 20s.** When the port argo-proxy
+  wants is already taken on a shared node, upstream argo-proxy asks
+  `Enter port [NNNNN] [Y/n/number]:` and waits for an answer. Because we
+  start it inside a detached `screen` / `tmux` session, that prompt had a
+  terminal to read from and blocked forever, unseen — the client then
+  reported only `argo-proxy did not start listening within 20s`, which
+  says nothing about the cause. Finding the real problem meant SSH-ing to
+  the node and attaching to the session by hand.
+
+  Every launcher now starts argo-proxy with stdin closed, so a prompt
+  ends the process immediately with a clear error instead of waiting.
+  When startup does time out, argo-anywhere also captures whatever the
+  session printed and includes it in the error, so the actual message
+  (e.g. `Warning: Port 64742 is already in use`) reaches you without a
+  manual `screen -r`. Nothing changes for a normal startup — the engine
+  writes every config value argo-proxy needs, so a prompt should never
+  appear; if one does, it is now loud rather than silent.
+
+  Found via a 2026-08-10 field incident on a busy shared node; the full
+  analysis (five composing defects, of which this is one) is in
+  [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md).
+
 - **`connect` tunnel no longer dies after ~1 hour of idle** (PLAN.md
   D-033). The quick-connect **Connect** button (and the `connect` /
   `tunnel` / `client` / `setup` CLI verbs) held the SSH tunnel only as
