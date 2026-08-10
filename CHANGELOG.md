@@ -103,6 +103,21 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ### Changed
 
+- **You can now use two compute nodes at once.** argo-proxy's config
+  lives in `$HOME`, which on CELS is one NFS filesystem shared by every
+  compute node — so `~/.config/argoproxy/config.yaml` is a single file
+  for all of them. argo-anywhere treated its `port:` line as
+  authoritative, so connecting to a second node on a second port failed
+  with a port-mismatch error until you hand-edited that shared file (and
+  editing it then broke the *first* node's next run).
+
+  The port is now passed to argo-proxy explicitly at launch, which
+  overrides the file without modifying it. Two nodes on two ports work
+  concurrently, and the config is left alone. The port-mismatch check is
+  still there but is now an informational note rather than a refusal,
+  and the config prompt no longer nudges you to overwrite a file that is
+  shared node-wide — `[k]eep` is the recommended answer on CELS.
+
 - **`status` no longer claims more than it checked.** The summary card
   drew its verdict from three checks that all run on your laptop — a
   listener on the port, `/health`, `/v1/models` — and then printed

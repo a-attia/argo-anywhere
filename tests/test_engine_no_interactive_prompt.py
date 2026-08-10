@@ -197,8 +197,8 @@ def test_screen_launcher_passes_binary_out_of_band() -> None:
     src = _engine_source()
     body = _function_body(src, "mode_server")
     line = _screen_launch_line(body)
-    assert '\'"$0" serve < /dev/null 2>&1 | tee -a "$1"\'' in line, (
-        "screen launcher must pass binary + log as $0/$1, not interpolate them"
+    assert '\'"$0" serve --port "$2" < /dev/null 2>&1 | tee -a "$1"\'' in line, (
+        "screen launcher must pass binary/log/port as $0/$1/$2, not interpolate"
     )
     # Both paths must appear AFTER the quoted script (i.e. as the $0/$1 args).
     script_end = line.index("'", line.index("sh -c '") + len("sh -c '"))
@@ -208,6 +208,9 @@ def test_screen_launcher_passes_binary_out_of_band() -> None:
     )
     assert "_PROXY_LOG" in tail, (
         "log path must be the $1 argument, outside the script string"
+    )
+    assert "PROXY_PORT" in tail, (
+        "port must be the $2 argument (Q10: overrides the shared config file)"
     )
 
 
@@ -240,6 +243,7 @@ def test_devnull_redirect_actually_prevents_the_hang() -> None:
         real_launch.replace('"${SCREEN_SESSION}"', '"$SESSION"')
         .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
         .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
+        .replace('"${PROXY_PORT}"', '"$TESTPORT"')
     )
     assert fake_launch != real_launch, "substitution failed; launch line changed shape"
 
@@ -248,6 +252,7 @@ def test_devnull_redirect_actually_prevents_the_hang() -> None:
         set -uo pipefail
         FAKE="$PWD/fakeproxy"
         LOGFILE="$PWD/argoproxy.out"
+        TESTPORT=64742
         cat > "$FAKE" <<'EOS'
         #!/bin/bash
         echo "WARNING | [config] Warning: Port 64742 is already in use."
@@ -296,6 +301,62 @@ def test_devnull_redirect_actually_prevents_the_hang() -> None:
 # ---------------------------------------------------------------------------
 # Part 2: automatic session-output capture in the timeout branch
 # ---------------------------------------------------------------------------
+
+
+def test_all_launchers_pass_port_explicitly() -> None:
+    """Every launcher must pass ``--port``; the config file is not authoritative.
+
+    Q10: on CELS ``$HOME`` is one NFS mount shared by every compute node, so
+    ``~/.config/argoproxy/config.yaml`` is a SINGLE file for all of them.
+    Relying on its ``port:`` made a second node on a second port impossible
+    without hand-editing the shared file (reproduced in the field
+    2026-08-10). ``--port`` becomes an env override at config load, so the
+    requested port wins AND the shared file is left untouched.
+    """
+    body = _function_body(_engine_source(), "mode_server")
+    screen = _screen_launch_line(body)
+    assert "--port" in screen, "screen launcher must pass --port"
+
+    tmux = re.search(r"^\s*_tmux_cmd=.*$", body, re.MULTILINE)
+    assert tmux and "--port" in tmux.group(0), "tmux launcher must pass --port"
+
+    nohup = re.search(r"^\s*nohup .*argo-proxy.*$", body, re.MULTILINE)
+    assert nohup and "--port" in nohup.group(0), "nohup launcher must pass --port"
+
+
+def test_config_port_mismatch_is_a_note_not_a_refusal() -> None:
+    """A disagreeing config must no longer abort the run.
+
+    With ``--port`` passed explicitly the file's value is harmless, so
+    refusing would block the multi-node case for no reason. It stays
+    *reported*, because it usually means the user kept an out-of-date file.
+    """
+    body = _function_body(_engine_source(), "mode_server")
+    seg = body[body.index("cfg_port=") : body.index("# 5) Already listening")]
+    assert "die " not in seg, (
+        "a config/port disagreement must not abort now that --port overrides it"
+    )
+    assert "Refusing to launch argo-proxy" not in seg
+    assert "--port" in seg, "the note should explain that --port overrides"
+
+
+def test_prompt_guidance_does_not_push_users_to_rewrite_shared_config() -> None:
+    """The pre-prompt hint must not claim ``[k]eep`` gets the run refused.
+
+    That was true before ``--port``; repeating it now would push users into
+    rewriting a file shared by every node -- the exact thing that breaks
+    multi-node use.
+    """
+    body = _function_body(_engine_source(), "mode_server")
+    # The hint block is keyed off _pc_existing, just before the config prompt.
+    start = body.index("_pc_existing=")
+    seg = body[start : body.index("handle_config_file", start)]
+    assert "this run will be refused" not in seg, (
+        "stale guidance: [k]eep no longer causes a refusal"
+    )
+    assert "shared" in seg.lower(), (
+        "the hint should mention the shared-$HOME consequence"
+    )
 
 
 def test_log_display_filters_the_startup_banner() -> None:
@@ -405,6 +466,7 @@ def test_log_survives_the_session_that_dies_from_the_redirect() -> None:
         .replace('"${SCREEN_SESSION}"', '"$SESSION"')
         .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
         .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
+        .replace('"${PROXY_PORT}"', '"$TESTPORT"')
     )
     assert "$FAKE" in fake_launch and "$LOGFILE" in fake_launch
 
@@ -413,6 +475,7 @@ def test_log_survives_the_session_that_dies_from_the_redirect() -> None:
         set -uo pipefail
         FAKE="$PWD/fakeproxy"
         LOGFILE="$PWD/argoproxy.out"
+        TESTPORT=64742
         cat > "$FAKE" <<'EOS'
         #!/bin/bash
         echo "WARNING | [config] Warning: Port 64742 is already in use."

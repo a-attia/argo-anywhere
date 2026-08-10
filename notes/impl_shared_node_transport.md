@@ -1002,6 +1002,57 @@ Still unverified after this run: `pick_node` (bypassed by `--node`), the
 `tmux` and `nohup` launcher branches, and `configure`/`run` against a
 freshly created channel.
 
+### Q10 fix — stop treating the shared config's `port:` as authoritative
+
+Shipped 2026-08-10, immediately after the run above reproduced the
+problem.
+
+**Mechanism.** `argo-proxy serve --port N` is turned into an env
+override at config load — `cli/handlers.py` sets `os.environ["PORT"]`,
+which `config/io.py::_apply_env_overrides` consumes — so the requested
+port beats whatever the file says, **and the file is not rewritten**.
+Verified directly against argo-proxy 3.2.3 on the node before writing
+any code:
+
+```text
+$ argo-proxy serve --port 64899        # config on disk says 64751
+INFO | [config] Loaded configuration from ~/.config/argoproxy/config.yaml
+INFO | [config] Using port 64899...
+INFO | [cli]    Listening on http://127.0.0.1:64899
+$ grep '^port:' ~/.config/argoproxy/config.yaml
+port: 64751                            # untouched
+```
+
+**Changes.** All three launchers (`screen`, `tmux`, `nohup`) pass
+`--port "$PROXY_PORT"`. The 4b readback is **downgraded from a hard
+refusal to a note** — a disagreeing file is still worth reporting (it
+usually means the user kept an out-of-date config) but is no longer an
+error, because it can no longer affect the run. The pre-prompt hint was
+saying the opposite of the truth once `--port` landed ("choosing [k]eep
+… this run will be refused"); it now explains that either choice works
+and recommends `[k]` on a shared `$HOME`.
+
+That last point is the one with teeth. The old guidance actively pushed
+users toward `[b]`/`[m]` — rewriting a file shared by every compute
+node — which is precisely what makes multi-node use fail for the *next*
+node. The bad advice was a consequence of the bad design.
+
+**Verified live**, re-running the exact scenario that had failed 40
+minutes earlier, with the shared config deliberately left at `64751`:
+
+| Check | Result |
+|:---|:---|
+| `[k]eep` chosen at the prompt (non-TTY default) | Run proceeded — previously refused here |
+| Node-side log | `Using port 64801` / `Listening on http://127.0.0.1:64801` |
+| Shared `config.yaml` after the run | `port: 64751`, sha `277fa23fb8fe9cc5` — **unmodified** |
+| `:64751` and `:64801` | Both healthy **concurrently**, different nodes, one config |
+
+**Not fixed, deliberately.** `handle_config_file` still has no `-y`
+bypass, so non-TTY callers take the `k` default. That is now the *right*
+default rather than a trap, so the gap is no longer urgent — but an
+`--assume-yes` path for the config prompt remains worth having, and it
+is the reason a scripted port change still cannot choose `[b]`.
+
 What remains is narrower but not smaller. The **cold** bootstrap path is
 now guarded at both ends (H5 before launch, `_listener_is_ours` after);
 the **warm** path is not guarded at all
@@ -1309,7 +1360,17 @@ these gate Tier 1** — they gate Tiers 2 and 3.
    to consult when the user is running *on* the node. Does that case get
    its own rule, or does on-node local mode simply inherit the
    socket-mode guarantee under Option A?
-10. **Does the shared-`$HOME` scoping error get its own fix?** On CELS,
+10. ~~**Does the shared-`$HOME` scoping error get its own fix?**~~
+    **RESOLVED 2026-08-10 for the port dimension** (see
+    §[6](#6-recommended-sequencing) "Q10 fix"). The launch line now passes
+    `--port "$PROXY_PORT"`, so the shared config's `port:` is no longer
+    authoritative and the file is left untouched — two nodes on two ports
+    now work concurrently, verified live. The *other* shared paths
+    (`$HOME/argovenv`, `REMOTE_SELF`, `REMOTE_LOG`) remain shared; they
+    are benign today because every node runs the same engine and venv,
+    but the original wording below is kept for that residue.
+
+    On CELS,
     `~/.config/argoproxy/config.yaml`, `$HOME/argovenv`, and
     `REMOTE_SELF` are all on one NFS mount shared by every compute node,
     so "one argo-proxy per user per node" is really "one per user"

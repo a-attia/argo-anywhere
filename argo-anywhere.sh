@@ -7472,11 +7472,20 @@ mode_server() {
     local _pc_existing
     _pc_existing="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+/{print $2; exit}' "$_pc_cfg" 2>/dev/null)"
     if [ -n "$_pc_existing" ] && [ "$_pc_existing" != "$PROXY_PORT" ]; then
-      warn "Port is changing: this run serves on ${PROXY_PORT}, but the existing config"
-      warn "  (${_pc_cfg}) declares ${_pc_existing}."
-      warn "  -> At the next prompt pick [b]ackup+overwrite or [m]erge to serve on"
-      warn "     ${PROXY_PORT}. Choosing [k]eep keeps ${_pc_existing} and this run will be refused"
-      warn "     (argo-proxy would bind the wrong port)."
+      # Q10 (2026-08-10): this used to tell the user that [k]eep would get the
+      # run REFUSED, because the file's port: was authoritative. It no longer
+      # is -- the launch line passes --port, which overrides the file. Any
+      # choice at the prompt now works, so the guidance is about what you want
+      # PERSISTED, not about whether this run will survive. Saying otherwise
+      # pushed users toward rewriting a file that is shared across every node
+      # on CELS's NFS $HOME, which is exactly what breaks multi-node use.
+      log "Note: this run serves on ${PROXY_PORT}; the existing config"
+      log "  (${_pc_cfg}) declares ${_pc_existing}."
+      log "  Either choice at the next prompt works -- we pass --port ${PROXY_PORT}"
+      log "  explicitly, so the file's value does not affect this run."
+      log "  Pick [k]eep to leave the file alone (recommended on a shared \$HOME:"
+      log "  the same file is used by every compute node); pick [b] or [m] only if"
+      log "  you want ${PROXY_PORT} to become the persisted default."
     fi
   fi
 
@@ -7489,24 +7498,37 @@ mode_server() {
   #     the client's tunnel-side health check on $PROXY_PORT will time out.
   #     This used to fail late as "argo-proxy did not start listening within
   #     20s" (true but unhelpful); now we fail fast with a clear message.
+  # SHARED-$HOME NOTE (Q10, 2026-08-10). On CELS, $HOME is one NFS mount
+  # shared by every compute node, so ~/.config/argoproxy/config.yaml is a
+  # SINGLE file for all of them -- "one argo-proxy per user per node" is
+  # really "one per user" as far as this config is concerned. Targeting a
+  # second node on a second port therefore used to be impossible without
+  # hand-editing the file: the readback below saw the first node's port and
+  # refused. Reproduced in the field on the first realistic two-node attempt.
+  #
+  # The fix is to stop treating the file's `port:` as authoritative. We now
+  # pass `--port "$PROXY_PORT"` on the launch line, which argo-proxy turns
+  # into an env override applied at config load (cli/handlers.py sets
+  # os.environ["PORT"]; config/io.py's _apply_env_overrides consumes it), so
+  # the requested port wins over whatever the shared file says AND the file
+  # is left untouched. Verified against argo-proxy 3.2.3 on a real node:
+  # `serve --port 64899` with `port: 64751` on disk bound 64899 and did not
+  # rewrite the file.
+  #
+  # The readback is kept, downgraded from a hard refusal to a note, because
+  # a disagreeing file is still worth surfacing: it usually means the user
+  # picked [k] at the config prompt and may not realise this run is serving
+  # somewhere else. It is no longer an error, because --port makes it
+  # harmless.
   local cfg_path="${HOME}/.config/argoproxy/config.yaml"
   local cfg_port
   cfg_port="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+/{print $2; exit}' "$cfg_path" 2>/dev/null)"
   if [ -n "$cfg_port" ] && [ "$cfg_port" != "$PROXY_PORT" ]; then
-    err "Port mismatch on $(hostname):"
-    err "  client asked us to serve on port : ${PROXY_PORT}"
-    err "  ${cfg_path} declares port        : ${cfg_port}"
-    err ""
-    err "  argo-proxy reads its port from config.yaml, so it would bind ${cfg_port}"
-    err "  while the client polls ${PROXY_PORT}. The likely cause: you chose [k] at the"
-    err "  earlier 'argo-proxy config differs' prompt, keeping an out-of-date config."
-    err ""
-    err "  Fix on this node ($(hostname)):"
-    err "    * edit ${cfg_path} and change the 'port:' line to ${PROXY_PORT}, OR"
-    err "    * delete ${cfg_path} so the next run writes a fresh one, OR"
-    err "    * re-run 'client' from your laptop and pick [b] (backup + overwrite)"
-    err "      at the argo-proxy config prompt."
-    die "Refusing to launch argo-proxy with a config that disagrees on port."
+    log "Note: ${cfg_path} declares port ${cfg_port}, but this run serves ${PROXY_PORT}."
+    log "  Passing --port ${PROXY_PORT} on the launch line, which overrides the file"
+    log "  without modifying it. (On CELS \$HOME is shared NFS, so that file is the"
+    log "  same on every compute node -- leaving it alone is what lets you run"
+    log "  against more than one node at a time.)"
   fi
 
   # 5) Already listening on our port? Be paranoid: it might be someone else's
@@ -7758,8 +7780,8 @@ mode_server() {
       # spaces (e.g. HOME=/home/Alice Smith) can't word-split -- the same
       # hazard the tmux branch below solves with printf %q.
       screen -dmS "${SCREEN_SESSION}" \
-        sh -c '"$0" serve < /dev/null 2>&1 | tee -a "$1"' \
-        "${venv}/bin/argo-proxy" "${_PROXY_LOG}"
+        sh -c '"$0" serve --port "$2" < /dev/null 2>&1 | tee -a "$1"' \
+        "${venv}/bin/argo-proxy" "${_PROXY_LOG}" "${PROXY_PORT}"
       ;;
     tmux)
       if tmux has-session -t "${SCREEN_SESSION}" 2>/dev/null; then
@@ -7775,12 +7797,12 @@ mode_server() {
       # would word-split. Use printf %q to shell-escape the binary path.
       # stdin from /dev/null + tee to the log: see the two notes above.
       local _tmux_cmd
-      _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve < /dev/null 2>&1 | tee -a $(printf '%q' "${_PROXY_LOG}")"
+      _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve --port $(printf '%q' "${PROXY_PORT}") < /dev/null 2>&1 | tee -a $(printf '%q' "${_PROXY_LOG}")"
       tmux new-session -d -s "${SCREEN_SESSION}" "$_tmux_cmd"
       ;;
     nohup)
       warn "Neither screen nor tmux available; falling back to nohup."
-      nohup "${venv}/bin/argo-proxy" serve > "${_PROXY_LOG}" 2>&1 < /dev/null &
+      nohup "${venv}/bin/argo-proxy" serve --port "${PROXY_PORT}" > "${_PROXY_LOG}" 2>&1 < /dev/null &
       disown || true
       ;;
   esac

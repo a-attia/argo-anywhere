@@ -1111,11 +1111,26 @@ and **one** SSH tunnel per local port. Concrete pinch points:
 
 - `SCREEN_SESSION="argovproxy"` is a single global constant.
   argo-proxy is always started inside the screen/tmux session named
-  `argovproxy` — no per-port suffix.
+  `argovproxy` — no per-port suffix. This is genuinely per-node
+  (sessions are node-local), so it constrains one proxy *per node*.
 - `~/.config/argoproxy/config.yaml` is the single argo-proxy config
-  file on the node. Its `port:` line is mutated on each invocation.
+  file — and on CELS `$HOME` is **NFS shared across every compute
+  node**, so it is one file for all of them, not one per node. The
+  heading's "per node" is therefore optimistic for anything stored in
+  `$HOME` (`$HOME/argovenv`, `REMOTE_SELF`, `REMOTE_LOG` too).
+  **Since 2026-08-10 the `port:` line is no longer authoritative**:
+  every launcher passes `--port "$PROXY_PORT"`, which argo-proxy
+  applies as an env override at config load, so the requested port
+  wins and the shared file is left unmodified. That is what makes two
+  nodes on two ports work concurrently (verified live). Do NOT
+  reintroduce a hard refusal when the file's port disagrees — that was
+  the Q10 bug, and it made multi-node use impossible without
+  hand-editing a file shared by every node. See
+  [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md)
+  "Q10 fix".
 - `local_tunnel_status` checks "is something on this port?" — can't
-  tell which destination the tunnel targets.
+  tell which destination the tunnel targets. (`status` now surfaces
+  the real destination separately via `local_tunnel_destination`.)
 
 Implications:
 
