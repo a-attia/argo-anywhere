@@ -580,42 +580,125 @@ def test_launch_external_touches_mru_on_success(
     assert str(tmp_path) in mru
 
 
-def test_ws_refuses_second_channel_when_one_alive() -> None:
-    """D-031 A1: if a live Channel session exists, refuse the second connect
-    attempt (the UI's launcher offers 'stop + replace' as the alternative)."""
-    from starlette.websockets import WebSocketDisconnect
+class _FakeAlivePty:
+    argv = ["connect"]
+    pid = 4242
 
+    def isalive(self):
+        return True
+
+    @property
+    def exitstatus(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+
+def _plant_channel_session(app, sid: str = "s99") -> "object":
+    """Plant a fake live Channel session directly into the named slot."""
     from argo_anywhere.web.registry import ManagedSession, SessionRegistry
 
-    app = create_app(engine_argv=["help"])
-
-    # Pre-populate a fake live Channel session so the ws handler's
-    # panel_alive("channel") check trips.
-    class _FakeAlivePty:
-        argv = ["connect"]
-        pid = 4242
-
-        def isalive(self):
-            return True
-
-        @property
-        def exitstatus(self):
-            return None
-
-        def close(self):
-            pass
-
-    # Directly plant the session into the named slot (bypasses ws spawn).
     reg: SessionRegistry = app.state.registry
     fake = _FakeAlivePty()
-    reg._sessions["s99"] = ManagedSession("s99", fake, panel="channel")  # type: ignore[arg-type]
-    reg._panels["channel"] = reg._sessions["s99"]
+    reg._sessions[sid] = ManagedSession(sid, fake, panel="channel")  # type: ignore[arg-type]
+    reg._panels["channel"] = reg._sessions[sid]
+    return fake
+
+
+def test_ws_refuses_second_channel_when_tunnel_is_live(monkeypatch) -> None:
+    """D-031 A1: if a live Channel session AND a live tunnel exist, refuse the
+    second connect attempt (the UI's launcher offers 'stop + replace')."""
+    from starlette.websockets import WebSocketDisconnect
+
+    app = create_app(engine_argv=["help"])
+    _plant_channel_session(app)
+
+    # Registry follow-up (2026-07-22): the guard now confirms the tunnel is
+    # actually serving before refusing. Force "tunnel live" so the classic
+    # refuse-the-second-connect behavior holds.
+    monkeypatch.setattr(
+        "argo_anywhere.web.app._channel_tunnel_is_live", lambda: True
+    )
 
     with TestClient(app, base_url="http://127.0.0.1") as c:
         with pytest.raises(WebSocketDisconnect) as exc:
             with c.websocket_connect("/ws?verb=connect", headers={"host": "127.0.0.1"}):
                 pass
         assert exc.value.code == 1008
+
+
+def test_ws_reaps_stale_channel_and_allows_reconnect(monkeypatch) -> None:
+    """Registry follow-up (2026-07-22): a channel-owning engine process that
+    outlived its tunnel (mux master idle-expired) must NOT wedge reconnect.
+
+    When the slot is occupied but the tunnel is not serving (no loopback
+    listener on the cached port), the guard reaps the stale session and lets
+    the fresh ``connect`` proceed instead of refusing with 1008.
+    """
+    app = create_app(engine_argv=["help"])
+    stale = _plant_channel_session(app, sid="s-stale")
+
+    # Tunnel is DOWN (no listener) -> the guard should reap + allow.
+    monkeypatch.setattr(
+        "argo_anywhere.web.app._channel_tunnel_is_live", lambda: False
+    )
+
+    reg = app.state.registry
+    with TestClient(app, base_url="http://127.0.0.1") as c:
+        # The fresh connect is accepted (engine_argv=["help"] exits quickly);
+        # it does NOT raise a 1008 WebSocketDisconnect on accept.
+        with c.websocket_connect("/ws?verb=connect", headers={"host": "127.0.0.1"}):
+            pass
+
+    # The stale session was reaped: closed + removed from the id map + slot.
+    assert getattr(stale, "closed", False) is True
+    assert reg.get("s-stale") is None
+
+
+# --- _channel_tunnel_is_live unit tests (the guard's live-check helper) ------
+# The two ws tests above monkeypatch this helper out; these cover its own
+# logic: cached-port -> listener match, and the no-cached-port fallback.
+
+
+def test_channel_tunnel_is_live_true_when_listener_present(monkeypatch) -> None:
+    """Cached port has a matching loopback listener -> live."""
+    from argo_anywhere.status import Listener
+    import argo_anywhere.web.app as appmod
+
+    monkeypatch.setattr("argo_anywhere.status.cached_state", lambda *a, **k: {"port": 64742})
+    monkeypatch.setattr(
+        "argo_anywhere.status.local_listeners",
+        lambda ports=None: [Listener(port=64742, pid=111, command="ssh")],
+    )
+    assert appmod._channel_tunnel_is_live() is True
+
+
+def test_channel_tunnel_is_live_false_when_no_listener(monkeypatch) -> None:
+    """Cached port but nothing listening -> dead (stale channel)."""
+    import argo_anywhere.web.app as appmod
+
+    monkeypatch.setattr("argo_anywhere.status.cached_state", lambda *a, **k: {"port": 64742})
+    monkeypatch.setattr("argo_anywhere.status.local_listeners", lambda ports=None: [])
+    assert appmod._channel_tunnel_is_live() is False
+
+
+def test_channel_tunnel_is_live_false_when_no_cached_port(monkeypatch) -> None:
+    """No cached port -> treat as not-live so a stale session never wedges
+    reconnect (the guard must fall through to reap + allow)."""
+    import argo_anywhere.web.app as appmod
+
+    called = {"listeners": False}
+
+    def _boom(ports=None):
+        called["listeners"] = True
+        return []
+
+    monkeypatch.setattr("argo_anywhere.status.cached_state", lambda *a, **k: {"port": None})
+    monkeypatch.setattr("argo_anywhere.status.local_listeners", _boom)
+    assert appmod._channel_tunnel_is_live() is False
+    # short-circuits before touching lsof (no port to identify a listener)
+    assert called["listeners"] is False
 
 
 # ===========================================================================

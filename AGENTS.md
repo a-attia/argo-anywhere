@@ -1000,12 +1000,23 @@ top-bar toggle cycling `auto → dark → light → auto` (default
 `theme` key in `~/.argo_anywhere/web_state.json` (values
 `{"auto", "dark", "light"}`). Palette lives in CSS custom
 properties gated on a `data-theme` attribute on `<html>`; the
-two xterm.js panels (Channel + Utility) re-color on toggle via
-`setOption('theme', ...)`. Design mirrors the sibling
-`scrollback` project. Any new UI color MUST be added via CSS
-custom properties in both `:root[data-theme="dark"]` and
-`:root[data-theme="light"]` blocks — never hex literals — so the
-toggle covers new surfaces without follow-up work.
+two xterm.js panels (Channel + Utility) re-color on toggle by
+assigning **`term.options = { theme }`**. Design mirrors the
+sibling `scrollback` project. Any new UI color MUST be added via
+CSS custom properties in **all three** palette blocks —
+`:root[data-theme="dark"]`, `:root[data-theme="light"]`, and the
+`@media (prefers-color-scheme: light) :root:not([data-theme])`
+duplicate that backs `auto` — never hex literals, so the toggle
+covers new surfaces without follow-up work.
+
+> **Do not write `term.setOption('theme', ...)`.** That method was
+> removed in xterm.js 5.x (the vendored build). This doc previously
+> prescribed it, and the code matched: the call threw on every
+> toggle inside a bare `catch {}`, so the page switched palette
+> while both terminals kept their boot-time colors — shipped broken
+> from v3.1.0 until 2026-08-09. The retint is pinned by
+> `tests/test_web_ui_smoke.py`; when touching theme code, never
+> wrap the retint in a silent catch.
 
 ### Single-instance constraint (one argo-proxy + one tunnel per user per node)
 

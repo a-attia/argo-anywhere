@@ -2043,6 +2043,27 @@ _is_ssh_config_alias() {
 SSH_MUX_DIR="${HOME}/.ssh/sockets"
 SSH_MUX_PERSIST_DEFAULT=3600
 
+# _CHANNEL_PERSIST: when set to 1, ssh_mux_args emits an INDEFINITE
+# ControlPersist ('yes') instead of the finite default -- but only if the
+# user hasn't pinned ARGO_ANYWHERE_CONTROL_PERSIST themselves (explicit env
+# always wins). The channel-owning modes (connect / tunnel / client / setup)
+# set this at entry, BEFORE the master is opened by ssh_preflight, so the
+# long-lived port-forward the mux master owns after the foreground `ssh -N -L`
+# exits (D-003) never idle-expires while the connect window is meant to be
+# held open. (An idle `-L` listener does NOT keep the master alive on its own
+# under a finite ControlPersist -- verified against OpenSSH channels.c
+# channel_still_open(); a bare PORT_LISTENER is not a "still open" channel --
+# which is exactly why the finite default reaped the forward after ~1h. See
+# the spawn_health_monitor note on why an `ssh -O check` "keepalive" would NOT
+# have helped.)
+#
+# WHY indefinite instead of a bigger finite number: the whole point of
+# `connect` is "hold this channel until I stop it." Any finite value just
+# moves the surprise later. The master is still torn down explicitly by
+# `stop` / `clean` (ssh_mux_close_all) and by cleanup_local on Ctrl-C, so an
+# indefinite persist does not leak beyond an explicit teardown.
+_CHANNEL_PERSIST=0
+
 mfa_enabled() {
   [ "${ARGO_ANYWHERE_NO_MFA:-0}" = 1 ] && return 1
   return 0
@@ -2272,6 +2293,28 @@ ssh_attempt_fail() {
   fi
 }
 
+# _resolve_control_persist: the single source of truth for the ControlPersist
+# value. Used by BOTH ssh_mux_args (ssh calls) and the scp branch in
+# remote_bootstrap so the two can never drift -- they must agree, because they
+# share one master socket per (user, host, port) and whichever call OPENS the
+# master fixes its persist for the master's lifetime.
+#
+# Persist precedence:
+#   1. explicit ARGO_ANYWHERE_CONTROL_PERSIST -- the user always wins.
+#   2. else, if a channel-owning mode set _CHANNEL_PERSIST=1 -> 'yes'
+#      (indefinite; the connect window is meant to stay up until stop/clean;
+#      D-033: prevents the ~1h idle-reap of the mux-owned -L forward).
+#   3. else the finite default (3600 = 1h) for one-shot ssh/scp calls.
+_resolve_control_persist() {
+  if [ -n "${ARGO_ANYWHERE_CONTROL_PERSIST:-}" ]; then
+    printf '%s' "$ARGO_ANYWHERE_CONTROL_PERSIST"
+  elif [ "${_CHANNEL_PERSIST:-0}" = 1 ]; then
+    printf 'yes'
+  else
+    printf '%s' "$SSH_MUX_PERSIST_DEFAULT"
+  fi
+}
+
 # ssh_mux_args : prints the ControlMaster options to splice into ssh/scp.
 # Empty (no args) when MFA mode is off, so legacy behavior is unaffected.
 #
@@ -2289,7 +2332,7 @@ ssh_mux_args() {
   mfa_enabled || return 0
   mkdir -p "$SSH_MUX_DIR"
   chmod 700 "$SSH_MUX_DIR" 2>/dev/null || true
-  local persist="${ARGO_ANYWHERE_CONTROL_PERSIST:-$SSH_MUX_PERSIST_DEFAULT}"
+  local persist; persist="$(_resolve_control_persist)"
   printf -- '-o ControlMaster=auto -o ControlPath=%s/argo-anywhere-%%r-%%h-%%p -o ControlPersist=%s' \
     "$SSH_MUX_DIR" "$persist"
 }
@@ -4728,7 +4771,13 @@ remote_bootstrap() {
   scp_opts+=( -q -o StrictHostKeyChecking=accept-new )
   if mfa_enabled; then
     mkdir -p "$SSH_MUX_DIR"; chmod 700 "$SSH_MUX_DIR" 2>/dev/null || true
-    local persist="${ARGO_ANYWHERE_CONTROL_PERSIST:-$SSH_MUX_PERSIST_DEFAULT}"
+    # D-033: share the ControlPersist resolver with ssh_mux_args so scp and ssh
+    # agree on persist. Matters if scp is ever the FIRST connection to open the
+    # master under a channel-owning mode (would otherwise pin a finite 3600 and
+    # re-introduce the ~1h idle-reap). In today's flow ssh_preflight opens the
+    # master before remote_bootstrap runs, so scp reuses it and this arg is
+    # inert -- but keeping them identical is the robust invariant.
+    local persist; persist="$(_resolve_control_persist)"
     # Same %r-%h-%p literal tokens as ssh_mux_args (see comment there for why
     # we don't use %C here either). MUST match exactly so scp and ssh share
     # the same master socket for the same destination.
@@ -4899,6 +4948,16 @@ cleanup_local() {
 #     (in mux-owned mode) exits so the parent can react;
 #   * if a tunnel pid was provided, exits when that pid dies so the parent
 #     can attempt a silent reconnect.
+#
+# NOTE on keeping the mux master alive: the /health curl below flows THROUGH
+# the `-L` forward, so each poll opens a transient forwarded channel
+# (SSH_CHANNEL_OPEN) on the master. That real channel traffic -- not an
+# `ssh -O check`, which creates no channel and does NOT reset the idle timer
+# (verified against OpenSSH clientloop.c/channels.c/mux.c) -- is what would
+# refresh a *finite* ControlPersist idle timer. The channel-owning modes set
+# ControlPersist=yes (Fix A / _CHANNEL_PERSIST) so there is no idle timer to
+# refresh in the common case; this note is here so a future reader doesn't
+# re-add an `ssh -O check` "keepalive" believing it refreshes the timer.
 spawn_health_monitor() {
   local tunnel_pid_to_watch="$1"
   local fail=0
@@ -6408,6 +6467,14 @@ channel_is_up() {
 }
 
 mode_tunnel() {
+  # This is a channel-owning mode: it opens the tunnel then blocks in
+  # monitor_tunnel_loop holding the channel open. Signal ssh_mux_args to use
+  # an INDEFINITE ControlPersist so the mux-master-owned forward (D-003) does
+  # not idle-expire after the finite default (~1h) and silently drop the
+  # channel out from under a still-running connect window. MUST be set BEFORE
+  # _client_common_setup opens the master via ssh_preflight.
+  _CHANNEL_PERSIST=1
+
   # Call directly (NOT via $()): _client_common_setup mutates several
   # script-level globals (ANL_USERNAME, ARGO_ANYWHERE_USER, the auto-defaulted
   # NO_JUMP/NO_MFA env, possibly PROXY_PORT). A subshell capture would make
@@ -6449,6 +6516,11 @@ mode_client() {
   # the canonical install. See maybe_bootstrap_canonical_install for the
   # full skip-conditions list.
   maybe_bootstrap_canonical_install
+
+  # Channel-owning mode (opens the tunnel then blocks in monitor_tunnel_loop).
+  # Use indefinite ControlPersist so the mux-owned forward doesn't idle-expire
+  # under a still-running session -- see mode_tunnel for the full rationale.
+  _CHANNEL_PERSIST=1
 
   # Determine the CLI tool to set up. As of v2.0 (D1+D2), tool selection
   # is exclusively explicit:
@@ -10700,8 +10772,17 @@ SSH ControlMaster connection multiplexing:
   * Every subsequent SSH/SCP call to the same node within the same script
     run reuses the master and never prompts.
   * After all clients disconnect, the master lingers for ARGO_ANYWHERE_CONTROL_PERSIST
-    seconds (default 3600 = 1 hour). Re-running 'status', 'update-models',
-    'clean', or 'client' within that window also avoids a fresh Duo prompt.
+    seconds. Re-running 'status', 'update-models', 'clean', or 'client'
+    within that window also avoids a fresh Duo prompt. Defaults:
+      - channel-owning modes (connect / tunnel / client / setup): the
+        master persists INDEFINITELY so the tunnel it owns can't idle-expire
+        out from under a running session. It is torn down only by an explicit
+        'stop' / 'clean' or by Ctrl-C on the connect window.
+      - one-shot commands (status / update-models / clean / ...): 3600 (1h).
+    Set ARGO_ANYWHERE_CONTROL_PERSIST=N (or 'yes'/'no') to override either.
+    (If you pin a finite value under a channel-owning mode, the periodic
+    /health poll -- which flows through the forward as real channel traffic
+    -- keeps the master's idle timer from expiring while the monitor runs.)
   * --probe-nodes opens a separate master per node it tests (each is a
     distinct destination). Expect one Duo prompt per reachable node.
 

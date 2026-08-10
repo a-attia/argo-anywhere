@@ -12,6 +12,51 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **`connect` tunnel no longer dies after ~1 hour of idle** (PLAN.md
+  D-033). The quick-connect **Connect** button (and the `connect` /
+  `tunnel` / `client` / `setup` CLI verbs) held the SSH tunnel only as
+  long as the multiplex master's `ControlPersist` window — a finite
+  ~1h. After the foreground `ssh -N -L` exits, the master owns the
+  port-forward (D-003), but an idle `-L` listener does **not** count as
+  an open channel for the ControlPersist idle timer (verified against
+  OpenSSH `channels.c`), so the master was reaped after ~1h of no
+  traffic and the forward died with it. Idle channels silently dropped
+  and forced a reconnect, even though a separately hand-opened `ssh`
+  session to the same host stayed up.
+
+  Fix: channel-owning modes now request an **indefinite**
+  `ControlPersist` (the master is torn down only by `stop` / `clean` /
+  Ctrl-C, never by an idle timeout). One-shot commands (`status`,
+  `update-models`, `clean`, ...) keep the finite 1h default. An
+  explicit `ARGO_ANYWHERE_CONTROL_PERSIST` still overrides both. No new
+  SSH connections or authentications are introduced, so this has no
+  effect on the CSPO SSH-authentication budget.
+
+- **Web UI: a stale channel no longer blocks reconnect.** The
+  single-Channel guard previously refused a new **Connect** whenever a
+  channel-owning engine process was still registered — even if that
+  process had outlived its tunnel (the ~1h expiry above). Clicking
+  Connect then failed with an opaque "ws error (rejected by server)."
+  The guard now confirms the tunnel is actually serving (a purely local
+  loopback-listener check — it never traverses the tunnel or contacts
+  ANL); if the channel is stale, it reaps the dead session and lets the
+  fresh Connect proceed.
+
+### Changed
+
+- **Web UI: the Connect action is now two clearly-labeled paths.** The
+  channel card shows **Connect** (quick — reuses your saved node /
+  username / port) and **Connect with options…** (opens the Actions
+  sheet locked to `connect`, with the SSH-target overrides expanded and
+  node/username pre-filled from cache, for picking a different compute
+  node, ANL username, or jump host). Sublabel text spells out the
+  difference. The old single Connect button had no visible way to
+  reach the override fields short of the general Actions menu.
+
 ## v3.2.1 — 2026-07-16
 
 Hotfix. **Upgrade if you are on v3.2.0** and your laptop username

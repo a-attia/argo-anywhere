@@ -25,6 +25,7 @@ from typing import Sequence
 
 import argo_anywhere
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -96,6 +97,35 @@ def _panel_for_verb(verb: str) -> PanelSlot | None:
     if verb in UTILITY_PANEL_VERBS:
         return "utility"
     return None
+
+
+def _channel_tunnel_is_live() -> bool:
+    """True if the Channel's SSH tunnel is actually serving on its cached port.
+
+    The registry's :meth:`SessionRegistry.panel_alive` reports *process*
+    liveness (a ``waitpid`` on the engine process) -- deliberately local, never
+    touching the network. But a channel-owning engine process can outlive the
+    tunnel it opened: the SSH mux master can idle-expire or drop while the
+    ``connect`` process is still blocked in its monitor loop (before the loop
+    notices and tears down). In that window ``panel_alive("channel")`` is True
+    but there is no working channel.
+
+    This helper closes that gap for the single-Channel guard using the SAME
+    purely-local signal the dashboard uses to render "channel up" -- a loopback
+    listener on the cached port -- so it stays inside the registry's
+    never-contact-ANL contract (no ``/health`` traversal of the tunnel). If the
+    cached port has no local listener, the tunnel is down and a stale channel
+    session must not block a fresh ``connect``.
+    """
+    from ..status import cached_state, local_listeners
+
+    port = cached_state().get("port")
+    if not port:
+        # No cached port -> we can't identify the channel's listener. Treat as
+        # "not live" so a stale session never wedges a reconnect; the worst
+        # case is a redundant connect attempt, which the engine handles.
+        return False
+    return any(ln.port == port for ln in local_listeners([port]))
 
 
 def build_launch_argv(
@@ -908,9 +938,27 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             # offers a "stop + replace" secondary path that stops the old
             # session via /api/sessions/<id>/stop and then reconnects; this
             # server-side check is the safety net if the UI is bypassed.
+            #
+            # Registry follow-up (2026-07-22): ``panel_alive`` is process-only
+            # liveness. A ``connect`` engine process can outlive its tunnel
+            # (mux master idle-expired / dropped) while still sitting in the
+            # channel slot -- in that window refusing here left the user with a
+            # dead channel AND no way to reconnect from the UI ("ws error
+            # (rejected by server)"). So we only refuse when the tunnel is
+            # ACTUALLY serving (a purely-local loopback-listener check; never
+            # traverses the tunnel). When the slot is occupied but the tunnel
+            # is dead, we fall through: ``register_panel`` below evicts the
+            # stale session and the existing eviction handler (close + reap,
+            # which also cleans up any detached-drain reader on EOF) tears it
+            # down -- no bespoke teardown here, so the detached-session cleanup
+            # path stays identical to the tested Utility-replacement path.
             if panel == "channel" and registry.panel_alive("channel"):
-                await ws.close(code=1008)  # channel already up
-                return
+                tunnel_live = await run_in_threadpool(_channel_tunnel_is_live)
+                if tunnel_live:
+                    await ws.close(code=1008)  # channel genuinely up
+                    return
+                # else: stale channel (process alive, tunnel dead) -> fall
+                # through to register_panel's evict-and-reap.
 
         await ws.accept()
         # D-031 Task 4: thread the validated cwd into PtySession -> subprocess
@@ -933,9 +981,19 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
                 pass
         if panel is not None:
             managed, evicted = registry.register_panel(session, panel)
-            # Utility replacement: the previous Utility session (if any) was
-            # evicted from the slot mapping but not the id map. Stop + reap
-            # it so we don't leak PIDs.
+            # Slot replacement: the previous occupant of this named slot (if
+            # any) was evicted from the slot mapping but not the id map. Stop +
+            # reap it so we don't leak PIDs. Two callers reach here:
+            #   * Utility replacement (the original case): a new configure/setup/
+            #     tunnel replaces a prior Utility session.
+            #   * Channel reaping (2026-07-22): the guard above fell through
+            #     because a stale channel session (process alive, tunnel dead)
+            #     occupied the slot. Evicting + closing it here is the reconnect
+            #     path. ``session.close()`` closes the PTY; if the evicted
+            #     session was detached, its ``_drain`` reader sees EOF and
+            #     removes itself + unregisters (idempotent with the explicit
+            #     unregister below -- ``pop(id, None)`` + the slot-identity
+            #     guard make a double-unregister a no-op).
             if evicted is not None and evicted.session.isalive():
                 try:
                     evicted.session.close()

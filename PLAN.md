@@ -2141,6 +2141,168 @@ extension of the same coupling discipline).
 
 ---
 
+### D-033 — Channel-owning modes hold the tunnel indefinitely (ControlPersist + mux keepalive) (2026-07-22)
+
+**Symptom (reported from the field).** A user opened the web UI,
+clicked **Connect** (quick-connect), and the tunnel went down "after a
+while," forcing a reconnect — while a *separate, plain* `ssh` session
+opened by hand to the same host stayed up the whole time.
+
+**Root cause.** Under `ControlMaster=auto` on macOS, the foreground
+`ssh -N -L` port-forward is accepted by the multiplex master and then
+**exits immediately** (D-003); the master owns the forward from that
+point on. The master's lifetime is governed by `ControlPersist`, whose
+idle timer is armed/disarmed purely by OpenSSH's `channel_still_open()`
+(`clientloop.c:set_control_persist_exit_time` +
+`channels.c:channel_still_open` — verified against upstream source, not
+inferred). The decisive fact: a bare **`-L` listener**
+(`SSH_CHANNEL_PORT_LISTENER`) is in the `continue` group of
+`channel_still_open()` — it does **NOT** count as an open channel.
+Only an *active in-flight forwarded connection* (`SSH_CHANNEL_OPEN`)
+counts and resets the clock. So once the requesting mux-client exits
+and the forward sits idle, the master has "no open channels" and the
+finite `ControlPersist` (`SSH_MUX_PERSIST_DEFAULT=3600`, ~1h) reaps it;
+the forward dies with it, the monitor's next `ssh -O check` fails, the
+reconnect loop `break`s, and `cleanup_local` tears the tunnel down. A
+hand-opened interactive `ssh` survives because it holds a live session
+channel (`SSH_CHANNEL_OPEN`) kept warm by `ServerAliveInterval` — never
+subject to ControlPersist *idle* reaping.
+
+**Decision.** Set an **indefinite `ControlPersist` for the
+channel-owning modes**, and nothing else in the engine. A new script
+global `_CHANNEL_PERSIST` is set to `1` at the entry of `mode_tunnel`
+and `mode_client` (which back `connect` / `tunnel` / `client` /
+`setup`), *before* the master is opened by `ssh_preflight`.
+`ssh_mux_args` reads it and emits `ControlPersist=yes` (indefinite,
+i.e. no idle timer at all) for those modes. Precedence: explicit
+`ARGO_ANYWHERE_CONTROL_PERSIST` always wins; then `_CHANNEL_PERSIST=1
+→ yes`; then the finite `3600` default for one-shot commands
+(`status`, `update-models`, `clean`, ...). The master is still torn
+down by an explicit `stop` / `clean` (`ssh_mux_close_all`) or Ctrl-C
+(`cleanup_local`), so an indefinite persist does not leak beyond a
+deliberate teardown. **CSPO-safe**: no new SSH connection or
+authentication is introduced; the change is a single `-o` option value
+on the master already being opened.
+
+**Rejected during audit — a proactive `ssh -O check` "keepalive"
+(originally shipped as "Fix B", removed 2026-07-22 before merge).** The
+first draft added a periodic `ssh -O check` in `spawn_health_monitor`
+on the theory that it would refresh a *finite* `ControlPersist` idle
+timer as a belt-and-suspenders. The multi-pass audit falsified this
+against OpenSSH source: `ssh -O check` is `MUX_C_ALIVE_CHECK`
+(`mux.c:mux_master_process_alive_check`) — it creates **no channel**
+and only returns the master PID, so it does **not** reset the idle
+timer. What *does* refresh a finite timer is real channel traffic, and
+the existing `spawn_health_monitor` `curl /health` (every 15s) already
+provides that: it flows *through* the `-L` forward, opening a transient
+`SSH_CHANNEL_OPEN` on the master per poll. So the keepalive was inert
+for its stated purpose and its only residual value (early dead-master
+detection) was already covered by the next `/health` failure. Removed
+to keep the fix honest and minimal. A `spawn_health_monitor` code
+comment records this so a future reader doesn't re-add it.
+
+**Contract / touchpoints (final, keepalive removed).**
+
+- `_CHANNEL_PERSIST` (Section 5 global; default 0) + the persist-
+  precedence branch (see next bullet).
+- `_resolve_control_persist` — a single-source-of-truth helper for the
+  3-way persist precedence (explicit env > `_CHANNEL_PERSIST` → `yes` >
+  finite default). Called by BOTH `ssh_mux_args` (ssh calls) AND the
+  scp branch in `remote_bootstrap`, so the two can never drift — they
+  share one master socket per (user, host, port), and whichever call
+  OPENS the master fixes its persist. Extracted during the multi-pass
+  audit after spotting the scp branch used a private
+  `${ARGO_ANYWHERE_CONTROL_PERSIST:-$SSH_MUX_PERSIST_DEFAULT}` that
+  ignored `_CHANNEL_PERSIST` (inert today because `ssh_preflight` opens
+  the master before scp runs, but a latent drift risk). Guarded by
+  `tests/test_engine_control_persist.py::test_scp_branch_uses_shared_persist_resolver`.
+- `_CHANNEL_PERSIST=1` set at the top of `mode_tunnel` and
+  `mode_client` (before `_client_common_setup`). The `--ensure` path
+  in `_configure_ensure_channel_or_die` intentionally keeps the finite
+  default (it does not enter the monitor loop; the fix targets the
+  monitored `connect`/`tunnel`/`client` path — see "Residual" below).
+- `spawn_health_monitor` is UNCHANGED in signature (single `$pid`
+  arg); a comment documents why the `/health` curl is the de-facto
+  timer-refresh for finite-persist users and why `ssh -O check` is not.
+- Help text (`MFA / Duo POLICY` section) documents the
+  channel-mode-indefinite vs one-shot-3600 split.
+- Engine grep+harness invariants in
+  `tests/test_engine_control_persist.py` (default-0 global; both modes
+  set `_CHANNEL_PERSIST=1`; resolver reads env + flag; scp shares the
+  resolver; runtime precedence matrix drives the real resolver +
+  `ssh_mux_args` bodies).
+
+**Residual (accepted).** The `--ensure` path
+(`_configure_ensure_channel_or_die`, used by `configure --ensure` /
+`run --ensure`) brings the channel up then the process exits without
+monitoring, and it keeps the finite 3600 default. Its forward is
+therefore still subject to ~1h idle reaping if no traffic flows. This
+is acceptable for now: `--ensure` is a "bring it up for this one-shot"
+convenience, the subsequent `run` exec drives traffic through the
+forward (resetting the timer while the tool is active), and the
+primary user-facing surface (the web UI **Connect** / CLI `connect`)
+is fully covered. Promoting `--ensure` to indefinite is a small
+follow-up if field reports show idle-expiry there.
+
+**Follow-up (landed 2026-07-22, same change-set).** The web layer's
+`registry.panel_alive("channel")` reports channel liveness from a
+`waitpid` on the engine process, not the tunnel state — so a
+channel-owning process that outlived its tunnel (this bug's ~1h
+window, or any master drop) could still occupy the channel slot and
+make the single-Channel guard refuse a fresh **Connect** with an
+opaque "ws error (rejected by server)". Rather than push a network
+`/health` probe into the registry (which must stay local per its
+docstring), the fix lives at the app layer: `_channel_tunnel_is_live()`
+uses the SAME purely-local signal the dashboard uses to render
+"channel up" — a loopback listener on the cached port — and the WS
+`connect` guard, when the slot is occupied but the tunnel is NOT
+serving, does NOT refuse — it falls through, and `register_panel`'s
+existing evict-and-reap (the same tested path Utility replacement uses)
+closes the stale session. Reusing that path (rather than a bespoke
+teardown, which was the first draft) matters because it correctly
+cleans up a *detached* channel session's event-loop drain reader on
+EOF — a bug the audit caught in the bespoke version. Tests:
+`test_ws_refuses_second_channel_when_tunnel_is_live` (live tunnel →
+still refuses); `test_ws_reaps_stale_channel_and_allows_reconnect`
+(dead tunnel → reap + allow); and three direct
+`test_channel_tunnel_is_live_*` unit tests covering the helper's own
+logic (listener present → live; absent → dead; no cached port →
+short-circuit to dead without touching lsof).
+
+**UI companion (2026-07-22).** The single **Connect** CTA was
+ambiguous — the only way to reach the D-032 SSH-target overrides was
+the general Actions menu, and users couldn't tell the quick path from
+the advanced one. The channel card now shows two labeled buttons:
+**Connect** (quick; bare `connect`, reuses cached node/user/port) and
+**Connect with options…** (`openConnectWithOptions` in
+`web/static/index.html`: opens the Actions sheet locked to `connect`,
+expands the SSH-target overrides, pre-fills node + ANL username from
+`lastStatus.cached`). Sublabel text spells out the difference. This is
+a D-031 launcher refinement; no engine change.
+
+**Verification.** A multi-pass audit (2026-07-22) drove the design to
+its final shape — it caught + removed the inert `ssh -O check`
+keepalive (see "Rejected during audit" above), grounding the retained
+fix in OpenSSH source rather than the man page's ambiguous "no client
+connections" wording. `bash -n` + `ssh_mux_args` unit exercise
+(precedence matrix: one-shot=3600, channel=yes, explicit-env-wins,
+no-mfa=empty) + full `pytest` (422 passing, including the D-026
+verbatim-mirror test after syncing the repo-root engine, the two new
+stale-channel guard tests, and `ruff` clean). Live end-to-end (real
+SSH + Duo, tunnel held past the previous ~1h expiry) to be run per
+`docs/TESTING.md` before tagging — this is the one remaining check the
+audit could not perform (no local sshd + no ANL infra in the review
+environment).
+
+**Related decisions.** D-003 (mux master owns the forward after the
+foreground ssh exits — the mechanism this fixes). D-012 (SSH failure
+tracker; the CSPO budget this change is careful not to touch). D-005
+(globals-mutation-not-via-`$()` pattern; `_CHANNEL_PERSIST` follows
+it). D-024 (connect/configure/run split; `connect` is the primary
+surface of this bug).
+
+---
+
 ## 8. Code-paper coupling
 
 **None.** This is a standalone tool, not a paper-supporting library.
