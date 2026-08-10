@@ -37,6 +37,19 @@ an execution order — before any code moves.
 > recommended sequencing in §[6](#6-recommended-sequencing) is new, and
 > it demotes the bind test relative to the first draft's ordering for
 > a TOCTOU reason spelled out there.
+>
+> **Revision note (third pass, 2026-08-10).** Q2 was answered by a live
+> read-only probe of `compute-386-01` over the maintainer's warm
+> channel. The result inverted §[4.3](#43-where-the-socket-lives--measured-not-assumed)'s
+> assumed ranking of socket locations — `/tmp` is the primary,
+> `/run/user` is gated on lingering, and `~/.argo_anywhere/` is
+> **disqualified** because `$HOME` is NFS shared across every compute
+> node. That probe also surfaced a scoping error unrelated to
+> transport (Q10: the argo-proxy config is shared across nodes too) and
+> made explicit that CELS is only one target class
+> (§[4.4](#44-the-target-population-is-heterogeneous-cels-is-not-the-only-target);
+> Aurora has a different storage stack and invocation path), so the
+> socket location must be resolved at runtime rather than hard-coded.
 
 ---
 
@@ -210,6 +223,20 @@ in the engine (verified: zero occurrences, 2026-08-10).
 
 The `ss` output in §1 is a direct demonstration: run by the socket's
 non-owner, it shows the socket and an **empty** Process column.
+
+A related scoping error, surfaced by the 2026-08-10 storage probe and
+recorded here because it shares the same root: **on CELS the
+"one argo-proxy per user per node" constraint is really "one per user,
+full stop."** `~/.config/argoproxy/config.yaml` lives on the NFS `$HOME`
+that every compute node mounts identically, so it is a single shared
+file, not a per-node one. Two nodes running `mode_server` concurrently
+write the same config and mutate each other's `port:` line — and
+`mode_server`'s port readback (`:7319`) validates against whatever the
+*other* node wrote last. The same applies to `VENV_PATH='$HOME/argovenv'`
+and `REMOTE_SELF`. This is independent of the transport question and is
+tracked as §[9](#9-open-questions) Q10; it is noted here because
+AGENTS.md's single-instance section states the per-node framing as
+though it were enforced, and on a shared `$HOME` it is not.
 
 One further consequence of the blind detector, not obvious from the
 table: **`--auto-port` inherits the blindness.**
@@ -465,27 +492,144 @@ Consequences for the design:
 3. The clean upstream fix is a one-line early return in `validate_port`
    when `config.socket` is set. Worth filing.
 
-### 4.3 Costs and unknowns
+### 4.3 Where the socket lives — measured, not assumed
+
+The first draft treated `/run/user/$(id -u)` as the natural home with
+`/tmp` as a grudging fallback, and flagged the whole question as the
+main open unknown. **A live probe on 2026-08-10 (§[8](#8-what-was-verified-by-execution))
+inverted that ranking.** The measurements below are from
+`compute-386-01` — one CELS host, which is emphatically *not* the whole
+target population (see §[4.4](#44-the-target-population-is-heterogeneous-cels-is-not-the-only-target)).
+
+| Property | `/run/user/6841` | `/tmp/argo-anywhere-$UID/` | `~/.argo_anywhere/` |
+|:---|:---|:---|:---|
+| Filesystem | tmpfs | tmpfs (94G) | **NFS4** |
+| Node-local | yes | yes | **no — one dir for every node** |
+| Survives last logout | **no** (`Linger=no`) | yes | yes |
+| Survives reboot | no | no | yes (proxy does not) |
+| `0700` dir + bind + connect | OK | OK | OK (same-host) |
+| Stale file can wedge rebind | n/a (wiped) | n/a (wiped at boot) | **yes — `EADDRINUSE`** |
+
+**`~/.argo_anywhere/` is the worst of the three, and the reason is
+structural.** `$HOME` on CELS is `netapp-386-02a:/gce/homes/<user>` over
+NFS4 — *the same directory on every compute node*. A fixed socket path
+under `$HOME` is therefore one global name shared by all nodes, which
+reintroduces §[2.0](#20-the-structural-assumption)'s single-global-name
+assumption in a new coordinate system. The contenders change from "other
+users" to "your own nodes"; the shape does not.
+
+The failure mode is also stickier than a port collision. A socket
+*file* is not reclaimed by the kernel when its process dies, so a proxy
+killed on node A leaves a file that makes node B's `bind()` fail
+permanently:
+
+```text
+node B rebind over orphan: BLOCKED -> OSError 98 Address already in use
+orphan connect: refused -> Connection refused   (so liveness IS testable)
+```
+
+The second line is the saving grace — an orphan is *detectable*, so an
+unlink-if-dead protocol is implementable. But that is a stale-lock
+protocol we would have to write and get right, and it is self-inflicted:
+a tmpfs path makes the entire class impossible because the file cannot
+outlive the node.
+
+**`/run/user/$(id -u)` is second, gated on lingering.** It exists, is
+`drwx------`, tmpfs, writable, and `XDG_RUNTIME_DIR` is set — but
+`Linger=no`, and the detached argo-proxy runs inside a *session* scope
+(`/user.slice/user-6841.slice/session-186508.scope`), not the user
+slice. With `KillUserProcesses=no` (confirmed) the proxy **survives**
+logout while `/run/user/<uid>` is **destroyed** at last logout. That
+combination yields a live proxy with a deleted socket: an *invisible*
+failure, strictly worse than today's loud one. Use this path only when
+`loginctl show-user <u> --property=Linger` reports `yes`.
+
+**`/tmp/argo-anywhere-$(id -u)/` at `0700` is the recommended primary**
+for CELS-shaped targets: node-local, no logind coupling, survives
+logout exactly as the detached `screen` session does, and not swept
+between boots (`/usr/lib/tmpfiles.d/tmp.conf` carries only
+`D /tmp 1777 root root -`, i.e. boot-time clear).
+
+Two details that bite whichever path wins:
+
+- **The `0700` guarantee must come from the containing directory.** The
+  socket file itself binds `0755` under the node's `umask 0022`, despite
+  argo-proxy's `--socket` help text claiming "Permissions are set to
+  0700". Verify that claim rather than trusting it; the directory is
+  what we control.
+- **Storage class matters, not just the path.** `~/.argo_anywhere/`
+  remains exactly right for *state* — the manifest, caches, the D-023
+  canonical install — precisely *because* it is durable and shared. It
+  is wrong for a *rendezvous point*, which must be node-local and
+  self-cleaning. Keep the two categories distinct so this does not get
+  re-litigated.
+
+### 4.4 The target population is heterogeneous: CELS is not the only target
+
+Everything in §4.3 was measured on one CELS compute node, and CELS is
+only one kind of target. The tool is also pointed at machines with a
+completely different storage and access shape — **Aurora** being the
+worked example: a different filesystem stack (no `/gce/homes` NFS), and
+a direct invocation rather than the CELS jump-host-plus-compute-node
+dance.
+
+This matters more than a footnote, because §4.3's ranking is derived
+*entirely* from properties that vary by site:
+
+| Assumption behind the §4.3 ranking | Varies by site? |
+|:---|:---|
+| `$HOME` is NFS shared across execution hosts | **Yes** — the whole case against `~/.argo_anywhere/` |
+| A writable node-local `/tmp` on tmpfs | **Yes** — size, sweep policy, per-job namespacing |
+| logind present, `Linger` queryable | **Yes** — not every scheduler-managed node runs logind |
+| One long-lived interactive node per user | **Yes** — batch/scheduler sites differ fundamentally |
+
+So the design must **not** hard-code a path. The right shape is a small
+ordered resolver that picks at runtime and reports which rung it landed
+on:
+
+1. explicit override (`--socket-dir` / `ARGO_ANYWHERE_SOCKET_DIR`) — the
+   escape hatch for a site we have not met;
+2. `$XDG_RUNTIME_DIR` **iff** lingering is on (or the site guarantees
+   the dir outlives the session);
+3. `/tmp/argo-anywhere-$(id -u)/` at `0700`, **iff** `/tmp` is node-local
+   and writable;
+4. refuse socket mode and fall back to hardened TCP
+   (§[5](#5-option-b--hardened-tcp-and-the-fallback-ladder)) — never
+   silently pick a shared-filesystem path.
+
+Rung 4 is why Option B is not wasted work under Option A: a site where
+no node-local `0700` directory can be found still needs a correct TCP
+path. The engine already assumes `$HOME`-relative server-side paths
+throughout (`VENV_PATH='$HOME/argovenv'`, `REMOTE_SELF`, `REMOTE_LOG`),
+which is fine for *state* and wrong for a rendezvous point — the same
+distinction §4.3 draws.
+
+Note also that `_on_anl_node`'s host detection is a `.cels.anl.gov`
+suffix match, documented at `:727`–`:732` as silently returning "no" for
+any other domain. A genuinely multi-site transport story eventually has
+to revisit that too; out of scope here, but it is the same
+CELS-is-the-world assumption showing up in a second place.
+
+### 4.5 Remaining costs and unknowns
 
 - **Version floor.** `--socket` and the `socket:` config key are present
   in argo-proxy 3.1.2, 3.2.1, and 3.2.3 (verified 2026-08-10). The floor
   is therefore ≤ 3.1.2 — comfortable — but adopting it finally forces
   **UP-02**, the soft version floor deferred across four audits.
-- **Runtime directory availability.** `/run/user/$(id -u)` requires
-  logind with lingering enabled; not guaranteed on every node.
-  NFS-mounted home directories are a poor host for Unix sockets, so the
-  fallback wants to be something like `/tmp/argo-anywhere-$(id -u)/`
-  with a `0700` directory. **Unverified on an ANL node** — this is the
-  main open unknown.
 - **`curl --unix-socket`** is needed for on-node health probes
-  (`curl --unix-socket <path> http://localhost/health`). Present since
-  curl 7.40; unverified on the nodes.
+  (`curl --unix-socket <path> http://localhost/health`). **Confirmed
+  present on `compute-386-01`** (curl 7.81.0); unverified on other
+  sites.
 - **On-node local mode.** A user running directly on a compute node with
   no tunnel still needs a reachable endpoint; socket mode works there
   too, but every local `curl localhost:$PORT` in the engine needs a
   socket-aware branch.
 - **`stop` / `clean` / the D-025 install manifest** must learn about
   socket files and stale-socket cleanup.
+- **Per-site verification is now a prerequisite, not a nicety.** §4.3's
+  probe needs re-running on each target class we claim to support
+  (Aurora first). The probe is read-only and takes seconds over an
+  already-warm channel; there is no reason to guess.
 
 ---
 
@@ -682,6 +826,37 @@ Also verified:
   `-L port:remote_socket`.
 - Zero occurrences of `ss` / `netstat` / `/proc/net/tcp` in the engine.
 
+Added in the third pass (2026-08-10) — **run on a live ANL node**
+(`compute-386-01`, via an already-warm mux master; all probes read-only,
+`BatchMode=yes`, pinned to the existing `ControlPath` so no new
+authentication and therefore no CSPO exposure):
+
+- **`/run/user/6841` exists**, `drwx------`, tmpfs, writable,
+  `XDG_RUNTIME_DIR` set. Unix-socket bind + connect succeed.
+- **`Linger=no`**, `KillUserProcesses=no`, `RemoveIPC=yes` (defaults),
+  systemd 249. The detached argo-proxy sits in
+  `/user.slice/user-6841.slice/session-186508.scope` — a *session*
+  scope. Hence the live-proxy-with-deleted-socket hazard in §4.3.
+- **`$HOME` is NFS4** (`netapp-386-02a-user.cels.anl.gov:/gce/homes/…`),
+  i.e. one directory shared by every compute node.
+- **An orphaned socket file on NFS blocks a later `bind()`**
+  (`OSError 98 EADDRINUSE`) while `connect()` to it is refused — so the
+  wedge is real and the liveness test is available. Demonstrated
+  directly.
+- **`/tmp` is node-local tmpfs**, 94G, `1777`; a `0700` subdir + socket
+  works; `tmpfs.d` config is `D /tmp` (boot-time clear only).
+- **`curl 7.81.0` supports `--unix-socket`.**
+- **Sockets bind `0755`** under the node's `umask 0022` — the `0700`
+  guarantee must come from the directory.
+- All probe artifacts removed; the maintainer's live channel, screen
+  session, and argo-proxy were left untouched (verified after).
+
+Scope limit on the above: **one host, one site.** Per
+§[4.4](#44-the-target-population-is-heterogeneous-cels-is-not-the-only-target)
+these properties vary by target, and Aurora in particular has a
+different storage stack and invocation path. Nothing here should be
+read as characterising "ANL nodes" in general.
+
 Added in the second pass (2026-08-10):
 
 - **`local_tunnel_status`'s globs survive socket mode.** The `case`
@@ -728,9 +903,16 @@ these gate Tier 1** — they gate Tiers 2 and 3.
    (§[4.1a](#41a-it-closes-a-documented-currently-untreated-threat-model-gap)),
    which is a stronger argument than the collision-avoidance framing
    this question was originally written around.
-2. **Does `/run/user/$(id -u)` exist on ANL compute nodes**, and is it
-   writable and persistent for the session's lifetime? This single
-   answer decides whether Option A is viable without a `/tmp` fallback.
+2. ~~**Does `/run/user/$(id -u)` exist on ANL compute nodes**, and is it
+   writable and persistent for the session's lifetime?~~ **ANSWERED
+   2026-08-10 on `compute-386-01`** (§[4.3](#43-where-the-socket-lives--measured-not-assumed),
+   §[8](#8-what-was-verified-by-execution)): it exists and is usable,
+   **but `Linger=no` destroys it at last logout while the proxy
+   survives**, so it is not the primary. `/tmp/argo-anywhere-$(id -u)/`
+   at `0700` is, and `~/.argo_anywhere/` is disqualified because `$HOME`
+   is NFS shared across nodes. Socket mode is viable on this host.
+   Residual: the same probe has **not** been run on any other target
+   class (Q11).
 3. **Version floor value.** UP-02 has been deferred four times. Socket
    mode needs ≥ 3.1.2; the 2026-08-10 audit recommends ≥ 3.2.3 on other
    grounds. Pick one number for both.
@@ -767,6 +949,25 @@ these gate Tier 1** — they gate Tiers 2 and 3.
    to consult when the user is running *on* the node. Does that case get
    its own rule, or does on-node local mode simply inherit the
    socket-mode guarantee under Option A?
+10. **Does the shared-`$HOME` scoping error get its own fix?** On CELS,
+    `~/.config/argoproxy/config.yaml`, `$HOME/argovenv`, and
+    `REMOTE_SELF` are all on one NFS mount shared by every compute node,
+    so "one argo-proxy per user per node" is really "one per user"
+    (§[2.1](#21-defect-1--collision-detection-is-blind-across-users)).
+    Two nodes running `mode_server` concurrently corrupt each other's
+    `port:` line. Options: per-node config path, a node-stamped config,
+    or documenting the constraint honestly. Note this interacts with the
+    socket decision — a per-node socket path plus a shared config is an
+    incoherent pairing.
+11. **What is the per-site storage matrix?** §4.3 measured exactly one
+    CELS host. Aurora (different filesystem stack, direct invocation,
+    no `/gce/homes` NFS) is the nearest counter-example, and
+    scheduler-managed sites may have neither logind nor a persistent
+    node-local `/tmp`. Which target classes do we claim to support, and
+    what does the resolver in §4.4 do when it can find no node-local
+    `0700` directory — refuse socket mode silently, or say so? (Related:
+    `_on_anl_node`'s `.cels.anl.gov` suffix match at `:727` already
+    encodes the CELS-is-the-world assumption elsewhere in the engine.)
 
 ---
 
@@ -780,8 +981,16 @@ demoted the bind test on TOCTOU grounds; added the SECURITY.md linkage
 and the symmetric co-tenant exposure; reconciled §8's "nothing was run
 on a node" against §1's node-side evidence; fixed line-number citations
 (`:5954`, `:7319`, `:7395`, `:7465`, `:6831`) and the `CLAUDE.md` →
-`AGENTS.md` reference. All 38 engine line citations were re-audited
-against the working tree at the end of the second pass.
+`AGENTS.md` reference. All engine line citations were re-audited
+against the working tree at the end of the second pass. Revised again
+2026-08-10 (third pass): a live read-only probe of `compute-386-01`
+over the maintainer's warm channel answered Q2 and inverted §4.3's
+socket-location ranking (`/tmp` primary; `/run/user` gated on
+lingering; `~/.argo_anywhere/` disqualified by the NFS-shared `$HOME`);
+added §4.4 on target heterogeneity (CELS is not the only target —
+Aurora has its own storage stack and direct invocation) plus the
+runtime path resolver; added Q10 (shared-`$HOME` scoping error) and Q11
+(per-site storage matrix).
 Engine line numbers cite the working tree as of 2026-08-10
 (`src/argo_anywhere/engine/argo-anywhere.sh`, 11425 lines) and will
 drift; re-grep the named function before relying on one.*
