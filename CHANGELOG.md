@@ -103,6 +103,19 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ### Changed
 
+- **Port-collision detection now sees other users' ports.** argo-anywhere
+  decided whether a port was free by asking `lsof`, which on Linux cannot
+  see another user's socket without root — so on a busy shared node a port
+  someone else was already using looked *free*. The practical effect was
+  worst for `--auto-port`, which exists to move you off a collision and
+  would happily recommend a port a co-tenant already held.
+
+  Availability is now decided by actually trying to bind the port, the
+  same test argo-proxy itself performs. When a port is held but the owner
+  cannot be identified from your account, argo-anywhere says so plainly
+  rather than reporting the port as free. On a node without `python3` it
+  falls back to the previous behaviour.
+
 - **You can now use two compute nodes at once.** argo-proxy's config
   lives in `$HOME`, which on CELS is one NFS filesystem shared by every
   compute node — so `~/.config/argoproxy/config.yaml` is a single file

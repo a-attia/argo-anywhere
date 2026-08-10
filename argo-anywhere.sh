@@ -5616,25 +5616,70 @@ probe_remote_port_owner() {
   local user="$1" node="$2" port="$3"
   ssh_attempt_pre || { echo "unknown"; return; }
   local result
-  # The remote one-liner does its own pid -> owner lookup and compares
-  # to its own `id -un`, returning "mine:<pid>" or "other:<owner>:<pid>"
-  # so the caller doesn't need to know remote OS user names.
+  # BIND-TEST ORACLE (Defect 1, 2026-08-10). Availability is decided by a
+  # real socket.bind(), NOT by lsof.
+  #
+  # An unprivileged lsof on Linux cannot attribute another user's socket, so
+  # it prints nothing and the port reads as free -- on a shared node that is
+  # the COMMON case, not an edge case. Measured on compute-386-01:
+  #
+  #     port 64742  lsof=<empty>   bind=TAKEN   <-- the blind spot
+  #     port 64751  lsof=4092655   bind=TAKEN
+  #     port 64899  lsof=<empty>   bind=FREE
+  #
+  # bind() is exactly what argo-proxy's own validate_port does, so this
+  # probe now agrees with the thing that ultimately decides.
+  #
+  # lsof is kept, but demoted to what it was always able to do: ATTRIBUTE a
+  # hit we already know about to mine:/other:. When bind says TAKEN and lsof
+  # says nothing, the honest answer is "other" with an unknown owner -- an
+  # empty lsof on a port that is demonstrably bound means "someone else's",
+  # never "nobody's" (same inversion as _listener_is_ours).
+  #
+  # SO_REUSEADDR is explicitly disabled: with it set, bind() can succeed on a
+  # port in TIME_WAIT and we would call an unusable port free.
+  #
   # shellcheck disable=SC2046
   result="$(ssh $(ssh_args "$user" "$node") "${user}@${node}" "
-    pid=\$(lsof -nPi \":${port}\" -sTCP:LISTEN -t 2>/dev/null | head -n1)
-    if [ -z \"\$pid\" ]; then
+    avail=\$(python3 -c '
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+try:
+    s.bind((\"127.0.0.1\", ${port})); print(\"free\")
+except OSError:
+    print(\"taken\")
+finally:
+    s.close()
+' 2>/dev/null)
+    if [ -z \"\$avail\" ]; then
+      # No python3, or it failed: fall back to the old lsof-only oracle
+      # rather than guessing. Caller treats 'unknown' as proceed-with-warning.
+      lsof -nPi \":${port}\" -sTCP:LISTEN -t >/dev/null 2>&1 && echo probe-failed || echo probe-failed
+    elif [ \"\$avail\" = free ]; then
       echo free
     else
-      owner=\$(ps -o user= -p \"\$pid\" 2>/dev/null | awk '{\$1=\$1;print}')
-      [ -z \"\$owner\" ] && owner='?'
-      me=\$(id -un 2>/dev/null)
-      if [ \"\$owner\" = \"\$me\" ]; then
-        echo \"mine:\${pid}\"
+      pid=\$(lsof -nPi \":${port}\" -sTCP:LISTEN -t 2>/dev/null | head -n1)
+      if [ -z \"\$pid\" ]; then
+        # Bound, but not attributable to us => another user's process.
+        echo 'other:?:?'
       else
-        echo \"other:\${owner}:\${pid}\"
+        owner=\$(ps -o user= -p \"\$pid\" 2>/dev/null | awk '{\$1=\$1;print}')
+        [ -z \"\$owner\" ] && owner='?'
+        me=\$(id -un 2>/dev/null)
+        if [ \"\$owner\" = \"\$me\" ]; then
+          echo \"mine:\${pid}\"
+        else
+          echo \"other:\${owner}:\${pid}\"
+        fi
       fi
     fi
   " 2>/dev/null)"
+  if [ "$result" = "probe-failed" ]; then
+    ssh_attempt_ok
+    echo "unknown"
+    return
+  fi
   if [ -z "$result" ]; then
     ssh_attempt_fail
     echo "unknown"
@@ -5668,17 +5713,48 @@ find_next_free_remote_port() {
   fi
   ssh_attempt_pre || { echo ""; return; }
   local result ssh_rc
+  # BIND-TEST WALK (Defect 1, 2026-08-10). The old walk used the same
+  # unprivileged `lsof` oracle as probe_remote_port_owner, so on a shared
+  # node it read every co-tenant-held port as free -- meaning --auto-port,
+  # the flag advertised as the ESCAPE from a collision, was the one most
+  # likely to walk straight back into one. It now binds each candidate.
+  #
+  # Done in one python3 process rather than a shell loop spawning a probe per
+  # port: the old loop already cost one lsof fork per candidate (up to 200),
+  # and a python startup per candidate would be far worse. One interpreter
+  # walks the whole range and prints the first genuinely bindable port.
+  #
+  # Falls back to the lsof walk when python3 is unavailable, so a minimal
+  # node degrades to the old (weaker) behaviour rather than to no behaviour.
+  #
   # shellcheck disable=SC2046
   result="$(ssh $(ssh_args "$user" "$node") "${user}@${node}" "
-    p=${start}
-    while [ \"\$p\" -le ${end} ]; do
-      if ! lsof -nPi \":\${p}\" -sTCP:LISTEN -t >/dev/null 2>&1; then
-        echo \"\${p}\"
-        exit 0
-      fi
-      p=\$((p + 1))
-    done
-    exit 1
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c '
+import socket, sys
+for p in range(${start}, ${end} + 1):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    try:
+        s.bind((\"127.0.0.1\", p))
+        print(p); sys.exit(0)
+    except OSError:
+        continue
+    finally:
+        s.close()
+sys.exit(1)
+'
+    else
+      p=${start}
+      while [ \"\$p\" -le ${end} ]; do
+        if ! lsof -nPi \":\${p}\" -sTCP:LISTEN -t >/dev/null 2>&1; then
+          echo \"\${p}\"
+          exit 0
+        fi
+        p=\$((p + 1))
+      done
+      exit 1
+    fi
   " 2>/dev/null)" && ssh_rc=0 || ssh_rc=$?
   if [ "$ssh_rc" -ne 0 ] && [ -z "$result" ]; then
     # SSH itself failed (auth error, connection refused, etc.); count it.
@@ -5706,10 +5782,20 @@ find_next_free_remote_port() {
 prompt_port_collision() {
   local user="$1" node="$2" port="$3" owner="$4" owner_pid="$5"
   local me; me="$(id -un 2>/dev/null)"
+  # The bind-test oracle (Defect 1) can prove a port is held without being
+  # able to name the holder: an unprivileged lsof cannot attribute another
+  # user's socket, so owner/pid arrive as '?'. Say that plainly instead of
+  # printing "owned by '?' (pid ?)", which reads like a bug.
+  local _owner_descr
+  if [ "$owner" = "?" ]; then
+    _owner_descr="the owner can't be identified from your account"
+  else
+    _owner_descr="pid ${owner_pid}, owned by '${owner}'"
+  fi
   cat >&2 <<EOF
 
 [warn] Port ${port} on ${node} is in use by another user
-       (pid ${owner_pid}, owned by '${owner}'; you are '${ARGO_ANYWHERE_USER:-${me}}').
+       (${_owner_descr}; you are '${ARGO_ANYWHERE_USER:-${me}}').
 
        Two users can't share an argo-proxy on the same port; each needs
        their own. Options:
@@ -5997,7 +6083,12 @@ ensure_or_reuse_tunnel() {
         local owner; owner="${rstatus%:*}"; owner="${owner#other:}"
         local newport
         if [ "${AUTO_PORT:-${ARGO_ANYWHERE_AUTO_PORT:-0}}" = 1 ]; then
-          warn "Port ${PROXY_PORT} on ${node} is taken by '${owner}' (pid ${owner_pid})."
+          if [ "$owner" = "?" ]; then
+            warn "Port ${PROXY_PORT} on ${node} is held by another user's process"
+            warn "  (bind() refused it; unprivileged lsof can't name the owner)."
+          else
+            warn "Port ${PROXY_PORT} on ${node} is taken by '${owner}' (pid ${owner_pid})."
+          fi
           local rstart="$PROXY_PORT_DEFAULT"
           local rend=$((rstart + 100))
           if [ -n "${ARGO_ANYWHERE_PORT_RANGE:-}" ]; then

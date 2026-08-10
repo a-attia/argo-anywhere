@@ -1067,7 +1067,7 @@ cannot actually justify.
 
 | # | Change | Defect | Note |
 |:--|:---|:---|:---|
-| 4 | Bind test replacing `lsof`-as-oracle, incl. the `--auto-port` walk | 1 | Detector; see TOCTOU caveat above |
+| 4 | Bind test replacing `lsof`-as-oracle, incl. the `--auto-port` walk | 1 | **SHIPPED 2026-08-10** — detector; see TOCTOU caveat above |
 | 5a | Identity check on `external-healthy` | 5 | **SHIPPED 2026-08-10** — free (same host), no round trip |
 | 5b | Identity check on `ours-healthy-fg` / `ours-healthy-mux` | 5 | Deferred; needs a node-side state file + ~0.75s round trip |
 
@@ -1193,6 +1193,53 @@ The engine↔web-UI coupling rules in [`AGENTS.md`](../AGENTS.md)
 ("Engine ↔ web-UI coupling rules") apply if any user-facing flag
 changes; a `--socket` / `--transport` flag would need the tri-lockstep
 treatment described there for D-032.
+
+### Bind-test oracle shipped (Defect 1, 2026-08-10)
+
+`probe_remote_port_owner` and `find_next_free_remote_port` now decide
+availability with a real `socket.bind()` instead of `lsof`. `lsof` is
+kept for what it could always do — *attribute* a hit we already know
+about to `mine:` / `other:`.
+
+Proven on the node before and after. Before:
+
+```text
+port 64742  lsof=<empty>   bind=TAKEN   <-- the blind spot
+port 64751  lsof=4092655   bind=TAKEN
+port 64899  lsof=<empty>   bind=FREE
+```
+
+After, running the engine's **own** remote probe snippet:
+
+| Port | Reality | Old oracle | New oracle |
+|:---|:---|:---|:---|
+| 64742 | co-tenant's proxy | `free` ❌ | `other:?:?` ✅ |
+| 64751 | ours | `mine:4092655` | `mine:4092655` ✅ |
+| 64899 | genuinely free | `free` | `free` ✅ |
+
+And the `--auto-port` walk over `64742-64745` now returns **64743**,
+skipping the held port it previously would have recommended. That was
+the sharpest form of the defect: the flag advertised as the *escape*
+from a collision was the one most likely to walk back into one.
+
+Three details worth keeping:
+
+- **`SO_REUSEADDR` is explicitly disabled.** With it set, `bind()` can
+  succeed on a port in `TIME_WAIT`, which would report an unusable port
+  as free — a subtler version of the same bug.
+- **Bound-but-unattributable → `other:?:?`, never `free`.** Same
+  inversion `_listener_is_ours` uses: an empty `lsof` on a port that
+  demonstrably refuses `bind()` means "someone else's", not "nobody's".
+  The collision prompt now says "the owner can't be identified from your
+  account" rather than printing `owned by '?' (pid ?)`.
+- **Degrades, does not break.** No `python3` on the node → the probe
+  returns `unknown` (caller already warns and proceeds) and the walk
+  falls back to the old `lsof` loop. The walk uses **one** interpreter
+  for the whole range rather than a process per candidate.
+
+Still a *detector*, not a guarantee — the TOCTOU window noted above is
+unchanged, which is why item 1's fail-fast remains the load-bearing
+safety property.
 
 ### The web UI carries Defect 3 independently (found 2026-08-10; NOT fixed)
 

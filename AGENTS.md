@@ -630,6 +630,34 @@ asserts the two engine copies stay byte-identical. Background:
 [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md)
 (Tier 1 item 1).
 
+### Bind-test oracle for port availability (not `lsof`)
+
+**Port availability is decided by `socket.bind()`, never by `lsof`.**
+`probe_remote_port_owner` and `find_next_free_remote_port` both bind-test;
+`lsof` is only used to *attribute* a hit we already know about.
+
+Why: an unprivileged `lsof` on Linux cannot see another user's socket, so
+a co-tenant-held port reads as **free**. On a shared node that is the
+common case. Measured on `compute-386-01`: `:64742` → `lsof=<empty>` but
+`bind=TAKEN`. `--auto-port` was the worst affected — the flag that exists
+to escape a collision recommended occupied ports.
+
+Rules for anyone touching those probes:
+
+- **`SO_REUSEADDR` must stay explicitly disabled** (`, 0`). With it set,
+  `bind()` succeeds on a `TIME_WAIT` port and an unusable port reads free.
+- **Bound-but-unattributable is `other:?:?`, never `free`.** Empty `lsof`
+  on a port that refuses `bind()` means "someone else's", not "nobody's".
+- **Both probes degrade rather than fail** when `python3` is absent
+  (probe → `unknown`; walk → old `lsof` loop).
+- The walk uses **one** python process for the whole range, not one per
+  candidate.
+
+Still a detector, not a guarantee: there is a TOCTOU window between our
+bind and argo-proxy's. The load-bearing safety property is the
+no-interactive-prompt fast-fail above. Pinned by
+`tests/test_engine_bind_test_oracle.py`.
+
 ### Identity-before-success invariant (argo-proxy post-launch wait)
 
 **`mode_server`'s post-launch wait MUST confirm the `/health` responder
