@@ -282,9 +282,13 @@ bash argo-anywhere.sh status
 ```
 
 Expected: `ALL GREEN` summary box with `Cached username`,
-`Cached node`, `Tunnel uptime`, etc. If you see "Cached node:
-(none yet)", the migration didn't carry over your old cache —
-re-run `client` once to repopulate.
+`Last connected to`, `Tunnel uptime`, etc. If you see
+"Cached identity: (none yet)", the migration didn't carry over your
+old cache — re-run `client` once to repopulate.
+
+(The row was labelled `Cached node` before 2026-08-10; it is now
+`Last connected to … (cached; not re-verified)`, alongside a new
+`Tunnel goes to` row showing where the live tunnel actually points.)
 
 ```sh
 ssh <user>@<node> 'grep -E "^verbose:" ~/.config/argoproxy/config.yaml'

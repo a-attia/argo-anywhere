@@ -89,6 +89,22 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ### Changed
 
+- **`status` no longer claims more than it checked.** The summary card
+  drew its verdict from three checks that all run on your laptop — a
+  listener on the port, `/health`, `/v1/models` — and then printed
+  `Cached node: <name>` from a value saved at your last connect. Each
+  line was true; together they read as "you are talking to your
+  argo-proxy on that node", which none of them established.
+
+  The card now shows where the tunnel actually goes, read from the live
+  SSH connection rather than the cache. `ALL GREEN` describes the
+  endpoint instead of asserting "tunnel up"; the cached row is labelled
+  `Last connected to … (cached; not re-verified)`; and if the live
+  tunnel points somewhere other than the cached node, the verdict
+  becomes `CHECK` and says so instead of showing green next to a
+  contradicting node. A closing note spells out that the checks are
+  local and do not identify whose proxy is on the far end.
+
 - **Web UI: the Connect action is now two clearly-labeled paths.** The
   channel card shows **Connect** (quick — reuses your saved node /
   username / port) and **Connect with options…** (opens the Actions

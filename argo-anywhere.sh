@@ -7883,6 +7883,7 @@ gather_summary() {
   SUM_MODELS_OK=0; SUM_MODEL_COUNT=0; SUM_MODEL_UNIQ_COUNT=0; SUM_MODEL_SAMPLE=""
   SUM_CFG_COUNT=0; SUM_CFG_AVAIL_COUNT=0
   SUM_CFG_ORPHAN_COUNT=0; SUM_CFG_ORPHAN_LIST=""
+  SUM_TUNNEL_DEST=""; SUM_DEST_MATCHES_CACHE=""
 
   # Listener (lsof exits 1 when nothing matches; '|| true' keeps pipefail happy).
   #
@@ -7908,6 +7909,40 @@ gather_summary() {
     SUM_LISTENER_OK=1
     SUM_LISTENER_PID="${lsof_line%% *}"
     SUM_LISTENER_BIND="${lsof_line#* }"
+  fi
+
+  # Where does that listener actually GO? (Tier 1 item 3 / Defect 3.)
+  #
+  # Everything else gathered here is laptop-local: a listener on our port, an
+  # HTTP 200 from it, a model list. None of that says WHICH host is on the
+  # other end -- yet the box below prints "Cached node: <name>" from a string
+  # written at the last successful connect and never re-checked, which makes
+  # the whole card read as a claim about that node. In the 2026-08-10 incident
+  # the card was truthful about every probe it ran and still misled, because
+  # the reader's question ("am I talking to my proxy on my node?") was not one
+  # of them.
+  #
+  # local_tunnel_destination reads the ControlPath socket name off the
+  # listener's own `ps` line, so it is ground truth about the SSH destination
+  # -- not a cache. It already backs the P3 misroute refusal in
+  # ensure_or_reuse_tunnel; it was simply never surfaced to the user.
+  #
+  # Empty is a legitimate, common answer (no listener; a foreground tunnel
+  # with no ControlPath; on-node local mode where there is no tunnel at all).
+  # Empty means "unknown", never "mismatch" -- see render_summary.
+  if [ "$SUM_LISTENER_OK" -eq 1 ]; then
+    SUM_TUNNEL_DEST="$(local_tunnel_destination "$PROXY_PORT")"
+    if [ -n "$SUM_TUNNEL_DEST" ] && [ -f "$NODE_CACHE" ]; then
+      local _cached_node_now
+      _cached_node_now="$(cat "$NODE_CACHE" 2>/dev/null || true)"
+      if [ -n "$_cached_node_now" ]; then
+        if [ "$_cached_node_now" = "$SUM_TUNNEL_DEST" ]; then
+          SUM_DEST_MATCHES_CACHE=yes
+        else
+          SUM_DEST_MATCHES_CACHE=no
+        fi
+      fi
+    fi
   fi
 
   # Health
@@ -7978,9 +8013,25 @@ render_summary() {
   if [ -f "$NODE_CACHE" ]; then cached_node="$(cat "$NODE_CACHE")"; fi
 
   # Verdict
+  #
+  # SCOPE NOTE (Tier 1 item 3, 2026-08-10). Every signal behind this verdict
+  # is gathered on the LAPTOP: a listener on our port, /health, /v1/models.
+  # None of them identifies the process on the far end. "ALL GREEN" therefore
+  # means "the endpoint your tools will use is answering" -- it is NOT a claim
+  # that the answer comes from your argo-proxy on your node. Keeping that
+  # distinction visible is the whole point of this section; the wording below
+  # says what was actually probed, and a destination mismatch downgrades the
+  # verdict rather than being buried in a body row.
   local verdict vcolor
-  if [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$SUM_MODELS_OK" -eq 1 ]; then
-    verdict="ALL GREEN  -  tunnel up, proxy healthy, ${SUM_MODEL_COUNT} model(s)"
+  if [ "$SUM_DEST_MATCHES_CACHE" = "no" ] && [ "$SUM_HEALTH_OK" -eq 1 ]; then
+    # The tunnel is healthy but points somewhere other than the node we last
+    # connected to. Not a failure -- it may well be deliberate -- but it must
+    # never render as unqualified green, because the Configuration section
+    # below prints the CACHED node and the two would contradict each other.
+    verdict="CHECK      -  endpoint healthy, but tunnel goes to ${SUM_TUNNEL_DEST}"
+    vcolor="$C_YLW"
+  elif [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$SUM_MODELS_OK" -eq 1 ]; then
+    verdict="ALL GREEN  -  endpoint healthy, ${SUM_MODEL_COUNT} model(s)"
     vcolor="$C_GRN"
   elif [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ]; then
     verdict="DEGRADED   -  proxy healthy but /v1/models did not respond"
@@ -8024,6 +8075,26 @@ render_summary() {
     health_str="UNREACHABLE on http://localhost:${PROXY_PORT}/health"
   fi
   lines+=("Proxy /health    : ${health_str}")
+
+  # Ground truth about the far end, read from the listener's own ControlPath
+  # socket -- distinct from the CACHED node shown under Configuration, which
+  # is only what we last connected to. Printing both, labelled, is what stops
+  # the card from implying a node it never probed.
+  if [ "$SUM_LISTENER_OK" -eq 1 ]; then
+    local dest_str
+    if [ -n "$SUM_TUNNEL_DEST" ]; then
+      dest_str="$SUM_TUNNEL_DEST"
+      case "$SUM_DEST_MATCHES_CACHE" in
+        yes) dest_str="${dest_str}  (matches cached node)" ;;
+        no)  dest_str="${dest_str}  (DIFFERS from cached node -- see Configuration)" ;;
+      esac
+    elif [ "$(on_anl_compute_node)" = "yes" ]; then
+      dest_str="(local -- on-node argo-proxy, no tunnel)"
+    else
+      dest_str="(unknown -- listener has no ControlPath to read)"
+    fi
+    lines+=("Tunnel goes to   : ${dest_str}")
+  fi
 
   if [ -n "$SUM_LISTENER_PID" ]; then
     local uptime_str
@@ -8098,9 +8169,19 @@ render_summary() {
   if [ "$cached_user" != "(unset)" ]; then have_user=1; fi
   if [ "$cached_node" != "(unset)" ]; then have_node=1; fi
   if [ "$have_user" -eq 1 ]; then lines+=("Cached username  : ${cached_user}"); fi
-  if [ "$have_node" -eq 1 ]; then lines+=("Cached node      : ${cached_node}"); fi
+  if [ "$have_node" -eq 1 ]; then
+    # Label these as LAST-CONNECTED, not current. The unqualified "Cached
+    # node" wording was read as "the node you are talking to now" -- which it
+    # never was. The live answer is the "Tunnel goes to" row above.
+    lines+=("Last connected to: ${cached_node}  (cached; not re-verified)")
+  fi
   if [ "$have_user" -eq 0 ] && [ "$have_node" -eq 0 ]; then
     lines+=("Cached identity  : (none yet -- run '$(basename "$0") client' to set)")
+  fi
+  if [ "$SUM_DEST_MATCHES_CACHE" = "no" ]; then
+    lines+=("                   ^ the live tunnel goes to ${SUM_TUNNEL_DEST} instead.")
+    lines+=("                     Re-run 'client' to update, or 'stop' first if")
+    lines+=("                     this tunnel is not the one you want.")
   fi
 
   # ---- Section: Paths ------------------------------------------------------
@@ -8134,6 +8215,17 @@ render_summary() {
 
   # ---- Section: Next step --------------------------------------------------
   lines+=("__SECTION__:Next step")
+  # State the limit of the verdict once, where a green card is most likely to
+  # be over-read. Everything above was probed from this laptop; whether the
+  # far-end proxy is OURS is a question `status` does not (and today cannot
+  # cheaply) answer -- it would need an SSH round trip per invocation. The
+  # engine DOES answer it at bootstrap (_listener_is_ours, IDENTITY-BEFORE-
+  # SUCCESS), so the honest thing here is to name the gap rather than let the
+  # card imply it was covered.
+  if [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$(on_anl_compute_node)" != "yes" ]; then
+    lines+=("(Checks above are local: they confirm the endpoint answers, not")
+    lines+=("  whose argo-proxy is behind it. Run 'client' to re-verify on the node.)")
+  fi
   if [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$SUM_MODELS_OK" -eq 1 ]; then
     # When the proxy is healthy, surface model-config drift so the user knows
     # exactly which axis update-models would change. Three independent axes:

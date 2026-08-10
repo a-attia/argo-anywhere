@@ -717,7 +717,7 @@ flag, and is strictly correct under either Option A or Option B.
 |:--|:---|:---|:---|:---|
 | 1 | `< /dev/null` on launch + session-output capture in the timeout branch | 2 | **SHIPPED 2026-08-10** | Turns an indefinite silent hang into a ~1s diagnosable `EOFError` |
 | 2 | Confirm our own session/pid before trusting `/health` at `:7557` | 4 | **SHIPPED 2026-08-10** | Stops a stranger's proxy from satisfying our liveness check |
-| 3 | `status` honesty via `local_tunnel_destination` | 3 | pending | Stops `ALL GREEN` overclaiming; pure reporting change |
+| 3 | `status` honesty via `local_tunnel_destination` | 3 | **SHIPPED 2026-08-10** | Stops `ALL GREEN` overclaiming; pure reporting change |
 
 **Item 1 shipped 2026-08-10 (in two commits — see the durability
 correction below).** All three launchers (`screen`, `tmux`,
@@ -838,12 +838,64 @@ on the `lsof | head` capture, `set -e` survival, plus behavioural cases
 for own / unbound / dead / no-lsof listeners. Verified to fail when the
 identity check is removed.
 
-With items 1 and 2 shipped, the incident as it actually occurred can no
-longer reach `ALL GREEN`. Item 1 makes the collision fail in about a
+**Item 3 shipped 2026-08-10.** `gather_summary` now calls
+`local_tunnel_destination` — which existed since the P3 audit fix and
+had exactly one caller, so `status` had ground truth available and never
+used it — and `render_summary` surfaces it as a `Tunnel goes to` row
+next to the local probes. Four changes, all reporting-only:
+
+- **The green verdict stops overclaiming.** `ALL GREEN - tunnel up,
+  proxy healthy, N model(s)` becomes `ALL GREEN - endpoint healthy,
+  N model(s)`. "Tunnel up" was exactly the part three laptop-side probes
+  cannot establish.
+- **A destination mismatch downgrades to `CHECK`** rather than rendering
+  green beside a contradicting cached node. Not an error — it may be
+  deliberate — but never unqualified green.
+- **`Cached node:` becomes `Last connected to: … (cached; not
+  re-verified)`.** The old label was read as "the node you are talking
+  to now", which it never meant.
+- **The card states its own limit** in the Next-step section: the checks
+  confirm the endpoint answers, not whose argo-proxy is behind it
+  (suppressed in on-node mode, where there is no tunnel).
+
+`SUM_DEST_MATCHES_CACHE` is deliberately **three-valued** — empty /
+`yes` / `no`. Empty means *unknown* and stays green: on-node local mode,
+a foreground tunnel with no `ControlPath`, and first runs with no cache
+all legitimately produce it. Collapsing unknown into "mismatch" would
+fire a scary verdict at users with nothing wrong.
+
+Verified against the live tunnel, both paths:
+
+```text
+ALL GREEN  -  endpoint healthy, 51 model(s)
+Tunnel goes to   : compute-01.cels.anl.gov  (matches cached node)
+Last connected to: compute-01.cels.anl.gov  (cached; not re-verified)
+```
+
+```text
+CHECK      -  endpoint healthy, but tunnel goes to compute-01.cels.anl.gov
+Tunnel goes to   : compute-01.cels.anl.gov  (DIFFERS from cached node …)
+Last connected to: some-other-node.cels.anl.gov  (cached; not re-verified)
+                   ^ the live tunnel goes to compute-01.cels.anl.gov instead.
+```
+
+Pinned by `tests/test_engine_status_honesty.py` (14 tests): 11 contract
+assertions plus 3 that render the **real** `render_summary` with stubbed
+`SUM_*` globals and assert on the emitted card (matching / mismatched /
+unknown destination). Verified to fail when the overclaiming wording or
+the mismatch branch is reverted.
+
+With items 1, 2 and 3 shipped, the incident as it actually occurred can
+no longer reach `ALL GREEN`. Item 1 makes the collision fail in about a
 second with the upstream warning quoted back to the user, instead of
 hanging for 20s behind a message that named only the symptom; item 2
 stops the co-tenant's proxy from standing in for ours at the moment of
-success.
+success; item 3 stops the summary card from asserting more than it
+checked, so a green box no longer implies a node it never probed.
+
+**Tier 1 is complete.** Everything in it was reporting or launch
+hygiene — no design decision, no user-facing flag, correct under either
+transport option.
 
 What remains is narrower but not smaller. The **cold** bootstrap path is
 now guarded at both ends (H5 before launch, `_listener_is_ours` after);
