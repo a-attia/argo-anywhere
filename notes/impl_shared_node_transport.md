@@ -604,6 +604,18 @@ throughout (`VENV_PATH='$HOME/argovenv'`, `REMOTE_SELF`, `REMOTE_LOG`),
 which is fine for *state* and wrong for a rendezvous point — the same
 distinction §4.3 draws.
 
+**Posture for non-CELS targets (decided 2026-08-10): best-effort, no
+per-site matrix.** We do not enumerate or pre-probe sites. Reachability
+continues to work the way the engine already handles it — defer to the
+alias's own `ProxyJump`/`ProxyCommand` from `~/.ssh/config` when there
+is one (D-032), otherwise use the configuration the user passes — and
+the resolver above discovers the storage situation at runtime, wherever
+it lands. This is the whole point of resolving rather than hard-coding:
+the ladder needs no advance knowledge of a site. The single obligation
+it does carry is that **rung 4 must be audible** — when socket mode is
+unavailable, say so in one line with the reason, so "socket mode
+declined here" is distinguishable from "socket mode never tried."
+
 Note also that `_on_anl_node`'s host detection is a `.cels.anl.gov`
 suffix match, documented at `:727`–`:732` as silently returning "no" for
 any other domain. A genuinely multi-site transport story eventually has
@@ -968,6 +980,21 @@ these gate Tier 1** — they gate Tiers 2 and 3.
     `0700` directory — refuse socket mode silently, or say so? (Related:
     `_on_anl_node`'s `.cels.anl.gov` suffix match at `:727` already
     encodes the CELS-is-the-world assumption elsewhere in the engine.)
+
+    **Partially resolved 2026-08-10 (maintainer):** do **not** build a
+    per-site matrix, and do not probe other sites speculatively. The
+    posture for non-CELS targets is **best-effort**: reach them the way
+    the engine already does — honor `~/.ssh/config`'s
+    `ProxyJump`/`ProxyCommand` when the alias defines one (D-032
+    `_alias_has_own_proxy`), otherwise use the user-supplied
+    configuration — and let the §4.4 resolver discover the storage
+    situation at runtime on whatever host it lands on. That is exactly
+    what the resolver is for: it needs no advance knowledge of a site,
+    only an honest answer at rung 4 when no node-local `0700` directory
+    exists. **The open part is narrow**: rung 4 must fall back to
+    hardened TCP *audibly* (one line naming the reason), never
+    silently — a site where socket mode is unavailable should look
+    different from a site where it was never attempted.
 
 ---
 
