@@ -270,11 +270,35 @@ Explicit non-defenses, listed so they're not surprises:
   other hosts. But other users on the same compute node who can
   somehow reach `127.0.0.1:<your-port>` (e.g. via `lsof` to see your
   port + their own SSH-forwarding) could send queries that argo-proxy
-  attributes to your Argo account. The on-node identity check (H5
-  fix) defends against the inverse case (you accidentally attaching
-  to their argo-proxy) but doesn't defend against them attaching to
-  yours. Mitigations: pick a non-default port via `--port`, or just
-  don't run on shared compute nodes you don't trust.
+  attributes to your Argo account. Mitigations: pick a non-default port
+  via `--port`, or just don't run on shared compute nodes you don't
+  trust.
+
+  **The inverse direction — you accidentally routing through *their*
+  argo-proxy — is now defended at three points** (as of 2026-08-10;
+  before that only the first existed, and it covered just one of them):
+
+    1. **Pre-launch reuse** (H5): `mode_server` refuses to adopt an
+       existing proxy unless it positively confirms the config's `user:`
+       matches the Argo identity we were told to serve.
+    2. **Post-launch confirmation** (`_listener_is_ours`): after starting
+       argo-proxy, the wait loop confirms the process answering `/health`
+       is owned by our OS account. A co-tenant's proxy answers
+       identically, so a bare health check proved nothing.
+    3. **Adopting a non-tunnel local listener** (`external-healthy`): the
+       same ownership check now gates the branch that used to accept any
+       healthy listener as usable.
+
+  All three **fail closed** — missing `lsof`, a vanished pid, or an
+  unreadable config means "cannot confirm", which is treated as "not
+  ours". Point 3 can be opted out of with
+  `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1` for a deliberately shared proxy.
+
+  Remaining gap in this direction: a **warm reconnect** through an
+  existing tunnel does not re-verify the far-end process. The tunnel
+  itself is ours and its destination host and far-end port are pinned at
+  creation, so the exposure is limited to our proxy dying mid-session and
+  a co-tenant binding the freed port before we notice.
 - **A same-host attacker against the local web UI**. When you run
   `argo-anywhere web` / `app`, the unauthenticated loopback server can
   be reached by any local process or (CSRF-style) a malicious browser

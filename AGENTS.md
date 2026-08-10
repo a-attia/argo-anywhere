@@ -688,6 +688,8 @@ Canonical names:
 - `ARGO_ANYWHERE_VERBOSE_SERVER`
 - `ARGO_ANYWHERE_KEEP_ORPHANS`
 - `ARGO_ANYWHERE_DROP_ORPHANS`
+- `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY` (opt out of the `external-healthy`
+  identity gate; see "Identity-before-success invariant")
 - `ARGO_BOX_STYLE`
 
 Two generations of legacy names still work with a one-time deprecation

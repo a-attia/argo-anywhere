@@ -40,6 +40,20 @@ decisions D-001 through D-030) and the tag messages on the repo.
   analysis (five composing defects, of which this is one) is in
   [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md).
 
+- **argo-anywhere no longer routes through a local argo-proxy it cannot
+  attribute to you.** When something was already serving your port and it
+  was not argo-anywhere's own tunnel, the tool used it — reasoning that a
+  reachable endpoint is a working endpoint. On a shared compute node that
+  process may be another user's argo-proxy, which answers the health
+  check exactly like yours, so your requests would go through it and be
+  billed to their Argo identity.
+
+  It now checks that the process belongs to you and refuses if it cannot
+  tell, explaining why and how to proceed. If you deliberately share a
+  proxy, set `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1` to opt back in. This
+  only affects the case where the listener is *not* argo-anywhere's own
+  tunnel; normal tunnelled sessions are unchanged.
+
 - **argo-anywhere no longer reports success when another user's
   argo-proxy is holding your port.** On a shared compute node, a
   co-tenant's argo-proxy answers the health check exactly like your own

@@ -749,7 +749,7 @@ repoints `HOME` per test — so a harness inheriting the ambient
 environment starts sessions it cannot then see. `_run_screen_harness`
 pins a private `HOME` inside its own tmpdir.
 
-#### Durability correction — the two halves of item 1 initially cancelled out
+### Durability correction — the two halves of item 1 initially cancelled out
 
 The first implementation shipped (a) and (b) as written above and was
 **subtly wrong**, caught the same day while checking the interaction
@@ -897,7 +897,7 @@ checked, so a green box no longer implies a node it never probed.
 hygiene — no design decision, no user-facing flag, correct under either
 transport option.
 
-#### Tier 1 live verification (2026-08-10, `compute-386-01`)
+### Tier 1 live verification (2026-08-10, `compute-386-01`)
 
 Unit tests cannot exercise a real cross-user collision, so Tier 1 was
 verified on the node itself. **The maintainer's live channel was
@@ -965,7 +965,74 @@ cannot actually justify.
 | # | Change | Defect | Note |
 |:--|:---|:---|:---|
 | 4 | Bind test replacing `lsof`-as-oracle, incl. the `--auto-port` walk | 1 | Detector; see TOCTOU caveat above |
-| 5 | Identity check on the **warm** path (`ours-healthy-mux` / `external-healthy`) | 5 | Needs the Q5 round-trip decision |
+| 5a | Identity check on `external-healthy` | 5 | **SHIPPED 2026-08-10** — free (same host), no round trip |
+| 5b | Identity check on `ours-healthy-fg` / `ours-healthy-mux` | 5 | Deferred; needs a node-side state file + ~0.75s round trip |
+
+### Correction to §2.5: the warm path is narrower than first stated
+
+The first draft called the warm path "unguarded at all". Reviewing the
+code against that claim (2026-08-10) shows it is **too strong**, and the
+correction matters because it changes what is worth building.
+
+For `ours-healthy-fg` / `ours-healthy-mux`, three properties are already
+pinned without any round trip:
+
+| Property | How it is established |
+|:---|:---|
+| The tunnel is ours | Our mux socket, in our `0700 ~/.ssh/sockets`, our `ssh` process |
+| Destination host | P3 check via `local_tunnel_destination` — refuses on mismatch (`:5768`) |
+| Far-end port | Fixed by the `-L` spec at tunnel creation; cannot drift afterwards |
+
+So a warm tunnel can only reach a stranger's proxy if the far-end port
+was **already squatted when the tunnel was created** — a *cold-path*
+question, now guarded by `_listener_is_ours`
+(§[2.4](#24-defect-4--the-post-launch-liveness-check-is-identity-blind)).
+The residual risk on those branches is a genuine but narrow race: our
+proxy dies mid-session and a co-tenant binds the freed port before we
+notice. Real, worth closing eventually, but far rarer than "every
+reconnect is unverified".
+
+**`external-healthy` was the actual hole**, and it shipped 2026-08-10.
+That branch adopted *any* healthy listener that was not our tunnel, on
+the reasoning (`:5555`–`:5559`) that "the endpoint they need is
+reachable, so this is fine" — reachability read as ownership, with no
+mux socket to appeal to. On a shared node the listener may be a
+co-tenant's argo-proxy, answering `/health` identically. It now calls
+`_listener_is_ours` first and **refuses** otherwise, naming
+`ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1` as an explicit opt-out for
+deliberately-shared proxies.
+
+Two properties make this the cheap one: the check is **free** (same
+host — no SSH round trip, unlike the `ours-healthy-*` branches), and it
+is **strictly weaker than the classification above it**, so it can only
+refuse a genuinely foreign listener. If our own tunnel were merely
+misclassified by `ps`-glob drift, the `ssh` process is still ours and
+the gate passes — it cannot break a working setup.
+
+`_listener_is_ours` also moved up beside its `local_tunnel_*` siblings
+so it is defined before both call sites. Bash resolves at call time so
+the old ordering worked, but depending on that across ~1400 lines is
+fragile; an ordering test now pins it.
+
+### Measured: what a warm-path round trip actually costs
+
+An earlier estimate of "tens of milliseconds" for an SSH round trip on
+the warm mux was **wrong by ~25×**. Measured on the live channel
+(2026-08-10, five runs after warm-up): **~0.75s**, steady.
+
+That reprices Q5. Per call site:
+
+| Call site | Frequency | 0.75s acceptable? |
+|:---|:---|:---|
+| `connect` / `configure` | Once per session | Yes — trivial next to Duo + bootstrap |
+| `run` | Per tool launch | Borderline |
+| `status` | Casual, frequent | **No** — would train people to stop running it |
+
+Also measured: **no HTTP endpoint exposes identity.** `/health` returns
+only `{"status": "healthy"}`; `/version` gives version data; `/config`,
+`/status`, `/info` are absent. So the tunnel itself can never answer
+"is this mine?", and any warm-path check on a *remote* far end must be
+an SSH round trip — there is no cheaper mechanism to find.
 
 **Tier 3 — the transport decision itself.** Option A vs Option B,
 gated on §[9](#9-open-questions) Q1–Q3, which in turn are gated on the

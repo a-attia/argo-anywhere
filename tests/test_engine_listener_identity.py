@@ -275,6 +275,146 @@ def test_cross_user_case_is_documented_as_verified_on_a_node() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# external-healthy identity gate (Defect 5, the one unguarded warm path)
+# ---------------------------------------------------------------------------
+
+
+def test_external_healthy_requires_identity() -> None:
+    """``external-healthy`` must not adopt a listener it cannot attribute.
+
+    This branch is reached when something answers ``/health`` on our port and
+    it is NOT our tunnel -- typically an argo-proxy running locally on a
+    compute node. The other reuse branches are anchored by evidence we own
+    (our ``0700`` mux socket, whose name pins the destination host, with the
+    far-end port fixed by ``-L`` at creation). This one has none of that, so
+    adopting on reachability alone is ownership-by-inference.
+    """
+    body = _function_body(_engine_source(), "ensure_or_reuse_tunnel")
+    branch = body[body.index("    external-healthy)") :]
+    branch = branch[: branch.index(";;") + 2]
+    assert "_listener_is_ours" in branch, (
+        "external-healthy must verify ownership before adopting a listener"
+    )
+    assert "die " in branch, "an unattributable listener must be refused, not warned"
+
+
+def test_external_healthy_check_is_local_and_free() -> None:
+    """The gate must not add an SSH round trip.
+
+    We are on the same host as the listener in this branch, so the check costs
+    nothing -- unlike the ``ours-healthy-*`` branches, where the far end is a
+    different machine (~0.75s over a warm mux, measured 2026-08-10).
+    """
+    body = _function_body(_engine_source(), "ensure_or_reuse_tunnel")
+    branch = body[body.index("    external-healthy)") :]
+    branch = branch[: branch.index(";;") + 2]
+    # Strip comments first: the rationale legitimately discusses ssh/tunnels.
+    code = "\n".join(
+        ln for ln in branch.splitlines() if not ln.lstrip().startswith("#")
+    )
+    for forbidden in ("ssh ", "ssh_args", "probe_remote_port_owner", "scp "):
+        assert forbidden not in code, (
+            f"external-healthy gate must stay local; found {forbidden!r}"
+        )
+
+
+def test_external_healthy_has_a_documented_escape_hatch() -> None:
+    """A deliberate shared-proxy setup must remain possible.
+
+    Refusing outright would break anyone intentionally sharing a proxy. The
+    override is opt-in, env-gated, and warns loudly about attribution.
+    """
+    src = _engine_source()
+    body = _function_body(src, "ensure_or_reuse_tunnel")
+    branch = body[body.index("    external-healthy)") :]
+    branch = branch[: branch.index(";;") + 2]
+    assert "ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY" in branch
+    # The refusal message must tell the user the escape hatch exists.
+    assert branch.count("ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY") >= 2, (
+        "the refusal should name the override, not just implement it"
+    )
+
+
+def test_listener_is_ours_defined_before_both_call_sites() -> None:
+    """Definition must precede use in the file.
+
+    Bash resolves at call time, so late definition happens to work -- but
+    relying on that across ~1400 lines is fragile. ``_listener_is_ours`` lives
+    with its ``local_tunnel_*`` siblings, ahead of both callers.
+    """
+    src = _engine_source()
+    defn = src.index("\n_listener_is_ours() {")
+    assert defn < src.index("\nensure_or_reuse_tunnel() {"), (
+        "_listener_is_ours must be defined before ensure_or_reuse_tunnel"
+    )
+    assert defn < src.index("\nmode_server() {"), (
+        "_listener_is_ours must be defined before mode_server"
+    )
+
+
+def test_external_healthy_gate_behaviour() -> None:
+    """Drive the real branch: adopt when ours, refuse when not, honour override."""
+    src = _engine_source()
+    body = _function_body(src, "ensure_or_reuse_tunnel")
+    branch = body[body.index("    external-healthy)") :]
+    branch = branch[: branch.index(";;") + 2]
+    helper = _function_body(src, "_listener_is_ours")
+
+    harness = textwrap.dedent(
+        """
+        set -uo pipefail
+        ok() {{ printf 'OK %s\\n' "$*"; }}
+        warn() {{ printf 'WARN %s\\n' "$*"; }}
+        err() {{ printf 'ERR %s\\n' "$*" >&2; }}
+        die() {{ printf 'DIE %s\\n' "$*" >&2; exit 7; }}
+        basename() {{ echo argo-anywhere; }}
+        {helper}
+        run() {{ PROXY_PORT="$1"; case external-healthy in
+        {branch}
+        esac; }}
+        python3 -m http.server 46711 --bind 127.0.0.1 >/dev/null 2>&1 &
+        SRV=$!
+        sleep 1
+        run 46711 >/dev/null 2>&1; echo "ours_rc=$?"
+        ( PATH=/nonexistent-dir:/usr/bin:/bin
+          run 46711 >/dev/null 2>&1 ); echo "foreign_rc=$?"
+        ( PATH=/nonexistent-dir:/usr/bin:/bin
+          ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1 run 46711 >/dev/null 2>&1
+        ); echo "override_rc=$?"
+        kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
+        """
+    ).format(helper=helper, branch=branch)
+
+    with tempfile.TemporaryDirectory() as td:
+        script = Path(td) / "h.sh"
+        script.write_text(harness)
+        out = subprocess.run(
+            ["bash", str(script)],
+            cwd=td,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={
+                "HOME": td,
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "TMPDIR": td,
+            },
+        )
+    results = dict(
+        line.split("=", 1) for line in out.stdout.splitlines() if "=" in line
+    )
+    assert results.get("ours_rc") == "2", (
+        f"a listener we own must be adopted (rc=2); got {results}"
+    )
+    assert results.get("foreign_rc") == "7", (
+        f"an unattributable listener must be refused (die); got {results}"
+    )
+    assert results.get("override_rc") == "2", (
+        f"the override must allow adoption; got {results}"
+    )
+
+
 def test_engine_copies_stay_byte_identical() -> None:
     """Root and vendored engine copies must not diverge (D-001/D-028)."""
     repo_root = Path(__file__).resolve().parent.parent

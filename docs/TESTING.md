@@ -580,12 +580,39 @@ something on the port to mimic a collision:
 nohup sh -c 'python3 -m http.server 64742 >/dev/null 2>&1' >/dev/null 2>&1 &
 PORT_HOG_PID=$!
 
-# Then run client; the local_tunnel_status check should see "external-healthy"
-# and skip the tunnel. NOT the same as the multi-user case (different OS user)
-# but exercises the local-collision branch.
+# Then run client. A plain http.server does NOT answer /health, so
+# local_tunnel_status classifies this as "other-or-broken", not
+# "external-healthy" -- it exercises the local-collision refusal, not the
+# adopt-an-existing-proxy branch.
 
 # Cleanup:
 kill $PORT_HOG_PID
+```
+
+To reach the `external-healthy` branch you need something that actually
+answers `/health` — in practice a real argo-proxy running locally (the
+on-compute-node case). Since 2026-08-10 that branch also verifies the
+listener belongs to your OS account:
+
+- **owned by you** → adopted, as before;
+- **not attributable to you** (typically another user's argo-proxy on a
+  shared node) → refused, with an explanation. Routing through it would
+  bill your requests to their Argo identity.
+
+Override for a deliberately-shared proxy:
+
+```sh
+ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1 bash argo-anywhere.sh client
+```
+
+Testing the refusal honestly needs a second account on the node. A
+cheaper approximation is to hide `lsof`, which makes the listener
+unattributable and drives the same code path:
+
+```sh
+# With a real argo-proxy of your own already serving the port:
+PATH=/nonexistent:/usr/bin:/bin bash argo-anywhere.sh client
+# Expect: "NOT attributable to '<you>'" + refusal (fail-closed behaviour).
 ```
 
 ### On-node test 6: SSH attempt tracker

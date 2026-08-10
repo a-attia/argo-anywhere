@@ -5365,6 +5365,47 @@ monitor_tunnel_loop() {
 # These helpers do the detection and prompting. ensure_or_reuse_tunnel ties
 # them together into the decision tree mode_client and mode_tunnel call.
 
+# _listener_is_ours <port>: return 0 only if the LOCAL listener on <port> can
+# be POSITIVELY attributed to the current OS user; 1 otherwise.
+#
+# Runs on the NODE (called from mode_server), not the laptop.
+#
+# The whole value is in the asymmetry of unprivileged lsof on Linux:
+#
+#   * a process WE own      -> `lsof -t` prints its pid, `ps -o user=` names us
+#   * another user's socket -> `lsof -t` prints NOTHING (no permission)
+#
+# So an empty result means "not attributable to us", which on a port that is
+# demonstrably serving means "someone else's". Measured directly on
+# compute-386-01 (2026-08-10): our own :64751 returned pid + `aattia`, while a
+# co-tenant's :64742 answered /health with an empty `lsof -t`.
+#
+# FAIL-CLOSED CONTRACT: every uncertain outcome returns 1 (not ours). If lsof
+# is missing, or the pid vanished between calls, or `ps` cannot name an owner,
+# we refuse to claim ownership. The caller turns a 1 into either "keep waiting"
+# or a hard refusal -- both safe. Returning 0 on uncertainty would re-open
+# exactly the misattachment this exists to prevent.
+_listener_is_ours() {
+  local port="$1"
+  command -v lsof >/dev/null 2>&1 || return 1
+  local pid
+  # SIGPIPE-resilient (P1 / D-011): head closes the pipe, lsof takes SIGPIPE,
+  # and under `set -o pipefail` the bare assignment would trip set -e.
+  pid="$( { lsof -nPi ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1; } || true )"
+  [ -n "$pid" ] || return 1
+  local owner
+  owner="$(ps -o user= -p "$pid" 2>/dev/null | awk '{$1=$1;print}')"
+  [ -n "$owner" ] || return 1
+  local me
+  me="$(id -un 2>/dev/null)"
+  [ -n "$me" ] || return 1
+  # Compare the OS account (correct here): the question is "did the process we
+  # just spawned come up?", not "which Argonne identity will it bill?" -- the
+  # latter is H5's job at the pre-launch reuse decision, where the config's
+  # `user:` field is the right oracle.
+  [ "$owner" = "$me" ]
+}
+
 # local_tunnel_status: classify the local listener on PROXY_PORT.
 # Echoes one of:
 #   free                -- nothing bound; safe to start a new tunnel
@@ -5822,9 +5863,60 @@ ensure_or_reuse_tunnel() {
       SSH_TUNNEL_PID=""
       return 2 ;;
     external-healthy)
-      ok "argo-proxy is reachable on http://localhost:${PROXY_PORT}/v1 via an"
-      ok "  existing local listener (not our SSH tunnel). Using it directly."
-      return 2 ;;
+      # IDENTITY GATE (Defect 5, 2026-08-10). This branch adopts a listener
+      # that is NOT our tunnel, purely because it answers /health. That is
+      # reachability read as ownership -- the same inference S3 of
+      # notes/impl_shared_node_transport.md argues is unsound in a commons,
+      # and the one warm path with no mux socket to appeal to. The other
+      # reuse branches are anchored by evidence we control: the socket lives
+      # in our 0700 ~/.ssh/sockets, its name pins the destination host (P3 /
+      # local_tunnel_destination), and the far-end port is fixed by the -L
+      # spec at creation. This branch has none of that.
+      #
+      # On a shared compute node (the branch's own stated use case -- a local
+      # argo-proxy rather than a tunnel) the listener may well be a
+      # CO-TENANT's argo-proxy, which answers /health identically because it
+      # is the same software. Adopting it sends our requests through their
+      # process, billed to their Argo identity. That is precisely the
+      # 2026-08-10 incident, in the shape it takes when running on-node.
+      #
+      # The check is FREE here: we are on the same host as the listener, so
+      # _listener_is_ours answers locally with no SSH round trip (unlike the
+      # ours-healthy-* branches, where the far end is a different machine).
+      #
+      # Note it can only ever REFUSE a genuinely foreign listener: if our own
+      # tunnel were merely misclassified (ps-glob drift), the ssh process is
+      # still owned by us, so the gate passes. It is strictly weaker than the
+      # classification above it and cannot break a working setup.
+      if _listener_is_ours "$PROXY_PORT"; then
+        ok "argo-proxy is reachable on http://localhost:${PROXY_PORT}/v1 via an"
+        ok "  existing local listener (not our SSH tunnel); owned by us. Using it."
+        return 2
+      fi
+      local _me_now; _me_now="$( { id -un 2>/dev/null; } || true )"
+      if [ "${ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY:-0}" = 1 ]; then
+        warn "Listener on :${PROXY_PORT} is NOT attributable to '${_me_now}', but"
+        warn "  ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1 is set; using it anyway."
+        warn "  Requests may be attributed to whoever owns that process."
+        return 2
+      fi
+      err "Something is serving :${PROXY_PORT} locally, but it is NOT our tunnel"
+      err "  and NOT attributable to '${_me_now}'."
+      err ""
+      err "  Unprivileged lsof cannot see across users, so 'no owner' means"
+      err "  'someone else's process', never 'nobody'. On a shared compute node"
+      err "  this is most likely another user's argo-proxy -- it answers /health"
+      err "  exactly like yours would."
+      err ""
+      err "  Refusing to use it: your requests would be sent through their proxy"
+      err "  and billed to THEIR Argo identity."
+      err ""
+      err "  Options:"
+      err "    * pick another port:  $(basename "$0") --port <new_port> ..."
+      err "    * inspect it:         lsof -nPi :${PROXY_PORT} -sTCP:LISTEN"
+      err "    * if you know this listener is safe to share:"
+      err "        ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1 $(basename "$0") ..."
+      die "Refusing to route through an unattributable argo-proxy." ;;
     ours-unhealthy-fg)
       warn "Found a local ssh tunnel on port ${PROXY_PORT} but /health is silent;"
       warn "  killing it and starting a fresh one."
@@ -7176,46 +7268,6 @@ _dump_session_output_capture() {
   err ""
 }
 
-# _listener_is_ours <port>: return 0 only if the LOCAL listener on <port> can
-# be POSITIVELY attributed to the current OS user; 1 otherwise.
-#
-# Runs on the NODE (called from mode_server), not the laptop.
-#
-# The whole value is in the asymmetry of unprivileged lsof on Linux:
-#
-#   * a process WE own      -> `lsof -t` prints its pid, `ps -o user=` names us
-#   * another user's socket -> `lsof -t` prints NOTHING (no permission)
-#
-# So an empty result means "not attributable to us", which on a port that is
-# demonstrably serving means "someone else's". Measured directly on
-# compute-386-01 (2026-08-10): our own :64751 returned pid + `aattia`, while a
-# co-tenant's :64742 answered /health with an empty `lsof -t`.
-#
-# FAIL-CLOSED CONTRACT: every uncertain outcome returns 1 (not ours). If lsof
-# is missing, or the pid vanished between calls, or `ps` cannot name an owner,
-# we refuse to claim ownership. The caller turns a 1 into either "keep waiting"
-# or a hard refusal -- both safe. Returning 0 on uncertainty would re-open
-# exactly the misattachment this exists to prevent.
-_listener_is_ours() {
-  local port="$1"
-  command -v lsof >/dev/null 2>&1 || return 1
-  local pid
-  # SIGPIPE-resilient (P1 / D-011): head closes the pipe, lsof takes SIGPIPE,
-  # and under `set -o pipefail` the bare assignment would trip set -e.
-  pid="$( { lsof -nPi ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1; } || true )"
-  [ -n "$pid" ] || return 1
-  local owner
-  owner="$(ps -o user= -p "$pid" 2>/dev/null | awk '{$1=$1;print}')"
-  [ -n "$owner" ] || return 1
-  local me
-  me="$(id -un 2>/dev/null)"
-  [ -n "$me" ] || return 1
-  # Compare the OS account (correct here): the question is "did the process we
-  # just spawned come up?", not "which Argonne identity will it bill?" -- the
-  # latter is H5's job at the pre-launch reuse decision, where the config's
-  # `user:` field is the right oracle.
-  [ "$owner" = "$me" ]
-}
 
 _dump_session_output_screen() {
   local session="$1"
@@ -11229,6 +11281,15 @@ Canonical (preferred):
                                  OFF by default since v2.0 to prevent prompt
                                  bodies from being logged to disk on the
                                  compute node. Use only for debugging.
+  ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1
+                                 use a healthy local listener even when it
+                                 can't be attributed to your OS account. By
+                                 default that is refused: on a shared node an
+                                 unattributable argo-proxy is most likely
+                                 another user's, and routing through it bills
+                                 YOUR requests to THEIR Argo identity. Set
+                                 this only when you know the listener is a
+                                 deliberately shared proxy.
   ARGO_BOX_STYLE=ascii|unicode   override the box-drawing heuristic
 
 Legacy (still honored, prints a one-time deprecation warning):
