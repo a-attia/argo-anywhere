@@ -298,6 +298,64 @@ def test_devnull_redirect_actually_prevents_the_hang() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_log_display_filters_the_startup_banner() -> None:
+    """Log tails must drop argo-proxy's ASCII banner.
+
+    Live-test finding (2026-08-10): a failed start writes ~17 lines, 8 of
+    which are the banner, so a plain ``tail -n 20`` shows the banner and
+    buries the one line that matters. Both display sites must use the filter.
+    """
+    src = _engine_source()
+    body = _function_body(src, "mode_server")
+    tail = body[body.index("did not start listening") - 3000 :]
+    assert "tail -n 20 \"$_PROXY_LOG\"" not in tail, (
+        "raw tail buries the error under the banner; use _log_tail_meaningful"
+    )
+    assert "tail -n 30 \"$_PROXY_LOG\"" not in tail
+    assert tail.count("_log_tail_meaningful") >= 2, (
+        "both the refusal path and the timeout path must filter"
+    )
+
+
+def test_banner_filter_keeps_the_error_and_drops_the_art() -> None:
+    """Behavioural: feed a real captured failure log through the filter."""
+    src = _engine_source()
+    helper = _function_body(src, "_log_tail_meaningful")
+    # Verbatim shape of a real failed start (captured on compute-386-01).
+    sample = (
+        "\n"
+        " █████╗ ██████╗ ██████╗  ██████╗\n"
+        "██╔══██╗██╔══██╗██╔════╝ ██╔═══██╗\n"
+        "╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝\n"
+        "\n"
+        "2026-08-10 13:08:27 | INFO     | [cli] ARGO PROXY v3.2.3\n"
+        "2026-08-10 13:08:29 | WARNING  | [config] Warning: Port 64742 is already in use.\n"
+        "Enter port [64185] [Y/n/number]: 2026-08-10 13:08:29 | ERROR | [cli] "
+        "An error occurred while starting the server: EOF when reading a line\n"
+    )
+    harness = "set -uo pipefail\n" + helper + '\n_log_tail_meaningful "$1" 30\n'
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "argoproxy.out"
+        log.write_text(sample)
+        script = Path(td) / "h.sh"
+        script.write_text(harness)
+        out = subprocess.run(
+            ["bash", str(script), str(log)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    assert out.returncode == 0, out.stderr
+    assert "Port 64742 is already in use" in out.stdout
+    assert "EOF when reading a line" in out.stdout
+    assert "█" not in out.stdout and "╔" not in out.stdout, (
+        f"banner glyphs survived the filter:\n{out.stdout}"
+    )
+    assert "" == "".join(ln for ln in out.stdout.splitlines() if not ln.strip()), (
+        "blank padding should be dropped too"
+    )
+
+
 def test_timeout_branch_calls_the_capture_helpers() -> None:
     """The start-timeout branch must attempt an automatic dump for screen and
     tmux before falling back to manual-inspection instructions."""

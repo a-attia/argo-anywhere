@@ -897,6 +897,59 @@ checked, so a green box no longer implies a node it never probed.
 hygiene — no design decision, no user-facing flag, correct under either
 transport option.
 
+#### Tier 1 live verification (2026-08-10, `compute-386-01`)
+
+Unit tests cannot exercise a real cross-user collision, so Tier 1 was
+verified on the node itself. **The maintainer's live channel was
+running throughout and had to survive**, which shaped the method: a
+normal `connect` could not be used, because `SCREEN_SESSION` is a single
+global name (`argovproxy`) and `mode_server`'s multi-port guard would
+have offered to replace the running proxy. Instead each test drove the
+engine's **own** code — launch line and wait loop extracted verbatim by
+regex — inside a sandbox: `SCREENDIR=/tmp/argotest_screens`, a distinct
+session name, and a copied config. `SCREENDIR` isolation was verified
+first (a sandbox `screen -S argovproxy -X quit` returned
+`No screen session found` while the real session stayed up).
+
+The node presented the incident configuration for free: our proxy on
+`:64751` and a co-tenant's on `:64742`, both answering `/health`
+identically.
+
+| Test | Result |
+|:---|:---|
+| Item 1 — real collision, engine launch line | Session reaped in **3s** (was: hang until the 20s timeout) |
+| Item 1 — durable log | **2158 bytes survived** the reaped session |
+| Item 2 — `_listener_is_ours` | `:64751` → OURS; `:64742` → not-ours; both answer `/health` |
+| Item 2 — fail-closed | no `lsof` on `PATH` → not-ours; unbound port → not-ours |
+| Wait loop (verbatim) case A | our port → succeeds immediately |
+| Wait loop (verbatim) case B | co-tenant's port → **hard refusal, not a timeout** |
+
+The log ends exactly where the analysis predicted:
+
+```text
+WARNING | [config] Warning: Port 64742 is already in use.
+Enter port [64185] [Y/n/number]: ERROR | [cli] An error occurred while
+  starting the server: EOF when reading a line
+```
+
+Post-test the node was byte-for-byte as snapshotted: same pids
+(`4092653`/`4092655`), same `argovproxy` session, `port: 64751`
+unchanged, no leftover files.
+
+**One defect found and fixed by this exercise.** A failed start writes
+~17 lines of which 8 are argo-proxy's ASCII banner, so the `tail -n 20`
+in the refusal path showed the banner and buried the collision line.
+Added `_log_tail_meaningful`, which filters banner glyphs and blank
+padding at **display** time — deliberately not `--no-banner` at launch,
+so the on-disk log and anyone attaching via `screen -r` still see
+argo-proxy's normal output.
+
+Two notes for the eventual full end-to-end run (still outstanding):
+nothing here exercised `remote_bootstrap`, `scp`, or a genuine cold
+`connect`; and the `tee` pipeline means the pipeline's exit status is
+now `tee`'s, which is inert under `screen -dm` but unverified against a
+real `mode_server` return path.
+
 What remains is narrower but not smaller. The **cold** bootstrap path is
 now guarded at both ends (H5 before launch, `_listener_is_ours` after);
 the **warm** path is not guarded at all

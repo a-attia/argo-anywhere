@@ -7127,6 +7127,24 @@ ensure_argoproxy_installed() {
   ok "PyYAML in ${venv}: ${_yaml_ver}"
 }
 
+# _log_tail_meaningful <file> <n>: print the last <n> INTERESTING lines of a
+# log, dropping argo-proxy's ASCII-art banner and blank padding.
+#
+# Live-test finding (2026-08-10, on compute-386-01): a failed start writes
+# ~17 lines, 8 of which are the startup banner. A plain `tail -n 20` therefore
+# shows the banner and buries the one line that matters ("Warning: Port NNNNN
+# is already in use"). Filter at DISPLAY time rather than passing --no-banner
+# at launch, so the on-disk log and anyone attaching with `screen -r` still
+# see argo-proxy's normal output.
+_log_tail_meaningful() {
+  local file="$1" n="${2:-20}"
+  [ -s "$file" ] || return 0
+  # Drop the banner's box/block glyphs and whitespace-only lines; keep
+  # everything else verbatim (argo-proxy log lines, Python tracebacks, ...).
+  # grep -a: the banner makes the log look binary to some grep builds.
+  { grep -avE '^[[:space:]]*$|[█╗╔╝╚═║]' "$file" || true; } | tail -n "$n"
+}
+
 # _dump_session_output_screen / _dump_session_output_tmux <session>:
 # best-effort capture of a detached session's visible output, printed to
 # stderr under a clear header. Used by mode_server's start-timeout branch so
@@ -7755,7 +7773,7 @@ mode_server() {
       err ""
       if [ -s "$_PROXY_LOG" ]; then
         err "  Our own argo-proxy's output (${_PROXY_LOG}):"
-        tail -n 20 "$_PROXY_LOG" >&2
+        _log_tail_meaningful "$_PROXY_LOG" 20 >&2
         err ""
       fi
       err "  Fix: pick another port, e.g."
@@ -7779,7 +7797,7 @@ mode_server() {
       if [ -s "$_PROXY_LOG" ]; then
         err ""
         err "--- last 30 lines of ${_PROXY_LOG} ---"
-        tail -n 30 "$_PROXY_LOG" >&2
+        _log_tail_meaningful "$_PROXY_LOG" 30 >&2
         err "--- end log ---"
         err ""
         _dumped=1
