@@ -1194,6 +1194,53 @@ The engine↔web-UI coupling rules in [`AGENTS.md`](../AGENTS.md)
 changes; a `--socket` / `--transport` flag would need the tri-lockstep
 treatment described there for D-032.
 
+### The web UI carries Defect 3 independently (found 2026-08-10; NOT fixed)
+
+Checked while deciding whether to switch to web-UI work. Two findings,
+and the second is a real bug.
+
+**No coupling drift from this session.** The web UI does not parse the
+engine's summary box — every occurrence of `ALL GREEN`, `Cached node`,
+`DEGRADED`, `Tunnel goes to` and `Last connected to` is inside the
+engine. `src/argo_anywhere/status.py` computes its own view from local
+signals. So none of items 1–3, 5a or the Q10 fix created a web-side
+inconsistency, and the D-032 tri-lockstep surfaces are untouched (no
+user-facing flag changed).
+
+**But `status.py` has Defect 3, independently.** `channel_health()`
+(`status.py:140`) is a bare `GET /health` on the cached port, and the
+UI renders that single boolean as a *named* link:
+
+```js
+setHop('hopNode', tunnelUp ? 'up' : 'unknown');
+el('nodeSub').textContent  = st.node ? st.node.split('.')[0] : '—';
+el('chAddr').innerHTML     = `localhost:${cachedPort} → ${st.node}`;
+```
+
+`tunnelUp` comes from the health poll; `st.node` comes from
+`cached_state()` — the same never-re-verified cache the engine's card
+used to print. The composite claim ("you are connected to *this node*")
+rests on a probe that cannot identify the far end. Arguably worse than
+the engine's text row was: a diagram with a lit node reads as a stronger
+assertion than a line of text.
+
+**The right fix is item 3's, not item 2's.** `status.py`'s docstring
+states a deliberate constraint — "no ANL contact of its own" — so it
+must not gain an SSH round trip. It does not need one:
+`local_tunnel_destination` is a pure local parse of the listener's
+ControlPath socket name, and `status.py` already shells out to `lsof`
+in `local_listeners()` (`:164`), so mirroring it adds no new capability
+and no network access. Show the real destination beside the lit node,
+and label the cached value as cached.
+
+**Deliberately deferred**, on the same reasoning that keeps the engine
+first: the transport decision (Q1) may add a `--socket` / `--transport`
+flag, which per AGENTS.md triggers the D-032 tri-lockstep (engine flag ↔
+launcher popover field ↔ `build_launch_argv`). A web pass done now would
+likely be redone. Sequence: bind test → `configure`/`run` live pass →
+transport decision → **one** web pass that picks up this honesty fix
+together with whatever the transport decision requires.
+
 ---
 
 ## 8. What was verified by execution
