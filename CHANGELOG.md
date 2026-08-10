@@ -40,6 +40,23 @@ decisions D-001 through D-030) and the tag messages on the repo.
   analysis (five composing defects, of which this is one) is in
   [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md).
 
+- **argo-anywhere no longer reports success when another user's
+  argo-proxy is holding your port.** On a shared compute node, a
+  co-tenant's argo-proxy answers the health check exactly like your own
+  would — it is the same software. Startup only checked that *something*
+  on the port responded, so if your own proxy failed to start while a
+  stranger's was already listening, argo-anywhere reported success and
+  the tunnel carried your requests into their process, where they were
+  billed to *their* Argo identity. The summary box showed ALL GREEN
+  throughout.
+
+  Startup now also confirms the responding process actually belongs to
+  you, and refuses outright if it does not — immediately, rather than
+  after a 20-second wait, since waiting cannot free a port someone else
+  holds. The refusal explains what happened and points at `--port` /
+  `--auto-port`. If you have been running against a busy node, this may
+  surface a collision that was previously silent.
+
 - **`connect` tunnel no longer dies after ~1 hour of idle** (PLAN.md
   D-033). The quick-connect **Connect** button (and the `connect` /
   `tunnel` / `client` / `setup` CLI verbs) held the SSH tunnel only as

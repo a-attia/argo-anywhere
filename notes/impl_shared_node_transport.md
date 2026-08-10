@@ -716,7 +716,7 @@ flag, and is strictly correct under either Option A or Option B.
 | # | Change | Defect | Status | Why first |
 |:--|:---|:---|:---|:---|
 | 1 | `< /dev/null` on launch + session-output capture in the timeout branch | 2 | **SHIPPED 2026-08-10** | Turns an indefinite silent hang into a ~1s diagnosable `EOFError` |
-| 2 | Confirm our own session/pid before trusting `/health` at `:7557` | 4 | pending | Stops a stranger's proxy from satisfying our liveness check |
+| 2 | Confirm our own session/pid before trusting `/health` at `:7557` | 4 | **SHIPPED 2026-08-10** | Stops a stranger's proxy from satisfying our liveness check |
 | 3 | `status` honesty via `local_tunnel_destination` | 3 | pending | Stops `ALL GREEN` overclaiming; pure reporting change |
 
 **Item 1 shipped 2026-08-10 (in two commits — see the durability
@@ -797,11 +797,63 @@ which is precisely what `< /dev/null` buys. The bind test then earns
 its place by moving the failure earlier and making the message better —
 which is worth having, but is not what keeps us correct.
 
-With item 1 shipped, the incident's *diagnosability* problem is closed:
-the same collision now fails in about a second with the upstream warning
-text quoted back to the user, instead of hanging for 20s behind a
-message that named only the symptom. The *misattachment* problem is
-untouched — that is items 2, 5 and the transport decision.
+**Item 2 shipped 2026-08-10.** The post-launch wait now ANDs the
+`/health` curl with a new `_listener_is_ours "$PROXY_PORT"` under an
+`IDENTITY-BEFORE-SUCCESS INVARIANT` comment block. A foreign listener is
+a **hard, immediate failure** rather than a 20s timeout — waiting cannot
+help when the port is already held — and the refusal names the way out
+(`--port` / `--auto-port`) and prints our own proxy's log tail.
+
+The discriminator is a pleasing inversion of
+§[2.1](#21-defect-1--collision-detection-is-blind-across-users): the
+unprivileged-`lsof` blindness that makes it useless *before* launch
+becomes a reliable positive signal *after* launch, because a proxy **we**
+started is always attributable to us. Empty output on a port that is
+demonstrably serving therefore means "someone else's", never "nobody's".
+
+Verified on the live node (2026-08-10), which happened to present the
+exact incident configuration — both ports answering `/health`
+identically:
+
+```text
+port 64751: health=answers  verdict=OURS        <- our proxy
+port 64742: health=answers  verdict=not-ours    <- the co-tenant's
+```
+
+`_listener_is_ours` is **fail-closed by contract**: missing `lsof`, a
+vanished pid, or an unnameable owner all return "not ours". Claiming
+ownership on missing evidence would reopen precisely the misattachment
+the helper exists to prevent — the same reasoning as H5's
+"positively confirm or refuse" rule
+(§[3](#3-why-the-obvious-fix-is-not-a-fix)), applied to the post-launch
+question instead of the pre-launch one. It compares the **OS account**
+(`id -un`), which is the right oracle here: the question is "did the
+process we just spawned come up?", not "whose Argo identity will it
+bill?" — the latter remains H5's job via the config's `user:` field.
+
+Pinned by `tests/test_engine_listener_identity.py` (12 tests): the
+wait-loop AND, the hard-failure ordering, fail-closed structure (every
+guard returns 1; no unconditional `return 0`), the D-011 SIGPIPE guard
+on the `lsof | head` capture, `set -e` survival, plus behavioural cases
+for own / unbound / dead / no-lsof listeners. Verified to fail when the
+identity check is removed.
+
+With items 1 and 2 shipped, the incident as it actually occurred can no
+longer reach `ALL GREEN`. Item 1 makes the collision fail in about a
+second with the upstream warning quoted back to the user, instead of
+hanging for 20s behind a message that named only the symptom; item 2
+stops the co-tenant's proxy from standing in for ours at the moment of
+success.
+
+What remains is narrower but not smaller. The **cold** bootstrap path is
+now guarded at both ends (H5 before launch, `_listener_is_ours` after);
+the **warm** path is not guarded at all
+(§[2.5](#25-defect-5--h5-never-runs-on-a-warm-reconnect), Defect 5) —
+every reconnect that reuses an existing tunnel still trusts a bare
+`/health`. That is Tier 2 item 5 plus the transport decision, and it is
+where the remaining misattachment risk lives. Item 3 (`status` honesty)
+is also still open: the summary box continues to report a verdict it
+cannot actually justify.
 
 **Tier 2 — small design decisions, no transport commitment.**
 

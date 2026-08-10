@@ -630,6 +630,39 @@ asserts the two engine copies stay byte-identical. Background:
 [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md)
 (Tier 1 item 1).
 
+### Identity-before-success invariant (argo-proxy post-launch wait)
+
+**`mode_server`'s post-launch wait MUST confirm the `/health` responder
+is ours** — `until curl … /health && _listener_is_ours "$PROXY_PORT"`.
+Search the engine for `IDENTITY-BEFORE-SUCCESS INVARIANT`.
+
+Why: on a shared node another user's argo-proxy holding our port answers
+`/health` identically (same software), so a bare curl proves only that
+*something* serves. In the 2026-08-10 incident our proxy hung at a port
+prompt, a co-tenant's satisfied the wait, `mode_server` reported success,
+and the client tunnelled into a stranger's process under ALL GREEN.
+
+`_listener_is_ours <port>` exploits an inversion: the unprivileged-`lsof`
+blindness that makes it useless *before* launch (can't see other users'
+sockets — Defect 1) is a reliable positive signal *after* launch, since
+a proxy we started is always attributable to us. Empty `lsof -t` on a
+port that demonstrably serves means "someone else's", not "nobody's".
+
+- **Fail-closed by contract.** Missing `lsof`, vanished pid, unnameable
+  owner → "not ours". Never claim ownership on missing evidence; that
+  is the same rule as H5's "positively confirm or refuse", applied
+  post-launch. Do not add a `return 0` to a guard clause.
+- It compares the **OS account** (`id -un`), deliberately. The question
+  is "did the process we just spawned come up?" — *not* "whose Argo
+  identity will it bill?", which stays H5's job via the config `user:`.
+- A foreign listener is a **hard failure, not a timeout**: waiting
+  cannot free a held port, so we refuse immediately and name the fix
+  (`--port` / `--auto-port`).
+
+Pinned by `tests/test_engine_listener_identity.py`. Background:
+[`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md)
+§2.4 (Defect 4), Tier 1 item 2.
+
 ### Server-mode logging trick
 
 The early `bash "$0" server | tee -a $LOG; exit ${PIPESTATUS[0]}`

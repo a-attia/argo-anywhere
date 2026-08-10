@@ -7158,6 +7158,47 @@ _dump_session_output_capture() {
   err ""
 }
 
+# _listener_is_ours <port>: return 0 only if the LOCAL listener on <port> can
+# be POSITIVELY attributed to the current OS user; 1 otherwise.
+#
+# Runs on the NODE (called from mode_server), not the laptop.
+#
+# The whole value is in the asymmetry of unprivileged lsof on Linux:
+#
+#   * a process WE own      -> `lsof -t` prints its pid, `ps -o user=` names us
+#   * another user's socket -> `lsof -t` prints NOTHING (no permission)
+#
+# So an empty result means "not attributable to us", which on a port that is
+# demonstrably serving means "someone else's". Measured directly on
+# compute-386-01 (2026-08-10): our own :64751 returned pid + `aattia`, while a
+# co-tenant's :64742 answered /health with an empty `lsof -t`.
+#
+# FAIL-CLOSED CONTRACT: every uncertain outcome returns 1 (not ours). If lsof
+# is missing, or the pid vanished between calls, or `ps` cannot name an owner,
+# we refuse to claim ownership. The caller turns a 1 into either "keep waiting"
+# or a hard refusal -- both safe. Returning 0 on uncertainty would re-open
+# exactly the misattachment this exists to prevent.
+_listener_is_ours() {
+  local port="$1"
+  command -v lsof >/dev/null 2>&1 || return 1
+  local pid
+  # SIGPIPE-resilient (P1 / D-011): head closes the pipe, lsof takes SIGPIPE,
+  # and under `set -o pipefail` the bare assignment would trip set -e.
+  pid="$( { lsof -nPi ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -n1; } || true )"
+  [ -n "$pid" ] || return 1
+  local owner
+  owner="$(ps -o user= -p "$pid" 2>/dev/null | awk '{$1=$1;print}')"
+  [ -n "$owner" ] || return 1
+  local me
+  me="$(id -un 2>/dev/null)"
+  [ -n "$me" ] || return 1
+  # Compare the OS account (correct here): the question is "did the process we
+  # just spawned come up?", not "which Argonne identity will it bill?" -- the
+  # latter is H5's job at the pre-launch reuse decision, where the config's
+  # `user:` field is the right oracle.
+  [ "$owner" = "$me" ]
+}
+
 _dump_session_output_screen() {
   local session="$1"
   command -v screen >/dev/null 2>&1 || return 0
@@ -7674,9 +7715,54 @@ mode_server() {
       ;;
   esac
 
-  # 7) Wait for it to listen.
+  # 7) Wait for it to listen -- and confirm the answer is OURS.
+  #
+  # IDENTITY-BEFORE-SUCCESS INVARIANT (2026-08-10). A bare
+  # `curl 127.0.0.1:$PORT/health` is NOT proof that the argo-proxy we just
+  # launched came up: on a shared node another user's proxy may already hold
+  # this port, and it answers /health identically (it is the same software).
+  # That is what happened in the 2026-08-10 field incident -- our proxy hung
+  # at a port prompt, a co-tenant's proxy satisfied this wait, mode_server
+  # reported success, and the client tunnelled into a stranger's process
+  # while the summary box printed ALL GREEN.
+  #
+  # `_listener_is_ours` closes it. The discriminator is the very blindness
+  # that makes lsof useless BEFORE launch (an unprivileged lsof cannot
+  # attribute another user's socket): after launch it inverts into a reliable
+  # positive signal, because a proxy WE started is always attributable to us.
+  # Measured on compute-386-01, 2026-08-10 -- our own port yields our pid and
+  # `id -un`; a co-tenant's port answers /health with an EMPTY lsof -t.
+  #
+  # Ordering matters: /health first (cheap, and the common path), identity
+  # only once something answers. This mirrors mode_server's own H5 rule for
+  # the pre-launch reuse decision -- require a POSITIVE match, never infer
+  # ownership from absence of evidence.
   local waited=0
-  until curl -fsS --max-time 2 "http://127.0.0.1:${PROXY_PORT}/health" >/dev/null 2>&1; do
+  until curl -fsS --max-time 2 "http://127.0.0.1:${PROXY_PORT}/health" >/dev/null 2>&1 \
+        && _listener_is_ours "$PROXY_PORT"; do
+    # Distinguish "nothing is up yet" (keep waiting) from "something is up but
+    # it is not ours" (waiting cannot help -- the port is taken and our proxy
+    # will never get it). The latter is a hard, immediate failure.
+    if curl -fsS --max-time 2 "http://127.0.0.1:${PROXY_PORT}/health" >/dev/null 2>&1; then
+      err "Port ${PROXY_PORT} on $(hostname) is served by a process that is NOT ours."
+      err "  /health answers, but the listener cannot be attributed to '$(id -un)'."
+      err "  On a shared node this is almost certainly another user's argo-proxy:"
+      err "  unprivileged lsof cannot see across users, so an empty result means"
+      err "  'someone else', never 'nobody'."
+      err ""
+      err "  Refusing to report success: your requests would be sent through their"
+      err "  proxy and billed to THEIR Argo identity, not yours."
+      err ""
+      if [ -s "$_PROXY_LOG" ]; then
+        err "  Our own argo-proxy's output (${_PROXY_LOG}):"
+        tail -n 20 "$_PROXY_LOG" >&2
+        err ""
+      fi
+      err "  Fix: pick another port, e.g."
+      err "    $(basename "$0") --port <new_port> client"
+      err "  or use --auto-port to have one chosen for you."
+      die "Refusing to attach to another user's argo-proxy."
+    fi
     sleep 1; waited=$((waited+1))
     if [ "$waited" -ge 20 ]; then
       err "argo-proxy did not start listening within ${waited}s."
