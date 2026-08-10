@@ -944,11 +944,63 @@ padding at **display** time — deliberately not `--no-banner` at launch,
 so the on-disk log and anyone attaching via `screen -r` still see
 argo-proxy's normal output.
 
-Two notes for the eventual full end-to-end run (still outstanding):
-nothing here exercised `remote_bootstrap`, `scp`, or a genuine cold
-`connect`; and the `tee` pipeline means the pipeline's exit status is
-now `tee`'s, which is inert under `screen -dm` but unverified against a
-real `mode_server` return path.
+### Cold `connect` end-to-end (2026-08-10, `compute-02` / `compute-386-02`)
+
+The sandboxed tests above deliberately skipped `scp`, `remote_bootstrap`
+and a real `mode_server`. Those ran here, **PASS**.
+
+Method: the agent session's own model traffic flows through the
+`:64751` channel, so tearing it down would have stopped the session
+mid-test. Instead the run targeted a **different node on a different
+port** (`--node compute-02.cels.anl.gov --port 64801`), leaving
+`:64751`, the `argovproxy` session on `compute-386-01`, and its mux
+master untouched. A standalone `RESTORE.sh` was written **before** any
+change, so recovery never depended on the agent surviving. Backups:
+node `config.yaml`, the three laptop caches, and `opencode/config.json`.
+
+| Stage | Result |
+|:---|:---|
+| `scp` of the engine to the node | OK |
+| `remote_bootstrap` → `mode_server` | OK (python, venv, argo-proxy 3.2.3, PyYAML 6.0.3 all detected) |
+| Launch + `tee` (item 1) | `~/argoproxy.out` written, 3863 bytes — **first real-bootstrap proof** |
+| Wait loop + `_listener_is_ours` (item 2) | Passed; listener attributable (pid 3055962) |
+| Tunnel open (mux-owned forward, D-003) | OK — foreground `ssh` exited, master took the forward |
+| Summary (item 3) | `ALL GREEN — endpoint healthy`, `Tunnel goes to compute-02… (matches cached node)` |
+| Both channels concurrently | `:64751` and `:64801` healthy at the same time |
+
+Teardown restored every value to its pre-test baseline: channel healthy,
+mux `pid=53382`, single socket, `node=compute-01`/`port=64751`,
+`baseURL localhost:64751`, node config sha `277fa23fb8fe9cc5`, `:64801`
+clear.
+
+**Finding — Q10 confirmed in the field, and it is a real UX trap.** The
+first attempt FAILED, correctly and informatively. Because `$HOME` is
+shared NFS, `compute-02`'s bootstrap read the *same* `config.yaml` that
+`compute-01`'s proxy is using, saw `port: 64751` against a requested
+`64801`, and refused:
+
+```text
+[err ] Port mismatch on compute-386-02:
+[err ]   client asked us to serve on port : 64801
+[err ]   /home/aattia/.config/argoproxy/config.yaml declares port : 64751
+[err ] Refusing to launch argo-proxy with a config that disagrees on port.
+```
+
+The 4b readback did exactly its job — fail-closed, no wrong bind. But
+note the shape: **a user cannot run argo-anywhere against two nodes at
+once without hand-editing the shared config**, and the error names the
+config rather than the underlying cause (one config file, many nodes).
+This is Q10 with a concrete reproduction; it should be treated as a
+scheduled fix, not an open question.
+
+Second-order finding: `handle_config_file`'s `[k/b/d/a]` prompt has **no
+`-y` bypass**. Under any non-TTY caller it takes the `k` default, which
+then guarantees the 4b refusal. Anything automating a port change has to
+pre-write the config. Worth revisiting alongside Q10.
+
+Still unverified after this run: `pick_node` (bypassed by `--node`), the
+`tmux` and `nohup` launcher branches, and `configure`/`run` against a
+freshly created channel.
 
 What remains is narrower but not smaller. The **cold** bootstrap path is
 now guarded at both ends (H5 before launch, `_listener_is_ours` after);
