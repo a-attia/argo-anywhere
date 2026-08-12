@@ -210,7 +210,7 @@ Section 4 for the rationale.
 
 ## Status
 
-**v3.2.1 is the current release** — `pipx install argo-anywhere` installs it.
+**v3.3.0 is the current release** — `pipx install argo-anywhere` installs it.
 The installable unit is the Python package (Model A; design decisions
 D-026..D-030): the package owns the runtime, vendors the bash engine verbatim,
 and ships the web UI and native app alongside the CLI. Releases are published
@@ -222,15 +222,15 @@ names the current release and points at those two documents rather than
 restating them — it drifted four releases behind by trying to be a changelog
 before one existed.
 
-> **Heads up if you use a busy shared compute node** *(as of 2026-08-12)*.
-> On a node where several people run argo-anywhere, v3.2.1 and earlier can
-> attach to **another user's** argo-proxy: it answers the health check
-> identically, so the tool reported success and your requests went out under
-> their Argo identity. You would see either an Argo authentication error or,
-> worse, nothing at all. The fixes are on `main` and not yet released — see
-> the `Unreleased` section of [`CHANGELOG.md`](CHANGELOG.md). If you hit this
-> before the next tag, choose `[n] next free port` when argo-anywhere reports
-> a collision, and treat a green `status` on a shared node as unconfirmed.
+> **Upgrade from v3.2.1 or earlier if you share a compute node.** On a node
+> where several people run argo-anywhere, older versions can attach to
+> **another user's** argo-proxy — it answers the health check identically, so
+> the tool reported success while your requests went out under their Argo
+> identity. You would see an Argo authentication error, or nothing at all.
+> v3.3.0 refuses to route through a proxy it cannot attribute to you, and
+> moves itself to a free port instead. Details in
+> [`CHANGELOG.md`](CHANGELOG.md); the full analysis is **D-034** in
+> [`PLAN.md`](PLAN.md).
 
 Older tags — `v1.0.0`–`v1.2.0` and the v2.x line (`v2.0.0`, `v2.1.0`, `v2.2.0`,
 the last `.sh`-era release) — still resolve, and legacy pinned `.sh` URLs keep

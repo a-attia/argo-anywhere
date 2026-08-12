@@ -70,22 +70,18 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.2.1 is the current PyPI release (2026-07-16);
-  `main` carries UNRELEASED work ahead of it.** As of 2026-08-12
-  `main` is ~21 commits ahead with the **D-034** shared-node transport
-  fixes (five composing defects + the Q10 shared-`$HOME` fix), the
-  OpenCode live-model fix, and the web-UI honesty fix. Held by the
-  maintainer's gate: nothing ships until the upgrade is tested
-  end-to-end. **Users on v3.2.1 are hitting the port collision this
-  work fixes**, so the gate is a live trade-off, not a formality.
-  Remaining: the `run` live pass and a version decision (behaviour
-  changed — the tool now refuses unattributable proxies — so not a
-  pure patch). v3.2.1 itself hotfixed a username-resolution bug in
-  v3.2.0 where `ssh -G`'s *default* `User` (the local OS username,
-  which it emits for every host whether ssh_config configures one or
-  not) outranked the username cache and suppressed the interactive
-  username prompt; recorded as amendment **A7** under D-032 in
-  `PLAN.md`.
+- **Status**: **v3.3.0 tagged 2026-08-12** — the **D-034** release
+  ("evidence, not reachability"). Closes the shared-node transport work:
+  five composing defects, the Q10 shared-`$HOME` fix, the OpenCode +
+  aider live-model fixes, the web-UI honesty fix, and Option A
+  (auto-pick a free port on collision, now the default). The
+  maintainer's release gate was satisfied by live `configure` / `run`
+  passes plus verification against a **real** cross-user collision on
+  `compute-386-01` — the incident's collision was still active, so
+  nothing had to be simulated. Engine `SCRIPT_VERSION` → `2.4.0`; suite
+  at 556. **Known-not-fixed**: every install still ships the same
+  default port, so collisions remain as likely — Option B (per-user
+  derived default) is deferred to D-035.
   **Per-release history belongs in [`CHANGELOG.md`](CHANGELOG.md), not
   here.** The remainder of this bullet is accumulated *project facts*
   (what exists and how it works) — useful, but it drifted into
@@ -271,7 +267,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: **v3.2.1** (2026-07-16, on PyPI). Release
+- **Current release**: **v3.3.0** (2026-08-12). Release
   history: [`CHANGELOG.md`](CHANGELOG.md) — the single source of
   truth for "what shipped when"; do not restate it here.
 - **Repo**: <https://github.com/a-attia/argo-anywhere>

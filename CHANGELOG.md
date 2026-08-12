@@ -12,7 +12,7 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
-## Unreleased
+## v3.3.0 — 2026-08-12
 
 > **Theme of this release**: the tool stops claiming things it has not
 > verified. A 2026-08-10 field incident on a busy shared compute node
@@ -245,6 +245,40 @@ decisions D-001 through D-030) and the tag messages on the repo.
   node, ANL username, or jump host). Sublabel text spells out the
   difference. The old single Connect button had no visible way to
   reach the override fields short of the general Actions menu.
+
+### Upgrading
+
+`pipx upgrade argo-anywhere` (or `pipx install --force argo-anywhere`).
+No configuration changes are required and nothing needs migrating.
+
+Three behaviours changed. Each has an opt-out, and each opt-out restores
+the pre-3.3.0 behaviour exactly:
+
+| If you want | Set |
+|:---|:---|
+| the old interactive port-collision prompt | `--no-auto-port` |
+| to share a proxy the tool cannot attribute to you | `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1` |
+| your model list left exactly as it is | answer `[k]` at the config prompt |
+
+**What is still not fixed**: every install ships the same default port,
+so collisions remain as *likely* as before — they are now detected,
+explained, and recovered from automatically rather than silently
+mis-routing. Making them *rare* (a per-user default port) is planned for
+a later release.
+
+### Internals
+
+- Engine `SCRIPT_VERSION` → `2.4.0` (component tag; distinct from the
+  package version by D-029).
+- Test suite 499 → 556.
+- New engine invariants, each with a marker comment in the source and a
+  pinning test module: `NO-INTERACTIVE-PROMPT` (+ its `LOG-DURABILITY
+  COROLLARY`), `IDENTITY-BEFORE-SUCCESS`, bind-test oracle,
+  `NO-SILENT-MODEL-DELETION`, `STALE-COVERAGE`.
+- Verified against a real cross-user collision on a shared ANL compute
+  node rather than a simulated one — the collision from the original
+  incident was still live. See PLAN.md D-034 "Live cross-user
+  verification".
 
 ## v3.2.1 — 2026-07-16
 

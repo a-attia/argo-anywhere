@@ -7,13 +7,17 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: **v3.2.1 RELEASED on PyPI** (2026-07-16) — a hotfix for a
-username-resolution bug in v3.2.0, where `ssh -G`'s *default* `User`
-(the local OS username, emitted for every host whether ssh_config
-configures one or not) outranked the username cache and suppressed the
-interactive username prompt. See [`CHANGELOG.md`](CHANGELOG.md) for the
-full account; the fix is recorded as amendment **A7** under **D-032**
-in Section 7 (Design decisions log) below.
+**Status**: **v3.3.0 tagged** (2026-08-12) — the **D-034** release,
+"evidence, not reachability". Closes the shared-node transport work
+after a field incident in which the tool reported `ALL GREEN` while
+routing a user's traffic through a stranger's `argo-proxy`: five
+composing defects, the Q10 shared-`$HOME` fix, two config-writer
+model-list fixes, the web-UI honesty fix, and Option A (auto-pick a free
+port on collision, now the default). Verified against a **real**
+cross-user collision, not a simulated one. See
+[`CHANGELOG.md`](CHANGELOG.md) for the user-facing account and **D-034**
+in Section 7 for the decision record. Known-not-fixed: the single
+default port shared by every install (Option B → **D-035**).
 
 The project is the Model-A Python package (D-026..D-030): the package
 owns the runtime, vendors the bash engine verbatim, and ships a web UI +
