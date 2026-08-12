@@ -354,7 +354,25 @@ def test_listener_is_ours_defined_before_both_call_sites() -> None:
 
 
 def test_external_healthy_gate_behaviour() -> None:
-    """Drive the real branch: adopt when ours, refuse when not, honour override."""
+    """Drive the real branch: adopt when ours, refuse when not, honour override.
+
+    Simulating "not ours" is the delicate part. A test cannot bind a port as
+    another user, so it has to make ``_listener_is_ours`` fail some other way.
+
+    The first version masked ``PATH`` to ``/usr/bin:/bin`` to hide ``lsof`` and
+    hit the helper's missing-binary guard. That is platform-dependent and it
+    shipped broken: macOS keeps ``lsof`` in ``/usr/sbin``, so the mask worked
+    locally, while ubuntu-latest keeps it in ``/usr/bin``, so on CI the helper
+    found it, attributed the listener to the runner's own account, and reported
+    "ours" -- the assertion failed with ``foreign_rc=2``. The test had never
+    actually run on Linux before (CI was red for unrelated reasons from
+    2026-07-23), so it looked green for a month.
+
+    Overriding ``ps`` is the portable substitute: the helper resolves the pid's
+    owner through it, so a stub that prints a name which is not ``id -un``
+    exercises the real "someone else holds this port" path -- and it does so
+    without depending on where any binary lives.
+    """
     src = _engine_source()
     body = _function_body(src, "ensure_or_reuse_tunnel")
     branch = body[body.index("    external-healthy)") :]
@@ -377,9 +395,11 @@ def test_external_healthy_gate_behaviour() -> None:
         SRV=$!
         sleep 1
         run 46711 >/dev/null 2>&1; echo "ours_rc=$?"
-        ( PATH=/nonexistent-dir:/usr/bin:/bin
+        # Shadow `ps` so the listener resolves to an account that is not ours.
+        # A shell function is enough: _listener_is_ours calls `ps` unqualified.
+        ( ps() {{ echo "definitely-not-$(id -un)"; }}
           run 46711 >/dev/null 2>&1 ); echo "foreign_rc=$?"
-        ( PATH=/nonexistent-dir:/usr/bin:/bin
+        ( ps() {{ echo "definitely-not-$(id -un)"; }}
           ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1 run 46711 >/dev/null 2>&1
         ); echo "override_rc=$?"
         kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
