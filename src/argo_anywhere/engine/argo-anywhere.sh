@@ -2293,6 +2293,45 @@ ssh_attempt_fail() {
   fi
 }
 
+# _auto_port_enabled: return 0 if a remote port collision should be resolved
+# by auto-picking the next free port, 1 if the user should be prompted.
+#
+# DEFAULT-ON since D-034 Option A (2026-08-12). It was default-OFF, which was
+# right while the probe was untrustworthy: the pre-2026-08-10 walk used an
+# unprivileged `lsof` that cannot see another user's socket, so --auto-port --
+# the flag advertised as the escape from a collision -- recommended ports a
+# co-tenant already held. Verified live on compute-386-01: the old walk over
+# 64742-64760 returned 64742, the occupied port. With the bind-test walk it
+# returns 64743, confirmed bindable. The reason to distrust the flag is gone.
+#
+# Why default-on matters beyond convenience: the interactive prompt is
+# unreachable for non-TTY callers. `-y`, `--ensure`, and EVERY web-UI launch
+# fall through to the prompt branch and die on a collision, on a node where
+# collision is the expected state (every install ships the same
+# PROXY_PORT_DEFAULT). Default-off meant the tool had a working recovery path
+# that its own GUI could never take.
+#
+# Precedence (explicit beats implicit, both directions):
+#   1. --auto-port / --no-auto-port on the CLI  -> AUTO_PORT=1 / 0
+#   2. ARGO_ANYWHERE_AUTO_PORT=0 or 1           -> that
+#   3. default                                  -> ON
+#
+# NOTE this only fires AFTER a collision is detected on the already-chosen
+# port; it never influences the initial choice (that is resolve_port). The
+# structural fix -- not every user starting at the same port -- is deferred to
+# D-035; see PLAN.md D-034 "Deferred".
+_auto_port_enabled() {
+  if [ -n "${AUTO_PORT:-}" ]; then
+    [ "$AUTO_PORT" = 1 ]
+    return
+  fi
+  if [ -n "${ARGO_ANYWHERE_AUTO_PORT:-}" ]; then
+    [ "$ARGO_ANYWHERE_AUTO_PORT" = 1 ]
+    return
+  fi
+  return 0
+}
+
 # _resolve_control_persist: the single source of truth for the ControlPersist
 # value. Used by BOTH ssh_mux_args (ssh calls) and the scp branch in
 # remote_bootstrap so the two can never drift -- they must agree, because they
@@ -6375,7 +6414,7 @@ ensure_or_reuse_tunnel() {
         local owner_pid; owner_pid="${rstatus##*:}"
         local owner; owner="${rstatus%:*}"; owner="${owner#other:}"
         local newport
-        if [ "${AUTO_PORT:-${ARGO_ANYWHERE_AUTO_PORT:-0}}" = 1 ]; then
+        if _auto_port_enabled; then
           if [ "$owner" = "?" ]; then
             warn "Port ${PROXY_PORT} on ${node} is held by another user's process"
             warn "  (bind() refused it; unprivileged lsof can't name the owner)."
@@ -6388,10 +6427,16 @@ ensure_or_reuse_tunnel() {
             rstart="${ARGO_ANYWHERE_PORT_RANGE%-*}"
             rend="${ARGO_ANYWHERE_PORT_RANGE#*-}"
           fi
-          log "--auto-port: probing ${node} for a free port in ${rstart}-${rend}..."
+          log "Probing ${node} for a free port in ${rstart}-${rend}..."
           newport="$(find_next_free_remote_port "$user" "$node" "$rstart" "$rend")"
-          [ -n "$newport" ] || die "No free port found in ${rstart}-${rend}."
-          ok "Auto-picked free port: ${newport}"
+          if [ -z "$newport" ]; then
+            err "No free port found in ${rstart}-${rend} on ${node}."
+            err "  Widen the search with --port-range LO-HI, or pick one"
+            err "  yourself with --port N."
+            die "No free port available."
+          fi
+          ok "Moved to free port ${newport} (was ${PROXY_PORT}, held by another user)."
+          log "  To choose the port yourself instead, re-run with --no-auto-port."
         else
           newport="$(prompt_port_collision "$user" "$node" "$PROXY_PORT" "$owner" "$owner_pid")"
           [ -n "$newport" ] || die "Aborted at port-collision prompt."
@@ -11152,7 +11197,7 @@ Usage: $(basename "$0") [SUBCOMMAND] [--cli-tool NAME]
                           [--user NAME] [--node HOST] [--port N]
                           [--no-jump] [--jump-host HOST] [--no-mfa]
                           [--probe-nodes]
-                          [--auto-port] [--port-range LO-HI]
+                          [--no-auto-port] [--port-range LO-HI]
                           [--scope project|global]
                           [--verbose-server]
                           [--force-reinstall]
@@ -11334,14 +11379,21 @@ Options:
   --force-reinstall    Wipe the server-side venv (\$HOME/argovenv on the ANL
                        node) and rebuild from scratch. Use after a broken
                        upgrade. Canonical env: ARGO_ANYWHERE_FORCE_REINSTALL.
-  --auto-port          When the resolved port is already in use on the
-                       picked compute node by ANOTHER user, automatically
-                       probe a range and pick the first free port (instead
-                       of prompting interactively). Sticky: triggers the
-                       same OpenCode-config migration prompt as a manual
-                       --port override would. Canonical env:
+  --auto-port          DEFAULT ON. When the resolved port is already in use
+                       on the picked compute node by ANOTHER user, probe a
+                       range and move to the first genuinely free port
+                       (decided by a real bind test, which -- unlike lsof --
+                       sees across users). Sticky: triggers the same
+                       OpenCode-config migration prompt as a manual --port
+                       override would. Passing the flag explicitly is
+                       redundant but harmless. Canonical env:
                        ARGO_ANYWHERE_AUTO_PORT=1.
-  --port-range LO-HI   Override the port range for --auto-port and the
+  --no-auto-port       Opt out: on a collision, show the interactive
+                       [n]ext-free / [p]ick / [r]etry / [a]bort prompt
+                       instead of moving automatically. Note the prompt
+                       needs a TTY, so this is not useful with -y or from
+                       the web UI. Canonical env: ARGO_ANYWHERE_AUTO_PORT=0.
+  --port-range LO-HI   Override the port range for the auto-pick and the
                        interactive [n]ext-free-port choice. Default:
                        PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100.
                        Canonical env: ARGO_ANYWHERE_PORT_RANGE=LO-HI.
@@ -11677,8 +11729,9 @@ Canonical (preferred):
   ARGO_ANYWHERE_KEEP_ORPHANS=1   update-models keeps ALL orphaned config models
   ARGO_ANYWHERE_DROP_ORPHANS=1   update-models drops ALL orphaned config models
   ARGO_ANYWHERE_AUTO_PORT=1      on remote-port collision, auto-pick the next
-                                 free port instead of prompting (alternative
-                                 to --auto-port)
+                                 free port instead of prompting. This is the
+                                 DEFAULT since v3.3.0; set =0 (or pass
+                                 --no-auto-port) to get the prompt back
   ARGO_ANYWHERE_PORT_RANGE=LO-HI port range for --auto-port and the [n]ext-
                                  free-port choice (default
                                  PROXY_PORT_DEFAULT to PROXY_PORT_DEFAULT+100)
@@ -11921,6 +11974,11 @@ main() {
         ARGO_ANYWHERE_VERBOSE_SERVER=1; export ARGO_ANYWHERE_VERBOSE_SERVER; shift ;;
       --auto-port)
         AUTO_PORT=1; shift ;;
+      --no-auto-port)
+        # Opt out of the default auto-pick and get the interactive
+        # [n/p/r/a] prompt instead (D-034 Option A). Explicit flag beats
+        # ARGO_ANYWHERE_AUTO_PORT either way.
+        AUTO_PORT=0; shift ;;
       --ensure)
         # configure/run: bring the channel up if it isn't already, rather
         # than failing with the 'run connect first' hint (D-024 / D-e).

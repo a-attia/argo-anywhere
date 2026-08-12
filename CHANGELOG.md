@@ -29,6 +29,26 @@ decisions D-001 through D-030) and the tag messages on the repo.
 > **If you are on v3.2.1 or earlier and hitting port collisions or Argo
 > authentication errors on a busy node, this is the release you want.**
 
+### Changed — please read
+
+- **A port collision now moves you to a free port automatically.**
+  `--auto-port` is on by default. When the port argo-anywhere wants is
+  already held by someone else on the compute node, it probes for the
+  first genuinely free one and uses that, instead of stopping to ask.
+  Pass `--no-auto-port` (or set `ARGO_ANYWHERE_AUTO_PORT=0`) to get the
+  old interactive prompt back.
+
+  This was off by default for a good reason that no longer holds: the
+  probe used to be blind to other users' ports, so the flag meant to
+  rescue you from a collision could walk you into another one. It now
+  tests each candidate by actually binding it. On a busy node the old
+  default also had a sharper problem — the prompt needs a terminal, so
+  `-y`, `--ensure`, and every launch from the web UI could never take
+  the recovery path at all, and simply failed.
+
+  Moving ports is *sticky*: as before, argo-anywhere offers to update
+  your client configs so the new port is used next time.
+
 ### Fixed
 
 - **`configure` no longer deletes models from your OpenCode config.**

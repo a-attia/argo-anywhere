@@ -687,7 +687,17 @@ To handle this gracefully, the engine:
 - **Detects port collisions before bootstrap.** Before SSHing in to start
   argo-proxy, it probes `127.0.0.1:<port>` on the node and identifies the owner.
   If it's you, it reuses the proxy *after positively verifying identity*
-  (`cfg_user` must equal `want_user`); if it's someone else, you're prompted:
+  (`cfg_user` must equal `want_user`); if it's someone else, argo-anywhere
+  **moves to the first free port automatically** and tells you it did:
+
+  ```text
+  [warn] Port 64742 on compute-01 is held by another user's process
+         (bind() refused it; unprivileged lsof can't name the owner).
+  [argo-anywhere] Probing compute-01 for a free port in 64742-64842...
+  [ ok ] Moved to free port 64743 (was 64742, held by another user).
+  ```
+
+  With `--no-auto-port` you get the interactive prompt instead:
 
   ```text
   [warn] Port 64742 on compute-01 is in use by another user
@@ -702,9 +712,15 @@ To handle this gracefully, the engine:
     Your choice [n/p/r/a, default=n]:
   ```
 
-- **`--auto-port`** (or `ARGO_ANYWHERE_AUTO_PORT=1`) skips the prompt and picks
-  the next free port; the port-cache-migration prompt then lets you make it
-  sticky or one-shot.
+- **`--no-auto-port`** (or `ARGO_ANYWHERE_AUTO_PORT=0`) restores the prompt
+  above. Auto-pick is the default as of v3.3.0 — it was opt-in while the probe
+  could not see other users' ports, which is exactly when it was least
+  trustworthy. Note the prompt needs a terminal, so `--no-auto-port` does
+  nothing useful under `-y` or from the web UI.
+- **Free ports are decided by binding them**, not by `lsof` — an unprivileged
+  `lsof` cannot see another user's socket, so on a shared node it reports held
+  ports as free. Either way the port-cache-migration prompt then lets you make
+  the new port sticky or one-shot.
 - **`--port-range LO-HI`** overrides the default search range (`64742`–`64842`).
   The remote scan is clamped to ≤200 ports per call regardless of the requested
   width.

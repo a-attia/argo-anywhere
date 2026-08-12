@@ -782,7 +782,9 @@ Canonical names:
 - `ARGO_ANYWHERE_FORCE_REINSTALL`
 - `ARGO_ANYWHERE_SHOW_MODELS`
 - `ARGO_ANYWHERE_CONTROL_PERSIST`
-- `ARGO_ANYWHERE_AUTO_PORT`
+- `ARGO_ANYWHERE_AUTO_PORT` (**default ON** since D-034 Option A; set `0`
+  or pass `--no-auto-port` for the interactive collision prompt. Single
+  decision site: `_auto_port_enabled`; never re-inline the default)
 - `ARGO_ANYWHERE_PORT_RANGE`
 - `ARGO_ANYWHERE_VERBOSE_SERVER`
 - `ARGO_ANYWHERE_KEEP_ORPHANS`

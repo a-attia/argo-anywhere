@@ -203,6 +203,101 @@ def test_probe_reports_mine_for_our_own_listener() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Auto-port default (D-034 Option A, 2026-08-12)
+# ---------------------------------------------------------------------------
+#
+# Auto-pick is now ON by default. It was off, which was correct while the walk
+# used the blind ``lsof`` oracle -- the flag that exists to escape a collision
+# recommended ports a co-tenant already held (verified live on compute-386-01:
+# the old walk over 64742-64760 returned the occupied 64742; the bind-test walk
+# returns 64743). With the oracle fixed, the reason to distrust it is gone.
+#
+# The load-bearing part is not convenience. The interactive prompt is
+# unreachable for non-TTY callers -- ``-y``, ``--ensure``, and every web-UI
+# launch -- so with the old default those paths simply died on a collision, on
+# a node where collision is the expected state. The tool had a working recovery
+# path its own GUI could never take.
+
+
+def _auto_port_verdict(*, flag: str | None, env: str | None) -> str:
+    """Run the engine's own ``_auto_port_enabled`` under bash."""
+    body = _function_body(_engine_source(), "_auto_port_enabled")
+    lines = ["set -u", body]
+    if flag is not None:
+        lines.append(f"AUTO_PORT={flag}")
+    if env is not None:
+        lines.append(f"ARGO_ANYWHERE_AUTO_PORT={env}")
+    lines.append('if _auto_port_enabled; then echo AUTO; else echo PROMPT; fi')
+    out = subprocess.run(
+        ["bash", "-c", "\n".join(lines)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_auto_port_is_on_by_default() -> None:
+    """The headline change: an unconfigured run self-heals a collision."""
+    assert _auto_port_verdict(flag=None, env=None) == "AUTO"
+
+
+@pytest.mark.parametrize(
+    ("flag", "env", "expected"),
+    [
+        ("1", None, "AUTO"),      # --auto-port (now redundant, still honoured)
+        ("0", None, "PROMPT"),    # --no-auto-port
+        (None, "1", "AUTO"),      # env on
+        (None, "0", "PROMPT"),    # env off
+        ("0", "1", "PROMPT"),     # explicit flag beats env, both directions
+        ("1", "0", "AUTO"),
+    ],
+)
+def test_auto_port_precedence(flag: str | None, env: str | None, expected: str) -> None:
+    """CLI flag beats env; env beats the default. Opting out must be possible."""
+    assert _auto_port_verdict(flag=flag, env=env) == expected
+
+
+def test_no_auto_port_flag_is_parsed() -> None:
+    """An opt-out users cannot spell is not an opt-out."""
+    src = _engine_source()
+    assert "--no-auto-port)" in src, "the opt-out flag must be in the argv parser"
+    assert "--no-auto-port" in src.split("USAGE", 1)[-1] or "--no-auto-port" in src, (
+        "the opt-out flag must be documented in help text"
+    )
+
+
+def test_auto_port_has_exactly_one_decision_site() -> None:
+    """The default must not be re-implemented inline anywhere.
+
+    The pre-change code read ``${AUTO_PORT:-${ARGO_ANYWHERE_AUTO_PORT:-0}}``
+    at its single use site. A second copy of that expression elsewhere would
+    silently keep the old default in whichever path it governs.
+    """
+    src = _engine_source()
+    inline = re.findall(r"\$\{AUTO_PORT:-\$\{ARGO_ANYWHERE_AUTO_PORT:-\d\}\}", src)
+    assert not inline, (
+        f"inline auto-port default found ({inline}); use _auto_port_enabled"
+    )
+
+
+def test_no_free_port_failure_names_the_remedies() -> None:
+    """Auto-pick can still fail (a full range). Say what to do about it.
+
+    With auto-pick on by default, this error is reachable by users who never
+    asked for it, so it must not be a bare 'No free port found'.
+    """
+    body = _function_body(_engine_source(), "ensure_or_reuse_tunnel")
+    idx = body.find("No free port")
+    assert idx != -1, "the exhausted-range failure message is gone"
+    window = body[max(0, idx - 600) : idx + 600]
+    assert "--port-range" in window and "--port" in window, (
+        "the exhausted-range failure must name --port-range and --port"
+    )
+
+
 def test_engine_copies_stay_byte_identical() -> None:
     """Root and vendored engine copies must not diverge (D-001/D-028)."""
     repo_root = Path(__file__).resolve().parent.parent

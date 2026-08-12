@@ -2382,6 +2382,44 @@ own" contract). `/api/status` exposes `verified_node`, which is `null`
 when unknown and **never** falls back to the cache. The UI declines to
 name what it cannot confirm.
 
+**Option A — auto-pick a free port by default (2026-08-12).** Decided
+after the live cross-user verification below, which showed the fixes
+made collisions *legible* without making them *less frequent*: a fresh
+user still resolves to `PROXY_PORT_DEFAULT`, still collides on a node
+with 22 argo-proxy processes, and now gets a clear prompt instead of a
+silent misroute. Better, but they still hit it.
+
+`--auto-port` is therefore **on by default**, with `--no-auto-port` /
+`ARGO_ANYWHERE_AUTO_PORT=0` as the opt-out. Two reasons the old default
+no longer defends anything:
+
+1. **Its premise was the blind probe.** Distrusting auto-pick was
+   correct while the walk used unprivileged `lsof` — the flag that
+   exists to escape a collision recommended ports a co-tenant held
+   (verified: the old walk returned the occupied `64742`; the bind-test
+   walk returns `64743`). Defect 1 removed the premise.
+2. **The prompt is unreachable for non-TTY callers.** `-y`, `--ensure`,
+   and *every web-UI launch* fall through to the prompt branch and die.
+   The tool had a working recovery path its own GUI could never take —
+   which is the sharper form of the problem, since the web UI is the
+   surface new users start from.
+
+Contract: a single decision site, `_auto_port_enabled` (Section 8),
+precedence *CLI flag > env > default-on*. **Do not re-inline the
+default** — the pre-change code read
+`${AUTO_PORT:-${ARGO_ANYWHERE_AUTO_PORT:-0}}` at its one use site, and a
+second copy would silently keep the old behaviour in whichever path it
+governs. Pinned by `test_auto_port_has_exactly_one_decision_site`.
+
+Auto-pick remains *sticky* (it routes through the same config-migration
+prompt a manual `--port` would), and the exhausted-range failure now
+names `--port-range` and `--port` rather than dying with a bare "no free
+port" — reachable now by users who never asked for auto-pick.
+
+This does **not** reduce collision frequency; it removes the manual step
+after one. Option B (per-user derived default) is the frequency fix and
+is deferred — see "Deferred" below.
+
 **Also shipped under this decision.**
 
 - **Q10 — a shared `$HOME` is one config for every node** (`d0b0806`).
@@ -2412,7 +2450,7 @@ IDENTITY-BEFORE-SUCCESS, bind-test-oracle, NO-SILENT-MODEL-DELETION.
 `test_engine_bind_test_oracle.py`, `test_engine_opencode_models.py`,
 `test_engine_aider_model_settings.py`, plus additions to
 `test_status.py` / `test_web.py` / `test_web_ui_smoke.py`. Suite 133 →
-**546** across the two sessions *(as of 2026-08-12; run `pytest -q` for
+**556** across the two sessions *(as of 2026-08-12; run `pytest -q` for
 the current count)*. Every behavioural claim was confirmed to fail when
 reverted, asserting the mutation landed first — two earlier
 revert-checks had silently no-opped because `$` is backslash-escaped
@@ -2466,10 +2504,14 @@ their own Argo identity right now.
   survives logout) — **not** `/run/user` (`Linger=no` destroys it while
   `KillUserProcesses=no` keeps the proxy alive) and **not** `$HOME`
   (NFS-shared; an orphaned socket wedges later `bind()`s).
-- **The structural assumption itself.** A single default port for every
-  user is still the root cause; the fixes make collisions loud and
-  recoverable rather than rare. Options: per-user derived defaults, or
-  defaulting `--auto-port` on now that its probe is trustworthy.
+- **The structural assumption itself — partially addressed; see Option A
+  below.** A single default port for every user remains the root cause.
+  **Option A shipped** (auto-pick on by default): collisions are now
+  self-healing rather than merely legible. **Option B — per-user derived
+  defaults** (hash the username into a range so tenants do not all race
+  for the same port) attacks the cause and would make collisions *rare*
+  rather than *recovered*. Deferred to **D-035**; it wants its own design
+  note and a decision about what happens to an existing cached port.
 - **Local-collision auto-recovery.** The *remote* collision path
   recovers (prompt or `--auto-port`); the *local* `external-healthy`
   path dead-ends with "pick another port" while the free-port probe

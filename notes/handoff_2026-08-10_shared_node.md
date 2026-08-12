@@ -41,7 +41,13 @@ only a map of where things stand and what to watch out for.
 >    fixed engine reports `other:?:?` and picks `64743`. See PLAN.md
 >    D-034 "Live cross-user verification".
 >
-> Still open: the version decision. Suite is at **546 tests**
+> 6. **D-034 Option A shipped**: `--auto-port` is now ON by default
+>    (`--no-auto-port` opts out). Live-verified against the still-live
+>    collision — a non-interactive run on `:64742` now moves itself to
+>    `:64743` instead of dying. Option B (per-user derived default port,
+>    the frequency fix) is deferred to D-035.
+>
+> Still open: the version decision. Suite is at **556 tests**
 > *(2026-08-12)*. The operational cautions in §6 remain
 > in force — the maintainer's live channel is still what this session's
 > own traffic runs through.
