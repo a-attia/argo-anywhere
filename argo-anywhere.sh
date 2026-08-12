@@ -4313,6 +4313,55 @@ _aider_check_conflicts() {
 # passes $dest as a tempfile during the k/b/d/a prompt, so the merge base
 # is the real target, not the tempfile) -- same pattern as
 # write_claudecode_config.
+
+# _aider_live_model_ids: resolve the chat-model ids the channel is serving,
+# space-separated, into the global _AIDER_LIVE_IDS. Empty when no channel /
+# no jq / malformed body -- the caller then falls back to its hardcoded floor.
+#
+# D-005: sets a global; do NOT call via $(...). Memoised per run because
+# handle_config_file invokes the writer twice (once to render the diff, once
+# to write), and the two must agree or the diff misrepresents the outcome.
+#
+# Selection drops embeddings and strips the 'argo:' prefix -- but it does
+# NOT dedupe on internal_name, and that difference from the OpenCode writer
+# is deliberate.
+#
+# OpenCode's config is KEYED by internal_name, so collapsing aliases is right
+# there: two ids naming one model would be one entry. aider is the opposite.
+# The user types the id (`aider --model openai/argo:claude-opus-5`) and aider
+# matches the settings file on that literal string, so EVERY alias needs its
+# own entry. The proxy serves both spellings of several models:
+#
+#     argo:claude-5-opus   -> claudeopus5
+#     argo:claude-opus-5   -> claudeopus5      (same internal_name)
+#
+# The first draft reused OpenCode's `unique_by(.internal_name)` and jq kept
+# the first of each pair, so `--model openai/argo:claude-opus-5` still got an
+# empty stream while `claude-5-opus` worked -- the original bug, surviving in
+# half its cases. Caught by a coverage check against the live list AFTER the
+# fix appeared to pass. Note the hardcoded floor already listed both spellings
+# (`claude-opus-4.1` AND `claude-4.1-opus`), which is the same conclusion the
+# original author reached by hand.
+_aider_live_model_ids() {
+  if [ -n "${_AIDER_LIVE_IDS_RESOLVED:-}" ]; then
+    return 0
+  fi
+  _AIDER_LIVE_IDS_RESOLVED=1
+  _AIDER_LIVE_IDS=""
+  command -v jq >/dev/null 2>&1 || return 0
+  local body; body="$(fetch_proxy_models)"
+  [ -n "$body" ] || return 0
+  local ids
+  ids="$( { printf '%s' "$body" | jq -r '
+    [ .data[] | select(.id | test("embedding") | not) ]
+    | map(.id | sub("^argo:"; ""))
+    | unique
+    | .[]
+  ' 2>/dev/null | tr '\n' ' '; } || true )"
+  case "$ids" in ''|null*) return 0 ;; esac
+  _AIDER_LIVE_IDS="$ids"
+}
+
 write_aider_config() {
   local dest="$1"
   local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
@@ -4351,8 +4400,29 @@ write_aider_config() {
   local settings_dir; settings_dir="$(dirname "$orig")"
   local settings_file="${settings_dir}/.aider.model.settings.yml"
 
+  # STALE-COVERAGE INVARIANT (2026-08-12). The list below used to be
+  # hardcoded only, and drifted: measured against a live channel serving 34
+  # chat models, five of them had NO entry -- claude-5-opus, claude-5-sonnet,
+  # gpt-5.6-{luna,sol,terra}. Those are exactly the models whose temperature
+  # must be disabled, so `aider --model openai/argo:claude-5-opus` got an
+  # empty stream: the failure this file exists to prevent, on the newest and
+  # most-wanted models.
+  #
+  # We now union the live /v1/models list with the hardcoded floor. Unlike
+  # the OpenCode writer this file is entirely OURS, so there is no user data
+  # to preserve -- but coverage must never SHRINK either, which is why the
+  # hardcoded set stays as a floor rather than being replaced: a momentary
+  # curl failure should not silently drop temperature suppression for a model
+  # the user is mid-session with. Extra entries for unserved models are inert
+  # (aider only consults the one it is asked for).
+  #
+  # Resolved here in bash, passed in via env, so the heredoc stays pure.
+  _aider_live_model_ids
+  local _aider_ids="${_AIDER_LIVE_IDS:-}"
+
   if command -v python3 >/dev/null 2>&1; then
     local _py_rc=0
+    ARGO_AIDER_LIVE_IDS="$_aider_ids" \
     python3 - "$orig" "$dest" "$user" "$PROXY_PORT" "$model" "$settings_file" <<'PYEOF' || _py_rc=$?
 import os, sys
 orig_path, dest_path, user, port, model, settings_file = sys.argv[1:7]
@@ -4388,6 +4458,11 @@ with open(dest_path, "w") as f:
 # Write the sibling model-settings file: use_temperature:false for the
 # argo: models that need it. This is our file (we own it entirely), so we
 # rewrite it wholesale each run rather than merging.
+#
+# The hardcoded list is a FLOOR, not the whole truth: it is unioned with the
+# live ids the caller resolved from /v1/models (see the STALE-COVERAGE
+# INVARIANT above). Keeping it as a floor means a failed fetch degrades to
+# the old behaviour instead of dropping coverage mid-session.
 argo_models = [
     "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
     "gpt-5", "gpt-5-mini", "gpt-5-nano",
@@ -4404,6 +4479,12 @@ argo_models = [
     "gemini-2.5-flash", "gemini-2.5-pro",
     "gemini-3.1-flash-lite", "gemini-3.5-flash",
 ]
+# Union with the live ids, preserving the floor's order and appending any
+# newly-served model the floor does not know about. dict.fromkeys dedupes
+# while keeping insertion order, so the file stays diff-stable run to run.
+_live = [m for m in os.environ.get("ARGO_AIDER_LIVE_IDS", "").split() if m]
+argo_models = list(dict.fromkeys(argo_models + _live))
+
 settings = [
     {"name": f"openai/argo:{m}", "use_temperature": False, "streaming": True}
     for m in argo_models
@@ -4474,10 +4555,17 @@ EOF
   # that reject it (reasoning / opus-4.7+ / gpt-5 / o-series / gemini).
   # We own this file entirely; rewrite wholesale. Keep the list in sync
   # with the PyYAML path above.
-  local _m
+  # Same STALE-COVERAGE INVARIANT as the python path: the literal list is a
+  # floor, unioned with whatever the channel is serving. This branch runs when
+  # python3 or PyYAML is missing, and it had its own copy of the same stale
+  # list -- fixing only the python path would have left the fallback emitting
+  # a file with no entry for the newest models.
+  _aider_live_model_ids
+  local _m _seen
   {
     echo "# Written by argo-anywhere. Disables 'temperature' for argo-served"
     echo "# models that reject it (argo-proxy returns an empty stream otherwise)."
+    _seen=" "
     for _m in \
         gpt-4o gpt-4.1 gpt-4.1-mini gpt-4.1-nano \
         gpt-5 gpt-5-mini gpt-5-nano gpt-5.1 gpt-5.2 gpt-5.4 gpt-5.4-mini gpt-5.4-nano gpt-5.5 \
@@ -4486,7 +4574,11 @@ EOF
         claude-4.1-opus claude-4.5-opus claude-4.6-opus claude-4.7-opus claude-4.8-opus \
         claude-sonnet-4.5 claude-sonnet-4.6 claude-4.5-sonnet claude-4.6-sonnet \
         claude-haiku-4.5 claude-4.5-haiku \
-        gemini-2.5-flash gemini-2.5-pro gemini-3.1-flash-lite gemini-3.5-flash; do
+        gemini-2.5-flash gemini-2.5-pro gemini-3.1-flash-lite gemini-3.5-flash \
+        ${_AIDER_LIVE_IDS:-}; do
+      # Dedupe: a live id that is also in the floor must not emit twice.
+      case "$_seen" in *" ${_m} "*) continue ;; esac
+      _seen="${_seen}${_m} "
       echo "- name: openai/argo:${_m}"
       echo "  use_temperature: false"
       echo "  streaming: true"

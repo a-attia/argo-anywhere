@@ -53,6 +53,23 @@ decisions D-001 through D-030) and the tag messages on the repo.
   genuinely a no-op when nothing has changed — it reports "already up to
   date" instead of rewriting the file and leaving another `.bak`.
 
+- **aider: the newest models no longer return an empty response.** aider
+  sends a `temperature` parameter by default, which several argo-served
+  models reject — argo-proxy then returns an empty stream rather than an
+  error, so the request appears to succeed and produces nothing.
+  argo-anywhere writes a `.aider.model.settings.yml` that switches the
+  parameter off per model, but that file's model list was hardcoded and
+  had fallen behind what the gateway serves. Five models had no entry,
+  including Claude 5 Opus and Claude 5 Sonnet — so
+  `aider --model openai/argo:claude-5-opus` silently returned nothing,
+  which is exactly what the file exists to prevent.
+
+  The list is now built from the models your channel actually serves,
+  merged with the built-in list so coverage can only grow. Every alias a
+  model is served under gets its own entry, because aider matches on the
+  exact name you type. Without a reachable channel it writes the built-in
+  list as before.
+
 - **Web UI: the dashboard no longer names a compute node it cannot
   confirm.** The channel diagram lit the node hop green and displayed
   `localhost:<port> → <node>` whenever *anything* was listening on the
