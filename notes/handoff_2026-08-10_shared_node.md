@@ -28,8 +28,21 @@ only a map of where things stand and what to watch out for.
 >    D-036; neither has shipped, and a note that has not shipped does
 >    not hold a number.
 >
-> Still open: the **`run`** live pass and the version decision. Suite is
-> at **524 tests** *(2026-08-12)*. The operational cautions in §6 remain
+> 4. **`run` live pass: PASSED** (aider — launched, connected, clean
+>    exit). It surfaced a second pre-existing bug: aider's
+>    `.aider.model.settings.yml` had a hardcoded model list missing the
+>    five newest models, so `--model openai/argo:claude-5-opus` returned
+>    an empty stream. Fixed in `22d0b7a`.
+> 5. **The cross-user collision was verified live, not simulated.** The
+>    incident's collision is STILL ACTIVE on `compute-386-01`
+>    (`:64742` bind=TAKEN / lsof=empty, answering `/health` identically
+>    to ours). Both engine versions were run against it: v3.2.1 calls
+>    that port `free` and `--auto-port` walks straight into it; the
+>    fixed engine reports `other:?:?` and picks `64743`. See PLAN.md
+>    D-034 "Live cross-user verification".
+>
+> Still open: the version decision. Suite is at **546 tests**
+> *(2026-08-12)*. The operational cautions in §6 remain
 > in force — the maintainer's live channel is still what this session's
 > own traffic runs through.
 
@@ -137,10 +150,9 @@ count occurrences) before trusting a revert-check.
 
 ### 5.1 No design decision needed
 
-1. **`configure` / `run` live pass.** `configure` **PASSED 2026-08-12**
-   (and surfaced a separate bug — see the update box at the top of this
-   file). `run` is still untested; it shares the configure path but not
-   the exec-the-tool tail.
+1. ~~**`configure` / `run` live pass.**~~ **BOTH PASSED 2026-08-12.**
+   Each surfaced a separate pre-existing bug (OpenCode model deletion;
+   aider model-settings staleness) — see the update box at the top.
 2. **`-y` for `handle_config_file`.** The `[k/b/d/a]` prompt has no
    assume-yes bypass, so non-TTY callers always take `k`. That is now
    the *right* default (post-Q10) rather than a trap, so it is no longer

@@ -276,6 +276,9 @@
     .channel-actions { display: flex; align-items: center; gap: 11px; margin-top: 12px; }
     .act-note { font-size: var(--t-meta); color: var(--ink-dim); }
     .act-note.err { color: var(--down); } .act-note.ok { color: var(--up); }
+    /* Reachable but unattributable: warn, not danger. Uses --warn-badge,
+       which is defined + contrast-checked in all three palette blocks. */
+    .act-note.warn { color: var(--warn-badge); }
     .live-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: var(--t-meta);
                    color: var(--ink-dim); cursor: pointer; user-select: none; }
     .live-toggle input { accent-color: var(--link); margin: 0; }
@@ -1008,6 +1011,10 @@
 
     // ---- monitor: local status auto-refresh ------------------------------
     let cachedPort = null, tunnelUp = false, lastSessions = [], lastStatus = {};
+    // Module-scoped so doHealthCheck() can consult it: a /health 200 must not
+    // light the argo-proxy hop green when the tunnel's far end is unverified
+    // (Web-UI Defect 3, 2026-08-12).
+    let nodeUnverified = false;
     let prevTunnelUp = false;                                  // for edge-triggered probe
     let liveHealth = true, healthInFlight = false, lastHealthTs = 0;
     const HEALTH_POLL_MS = 10000;
@@ -1044,7 +1051,7 @@
       const nodeVerified = tunnelUp && !!verifiedNode;
       // A tunnel we can see but cannot attribute: real, and not what the
       // cache claims it is. Worth flagging, not worth alarming.
-      const nodeUnverified = tunnelUp && !verifiedNode;
+      nodeUnverified = tunnelUp && !verifiedNode;
 
       // The port shown on the wire is the CACHED port (last known), which is
       // meaningful only while a tunnel is actually forwarding it. When the
@@ -1172,11 +1179,24 @@
         const h = await (await fetch('/api/health?port=' + cachedPort, { cache: 'no-store' })).json();
         lastHealthTs = Date.now();
         if (h.up) {
-          setHop('hopProxy', 'up'); setWire('wireProxy', 'up', 'up');
-          el('proxySub').textContent = h.latency_ms + ' ms';
-          el('liveDot').classList.toggle('on', liveHealth);
-          note.textContent = (liveHealth ? 'live · ' : '') + `healthy · ${h.status || 'ok'}`;
-          note.classList.add('ok');
+          // A /health 200 proves SOMETHING is serving the far end of this
+          // port -- not that it is our argo-proxy. A co-tenant's answers
+          // identically (same software). When the tunnel's destination could
+          // not be verified, say so here too: lighting this hop green while
+          // the node hop reads 'unverified' would be internally inconsistent,
+          // and the green is the part users believe.
+          const proxyOk = !nodeUnverified;
+          setHop('hopProxy', proxyOk ? 'up' : 'unknown');
+          setWire('wireProxy', proxyOk ? 'up' : 'faint', proxyOk ? 'up' : 'faint');
+          el('proxySub').textContent = proxyOk
+            ? h.latency_ms + ' ms'
+            : h.latency_ms + ' ms · unverified';
+          el('liveDot').classList.toggle('on', liveHealth && proxyOk);
+          note.textContent = (liveHealth ? 'live · ' : '')
+            + (proxyOk
+                ? `healthy · ${h.status || 'ok'}`
+                : `answered in ${h.latency_ms} ms, but the far end is unverified`);
+          note.classList.add(proxyOk ? 'ok' : 'warn');
         } else {
           setHop('hopProxy', 'down'); el('proxySub').textContent = 'no answer';
           el('liveDot').classList.remove('on');

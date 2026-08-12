@@ -395,6 +395,105 @@ def test_unattributable_tunnel_is_not_rendered_as_a_named_node(
         )
 
 
+def test_health_200_does_not_light_the_proxy_hop_when_unverified(
+    browser, ui_server
+) -> None:
+    """The same overclaim, one hop to the right.
+
+    Found by looking at a screenshot of the fix rather than at its tests: the
+    node hop correctly read 'unverified' while the argo-proxy hop beside it was
+    green with a latency figure. A ``/health`` 200 proves *something* serves the
+    far end of the port -- a co-tenant's argo-proxy answers identically, since
+    it is the same software. Green there while the node reads unverified is
+    internally inconsistent, and the green is the part users believe.
+    """
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '{"package":{"package_version":"0","engine_version":"0",'
+                '"app_cwd_short":"~"},'
+                '"cached":{"user":"u","node":"compute-01.example.org","port":64742},'
+                '"listeners":[{"port":64742,"pid":4242,"command":"python3"}],'
+                '"sessions":[],"verified_node":null}'
+            ),
+        ),
+    )
+    pg.route(
+        "**/api/health**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"port":64742,"up":true,"status":"healthy","latency_ms":12}',
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(600)
+    pg.click("#checkHealth")
+    pg.wait_for_timeout(1200)
+    state = pg.evaluate(
+        """() => ({
+          proxyHop: document.querySelector('#hopProxy').className,
+          proxySub: document.querySelector('#proxySub').textContent.trim(),
+          note: document.querySelector('#healthNote').textContent.trim(),
+        })"""
+    )
+    pg.close()
+
+    assert "up" not in state["proxyHop"].split(), (
+        "argo-proxy hop is green off a /health 200 while the far end is "
+        f"unverified: {state['proxyHop']!r}"
+    )
+    assert "unverified" in (state["proxySub"] + state["note"]).lower(), (
+        f"the unverified far end is not stated: {state['proxySub']!r} / "
+        f"{state['note']!r}"
+    )
+
+
+def test_health_200_lights_the_proxy_hop_when_verified(browser, ui_server) -> None:
+    """The positive case must keep working -- this is the common path."""
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '{"package":{"package_version":"0","engine_version":"0",'
+                '"app_cwd_short":"~"},'
+                '"cached":{"user":"u","node":"compute-01.example.org","port":64742},'
+                '"listeners":[{"port":64742,"pid":4242,"command":"ssh"}],'
+                '"sessions":[],"verified_node":"compute-01.example.org"}'
+            ),
+        ),
+    )
+    pg.route(
+        "**/api/health**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"port":64742,"up":true,"status":"healthy","latency_ms":12}',
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(600)
+    pg.click("#checkHealth")
+    pg.wait_for_timeout(1200)
+    state = pg.evaluate(
+        """() => ({
+          proxyHop: document.querySelector('#hopProxy').className,
+          proxySub: document.querySelector('#proxySub').textContent.trim(),
+        })"""
+    )
+    pg.close()
+    assert "up" in state["proxyHop"].split()
+    assert "unverified" not in state["proxySub"].lower()
+    assert "ms" in state["proxySub"]
+
+
 def test_verified_tunnel_is_named_from_the_probe_not_the_cache(
     browser, ui_server
 ) -> None:

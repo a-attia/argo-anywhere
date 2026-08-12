@@ -2410,13 +2410,48 @@ IDENTITY-BEFORE-SUCCESS, bind-test-oracle, NO-SILENT-MODEL-DELETION.
 **Tests.** `test_engine_no_interactive_prompt.py`,
 `test_engine_listener_identity.py`, `test_engine_status_honesty.py`,
 `test_engine_bind_test_oracle.py`, `test_engine_opencode_models.py`,
-plus additions to `test_status.py` / `test_web.py` /
-`test_web_ui_smoke.py`. Suite 133 → **524** across the two sessions
-*(as of 2026-08-12; run `pytest -q` for the current count)*. Every
-behavioural claim was confirmed to fail when reverted, asserting the
-mutation landed first — two earlier revert-checks had silently
-no-opped because `$` is backslash-escaped inside the engine's remote
-heredocs.
+`test_engine_aider_model_settings.py`, plus additions to
+`test_status.py` / `test_web.py` / `test_web_ui_smoke.py`. Suite 133 →
+**546** across the two sessions *(as of 2026-08-12; run `pytest -q` for
+the current count)*. Every behavioural claim was confirmed to fail when
+reverted, asserting the mutation landed first — two earlier
+revert-checks had silently no-opped because `$` is backslash-escaped
+inside the engine's remote heredocs.
+
+**Live cross-user verification (2026-08-12).** The one gap the unit
+tests structurally cannot close — a *real* co-tenant holding a port —
+was closed by observation rather than simulation. **The collision from
+the original incident is still live on `compute-386-01`**, so nothing
+had to be manufactured. Read-only probes over the existing mux master
+(`BatchMode=yes`, no new authentication, no lock files):
+
+```text
+port 64742   bind=TAKEN   lsof=<empty>      <- a co-tenant's; invisible to us
+port 64751   bind=TAKEN   lsof=4092655      <- ours
+port 64899   bind=free
+```
+
+Both answer `{"status": "healthy"}` — identical, because it is the same
+software. 22 argo-proxy processes were visible on the node.
+
+Running the engine's **own** probe snippets (extracted verbatim, both
+versions, same ports, same moment):
+
+| port | v3.2.1 verdict | fixed verdict | ground truth |
+|:--|:--|:--|:--|
+| 64742 | **`free`** | `other:?:?` | `bind()` → `EADDRINUSE` |
+| 64751 | `mine:4092655` | `mine:4092655` | ours |
+| 64899 | `free` | `free` | bindable |
+
+The `--auto-port` walk over `64742-64760`: v3.2.1 returns **64742** (the
+occupied port — the flag that exists to escape a collision walks into
+it); fixed returns **64743**, confirmed bindable. `_listener_is_ours`,
+run on the node, refuses `:64742` and accepts `:64751`.
+
+This makes Defect 1 and Defect 5a **reproduced-and-fixed against a real
+cross-user collision**, not merely reasoned about. It also confirms Q7
+is live: whoever holds `:64742` is receiving other users' traffic under
+their own Argo identity right now.
 
 **Deferred, with reasons.**
 
