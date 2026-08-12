@@ -37,7 +37,6 @@ import json
 import re
 import shutil
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest

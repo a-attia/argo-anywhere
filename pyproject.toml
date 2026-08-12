@@ -83,3 +83,13 @@ extend-exclude = ["src/argo_anywhere/engine", "src/argo_anywhere/web/static"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Import the package from the working tree, without requiring an install.
+#
+# The suite used to rely on an editable install being present in whatever
+# interpreter ran pytest. That is invisible while it works and fails hard the
+# moment it does not: removing a stale editable install on 2026-08-12 (it was
+# shadowing the pipx-installed release on PATH) broke collection of all 29 test
+# modules with ModuleNotFoundError, in a tree where nothing about the tests had
+# changed. Making the path explicit means `pytest` tests THIS checkout in any
+# interpreter, and never silently tests an installed copy instead.
+pythonpath = ["src"]

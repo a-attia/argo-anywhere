@@ -31,7 +31,6 @@ import os
 import re
 import subprocess
 import tempfile
-import textwrap
 from pathlib import Path
 
 import pytest

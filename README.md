@@ -1046,6 +1046,18 @@ pytest -q                  # the package test suite (no ANL infra)
 ruff check src tests       # lint
 ```
 
+`pytest` always tests the working tree: `pythonpath = ["src"]` in
+`pyproject.toml` puts this checkout on `sys.path`, so the suite does not depend
+on an editable install being present in whichever interpreter you run it with —
+and can never silently test an installed copy instead of your changes.
+
+A note if you also use argo-anywhere day to day: prefer `pipx install
+argo-anywhere` for that, and keep the development checkout out of your `PATH`.
+An editable install shadowing the released one means you are always running
+your working tree, so a broken release looks fine to you and your own bug
+reports describe code nobody else is running. Run the in-tree engine explicitly
+instead — `sh argo-anywhere.sh …` or `python -m argo_anywhere …`.
+
 Key project files:
 
 - [`AGENTS.md`](AGENTS.md) — canonical project conventions for AI coding tools.
