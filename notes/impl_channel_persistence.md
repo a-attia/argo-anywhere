@@ -7,8 +7,11 @@ factual baseline; the open questions in §6 are the point of the doc.
 **Target repo**: <https://github.com/a-attia/argo-anywhere>.
 **Linked PLAN.md sections**: D-003 (mux master owns the forward), D-012
 (SSH failure tracker), D-024 (connect/configure/run split), D-031
-(web-UI Channel + Utility panels). Earns a new **D-034** if any of §5
-ships.
+(web-UI Channel + Utility panels). Earns a new **D-035** if any of §5
+ships. *(Renumbered 2026-08-12: this note previously claimed D-034,
+which was contended between three notes. D-034 went to the shared-node
+transport work in [`impl_shared_node_transport.md`](impl_shared_node_transport.md),
+which shipped. A note that has not shipped does not hold a number.)*
 
 ## Contents
 
@@ -305,7 +308,7 @@ None are "build". This doc is input to a conversation.
    the rest; cheap and probably sufficient.
 4. **Hold the Q5 (CLI ↔ web UI convergence) discussion** — *pending* —
    Ahmed. Gates (c) and (d).
-5. **Record as D-034 in PLAN.md** if anything beyond (a) ships —
+5. **Record as D-035 in PLAN.md** if anything beyond (a) ships —
    *pending*.
 
 ---

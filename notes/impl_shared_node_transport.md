@@ -1,16 +1,26 @@
 # Implementation plan — transport on a shared compute node
 
-**Status**: **DRAFT — for discussion; not executed.** No code, no locked
-decisions. **Owner**: Ahmed Attia. **Last updated**: 2026-08-10.
-**Linked PLAN.md sections**: D-003 (mux master owns the forward), D-020
-(port as transport-layer state), D-024 (connect/configure/run).
-**Would earn**: the next free decision number — **D-034** as of
-2026-08-10. Two other `designing`-status notes
-([`impl_command_echo.md`](impl_command_echo.md),
-[`impl_channel_persistence.md`](impl_channel_persistence.md)) still name
-D-033/D-034 in their headers; D-033 was taken by the 2026-07-22
-ControlPersist decision, so all three are contended. Assign at execution
-time, not now.
+**Status**: **Tier 1 EXECUTED + live-verified; shipped on `main`,
+unreleased.** The analysis below stands as written; §6's Tier 1 and Q10
+are done, Tiers 2-3 remain open. **Owner**: Ahmed Attia.
+**Last updated**: 2026-08-12.
+**Linked PLAN.md sections**: **D-034** (this work — the decision entry
+records what shipped, the invariants, and the deferrals), D-003 (mux
+master owns the forward), D-020 (port as transport-layer state), D-024
+(connect/configure/run).
+**Decision number**: **D-034**, assigned 2026-08-12 when the work
+shipped. The contention noted in earlier drafts is resolved —
+[`impl_command_echo.md`](impl_command_echo.md) moved to D-036 and
+[`impl_channel_persistence.md`](impl_channel_persistence.md) to D-035,
+neither having shipped.
+
+> **What shipped** (see [`CHANGELOG.md`](../CHANGELOG.md) and PLAN.md
+> D-034 for the full record): Defects 1-4 and 5a, the Q10 shared-`$HOME`
+> fix, and — from the follow-up session — the web UI's own version of
+> Defect 3 and a related no-silent-model-deletion fix in the OpenCode
+> config writer. **Deferred**: Defect 5b (warm-path identity, 0.75s per
+> check), Q1/Q3 (Unix-socket transport), the structural default-port
+> question, and Q7 (notifying co-tenants).
 
 This note works out how `argo-anywhere` should establish its transport to
 a compute node that it shares with other users — including users who are
@@ -1241,7 +1251,22 @@ Still a *detector*, not a guarantee — the TOCTOU window noted above is
 unchanged, which is why item 1's fail-fast remains the load-bearing
 safety property.
 
-### The web UI carries Defect 3 independently (found 2026-08-10; NOT fixed)
+### The web UI carries Defect 3 independently (found 2026-08-10; FIXED 2026-08-12, `14fc693`)
+
+> **Update 2026-08-12.** This section's analysis was correct and the fix
+> shipped along the exact line it recommends — report honestly rather
+> than verify remotely. `status.py` gained `tunnel_destination()`, a
+> local mirror of the engine's `local_tunnel_destination` (`lsof` + `ps`,
+> no network), `/api/status` exposes `verified_node` (`null` when
+> unknown, never falling back to the cache), and the UI renders
+> `unverified` instead of naming a host it cannot confirm. The deferral
+> reasoning below — wait for the transport decision, since a `--socket`
+> flag would trigger the D-032 tri-lockstep and force a redo — was
+> overtaken: the transport decision is still open, but users on v3.2.1
+> were hitting the incident this release fixes, and shipping engine
+> fixes while the GUI kept making the same false claim would have been
+> incoherent. The honesty fix touches no CLI flag, so it carries no
+> tri-lockstep risk and does not constrain the transport choice.
 
 Checked while deciding whether to switch to web-UI work. Two findings,
 and the second is a real bug.
@@ -1264,12 +1289,19 @@ el('nodeSub').textContent  = st.node ? st.node.split('.')[0] : '—';
 el('chAddr').innerHTML     = `localhost:${cachedPort} → ${st.node}`;
 ```
 
-`tunnelUp` comes from the health poll; `st.node` comes from
-`cached_state()` — the same never-re-verified cache the engine's card
-used to print. The composite claim ("you are connected to *this node*")
-rests on a probe that cannot identify the far end. Arguably worse than
-the engine's text row was: a diagram with a lit node reads as a stronger
-assertion than a line of text.
+`st.node` comes from `cached_state()` — the same never-re-verified cache
+the engine's card used to print. The composite claim ("you are connected
+to *this node*") rests on evidence that cannot identify the far end.
+Arguably worse than the engine's text row was: a diagram with a lit node
+reads as a stronger assertion than a line of text.
+
+*(Correction, 2026-08-12: this paragraph originally said `tunnelUp`
+"comes from the health poll". It does not — `refreshStatus()` sets
+`tunnelUp` from `local_listeners()`, an `lsof` scan for anything bound
+to the cached port, and `/api/health` is a separate on-demand call.
+The distinction makes the bug **worse** than described: the rendered
+claim rested not even on a `/health` 200 but on the mere existence of a
+listener, with owner and destination both unchecked.)*
 
 **The right fix is item 3's, not item 2's.** `status.py`'s docstring
 states a deliberate constraint — "no ANL contact of its own" — so it

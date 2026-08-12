@@ -7,6 +7,32 @@
 that note is the single source of truth for the analysis; this file is
 only a map of where things stand and what to watch out for.
 
+> ### Update — session of 2026-08-12
+>
+> Three things changed; the rest of this document still holds.
+>
+> 1. **`configure` live pass: PASSED** — but only on the second
+>    attempt. The first run exposed an unrelated, pre-existing bug:
+>    `write_opencode_config` emitted a hardcoded five-model block, so
+>    `configure` + `[b]` cut a live **34-model config down to 5**,
+>    including the model driving the session. Fixed in `606af68` (the
+>    writer now populates from the live `/v1/models` and never drops an
+>    existing key); re-ran clean, config byte-identical, no backup
+>    written. This bug is in **v3.2.1 as well** — it is not a
+>    regression from this work.
+> 2. **Web-UI Defect 3: FIXED** (`14fc693`). See §5.1 item 3.
+> 3. **The D-number contention is resolved.** D-034 belongs to this
+>    work, now recorded in `PLAN.md`.
+>    [`impl_channel_persistence.md`](impl_channel_persistence.md) moved
+>    to D-035 and [`impl_command_echo.md`](impl_command_echo.md) to
+>    D-036; neither has shipped, and a note that has not shipped does
+>    not hold a number.
+>
+> Still open: the **`run`** live pass and the version decision. Suite is
+> at **524 tests** *(2026-08-12)*. The operational cautions in §6 remain
+> in force — the maintainer's live channel is still what this session's
+> own traffic runs through.
+
 ---
 
 ## 1. What this was about
@@ -30,7 +56,7 @@ is in [`impl_shared_node_transport.md`](impl_shared_node_transport.md).
 |:---|:---|
 | Branch | `main`, **18 commits ahead of `origin/main`**, unpushed |
 | Working tree | clean |
-| Tests | **499 passed, 1 skipped** (`pytest -q`) |
+| Tests | **499 passed, 1 skipped** at handoff; **524** after the 2026-08-12 session (`pytest -q` for current) |
 | Engine copies | in sync (pinned by a test in every new module) |
 | Released | **no** — maintainer's gate: nothing ships until the whole upgrade is tested end-to-end |
 | Maintainer's live channel | `:64751` → `compute-01` (`compute-386-01`), mux pid `53382` |
@@ -49,7 +75,7 @@ message carries its own full rationale.
 | Commit | Change | Verified |
 |:---|:---|:---|
 | `e725e6d` | **Defect 1** — port availability decided by `bind()`, not `lsof` | live |
-| `83efd5d` | Web-UI Defect 3 recorded (**not fixed**, deliberately) | n/a |
+| `83efd5d` | Web-UI Defect 3 recorded (fixed later, 2026-08-12 `14fc693`) | n/a |
 | `d0b0806` | **Q10** — `--port` passed explicitly; shared `$HOME` can serve many nodes | live |
 | `ecbf71d` | Cold-connect end-to-end PASS write-up | live |
 | `0d6a12d` | **Defect 5a** — `external-healthy` gated on listener ownership | local |
@@ -111,21 +137,26 @@ count occurrences) before trusting a revert-check.
 
 ### 5.1 No design decision needed
 
-1. **`configure` / `run` live pass.** The last big untested path. Needs
-   a channel but not a teardown.
+1. **`configure` / `run` live pass.** `configure` **PASSED 2026-08-12**
+   (and surfaced a separate bug — see the update box at the top of this
+   file). `run` is still untested; it shares the configure path but not
+   the exec-the-tool tail.
 2. **`-y` for `handle_config_file`.** The `[k/b/d/a]` prompt has no
    assume-yes bypass, so non-TTY callers always take `k`. That is now
    the *right* default (post-Q10) rather than a trap, so it is no longer
    urgent — but a scripted run still cannot choose `[b]`.
-3. **Web-UI Defect 3.** `status.py:140`'s `channel_health()` is a bare
-   `/health` poll, and `index.html` renders it as a *named* link
-   (`hopNode` lit + `chAddr` = `localhost:PORT → <cached node>`). Same
-   overclaim the engine's card had, arguably worse because a diagram
-   asserts more strongly. Fix is item 3's (report honestly), **not**
-   item 2's — `status.py` is documented "no ANL contact of its own" and
-   must not gain an SSH round trip. `local_tunnel_destination` is a pure
-   local parse and `status.py` already shells out to `lsof`, so
-   mirroring it adds no new capability.
+3. ~~**Web-UI Defect 3.**~~ **DONE 2026-08-12** (`14fc693`), along the
+   line this item recommended: report honestly rather than verify
+   remotely. `status.py` gained `tunnel_destination()` (a local mirror
+   of the engine's `local_tunnel_destination` — `lsof` + `ps`, no
+   network), `/api/status` exposes `verified_node` which is `null` when
+   unknown and never falls back to the cache, and the UI renders
+   `unverified` instead of naming an unconfirmed host. Two corrections
+   to this item as originally written: the file is
+   `src/argo_anywhere/status.py`, not `web/status.py`; and the lit node
+   hop was driven by `local_listeners()` (an `lsof` scan), not by
+   `channel_health()` — so the rendered claim rested on even less
+   evidence than this item assumed.
 
 ### 5.2 Needs the maintainer
 
@@ -155,7 +186,8 @@ count occurrences) before trusting a revert-check.
   contended**: `impl_channel_persistence.md` and
   `impl_shared_node_transport.md` both claim D-034, and D-033 is already
   taken by the 2026-07-22 ControlPersist decision. Resolve before
-  assigning.
+  assigning. **— RESOLVED 2026-08-12: D-034 recorded in `PLAN.md` for
+  the shared-node work; the other two notes moved to D-035 / D-036.**
 - **`CHANGELOG.md` has 9 entries under `## Unreleased`.** Needs a
   version decision at release time.
 

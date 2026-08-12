@@ -2303,6 +2303,155 @@ surface of this bug).
 
 ---
 
+### D-034 — Evidence, not reachability: the tool may not claim what it has not verified (2026-08-10 / 2026-08-12)
+
+**Status**: shipped on `main`, unreleased at time of writing. Design
+record: [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md);
+session handoff: [`notes/handoff_2026-08-10_shared_node.md`](notes/handoff_2026-08-10_shared_node.md).
+
+**Number allocation.** D-034 was contended between three notes.
+Resolved here: it belongs to **this** decision (the shared-node
+transport work, which shipped). `impl_channel_persistence.md` and
+`impl_command_echo.md` both speculatively claimed a number for work
+that has not shipped; they are renumbered to **D-035** and **D-036**
+respectively, *if and when* they ship. A note that has not shipped
+does not hold a number.
+
+**Symptom (field incident, 2026-08-10).** On `compute-386-01`, a node
+with at least ten argo-anywhere tenants, the tool reported `ALL GREEN`
+while the maintainer's traffic was routed through **a stranger's
+`argo-proxy`**. Because argo-proxy authenticates upstream with the
+`user:` field from *its own* config (`--username-passthrough` is off by
+default), those requests reached the Argo gateway under an identity
+that was not his. The exposure is symmetric: whoever won the race for
+`:64742` was, by the same mechanism, receiving other tenants' traffic
+under their own identity.
+
+**Root cause: one structural assumption, five composing defects.**
+The assumption is `PROXY_PORT_DEFAULT=64742` — a single compile-time
+constant shared by every user of the tool, against a resource
+(`127.0.0.1:64742` on a shared host) that is node-global and
+first-binder-wins. On a busy node collision is the *expected* state.
+
+The five defects all reduce to one inference, applied in five places:
+
+> **something answers ⟹ it is ours**
+
+| # | Where | The unsound step | Fix |
+|:--|:--|:--|:--|
+| 1 | `probe_remote_port_owner`, `find_next_free_remote_port` | `lsof` as availability oracle — unprivileged `lsof` cannot see another user's socket, so a held port reads *free* | decide with `socket.bind()`; `lsof` only *attributes* a hit (`e725e6d`) |
+| 2 | `mode_server` launchers | argo-proxy's `validate_port` prompt has a pty inside `screen`/`tmux`, so it blocks forever unseen | stdin from `/dev/null` + durable `tee` log (`4839e50`, `586bdb8`, `7c35c37`) |
+| 3 | `status` summary card | rendered a composite claim from checks it had not made | report only what was checked (`9c905a8`) |
+| 4 | `mode_server` post-launch wait | a bare `/health` 200 proves *something* serves, not that it is ours | `_listener_is_ours` before declaring success (`cf1129c`) |
+| 5a | `ensure_or_reuse_tunnel` `external-healthy` | adopted a listener purely because it answered | identity gate; refuse + explain (`0d6a12d`) |
+
+**Decision.** Establish a project-wide rule, of which the five fixes
+are instances:
+
+> **Reachability is not identity. Any surface that names a
+> destination, an owner, or a health state must either verify the
+> claim or decline to make it. Absence of evidence is reported as
+> unknown — never as success.**
+
+Three corollaries govern how to apply it:
+
+1. **Fail closed.** Missing `lsof`, a vanished pid, an unparseable
+   command line, a `bind()` we cannot interpret — all mean "not
+   confirmed", never "fine". Guard clauses in these paths must not
+   grow a `return 0`.
+2. **Verify where the evidence lives.** `_listener_is_ours` is free
+   on the node (same host, no round trip) and expensive from the
+   laptop (0.75s over a warm mux — measured, not estimated). Put the
+   check where it is cheap; that is why identity is confirmed
+   post-launch on the node rather than re-verified on every `status`.
+3. **A cache is a memory, not a measurement.** The cached node name
+   records where a previous run went. It is not evidence about the
+   current connection and must never be substituted for one.
+
+**Web-UI companion (2026-08-12, `14fc693`).** Corollary 3's own
+violation, found while auditing the fix. The dashboard derived
+`tunnelUp` from a bare `lsof` hit on the cached port and then rendered
+the *cached node name* beside it — a lit green node hop plus
+`localhost:64742 → compute-01`. Same unsound inference as Defect 3,
+stated more forcefully, because a diagram asserts more than a text
+row. `status.py` gained `tunnel_destination()` — a Python mirror of the
+engine's `local_tunnel_destination`, parsing the ControlPath socket
+basename openssh names after its real destination, purely locally
+(`lsof` + `ps`, no SSH, preserving the module's "no ANL contact of its
+own" contract). `/api/status` exposes `verified_node`, which is `null`
+when unknown and **never** falls back to the cache. The UI declines to
+name what it cannot confirm.
+
+**Also shipped under this decision.**
+
+- **Q10 — a shared `$HOME` is one config for every node** (`d0b0806`).
+  On CELS, `$HOME` is NFS-mounted across all compute nodes, so
+  `~/.config/argoproxy/config.yaml` is a single file for all of them.
+  The engine used to refuse to launch when the file's `port:` line
+  disagreed with `$PROXY_PORT`, which made two-node use impossible
+  without hand-editing a shared file — and the guidance actively
+  steered users into corrupting it. Every launcher now passes
+  `--port` explicitly, which argo-proxy applies as an override at
+  config load, so the file is left alone. **Do not reintroduce the
+  refusal.**
+- **No silent model deletion** (`606af68`). `write_opencode_config`
+  emitted a hardcoded five-model block and `handle_config_file`'s
+  `[b]` replaces the file wholesale, so `configure` silently cut a
+  live 34-model config to 5. Same family: a writer asserting a model
+  list it had not consulted the proxy for. It now populates from the
+  live `/v1/models` and unions with the existing config; it never
+  drops a key, because it cannot prompt and therefore cannot obtain
+  consent.
+
+**Invariants added to `AGENTS.md`** (each with a code-side marker
+comment): NO-INTERACTIVE-PROMPT (+ its LOG-DURABILITY COROLLARY),
+IDENTITY-BEFORE-SUCCESS, bind-test-oracle, NO-SILENT-MODEL-DELETION.
+
+**Tests.** `test_engine_no_interactive_prompt.py`,
+`test_engine_listener_identity.py`, `test_engine_status_honesty.py`,
+`test_engine_bind_test_oracle.py`, `test_engine_opencode_models.py`,
+plus additions to `test_status.py` / `test_web.py` /
+`test_web_ui_smoke.py`. Suite 133 → **524** across the two sessions
+*(as of 2026-08-12; run `pytest -q` for the current count)*. Every
+behavioural claim was confirmed to fail when reverted, asserting the
+mutation landed first — two earlier revert-checks had silently
+no-opped because `$` is backslash-escaped inside the engine's remote
+heredocs.
+
+**Deferred, with reasons.**
+
+- **Defect 5b — warm-path identity.** Our proxy dies mid-session and a
+  co-tenant takes the freed port. Real but narrow, and the check costs
+  0.75s per invocation — acceptable for `connect`, not for `status`,
+  which people run casually.
+- **Q1/Q3 — Unix-socket transport.** Would make cross-user attachment
+  *impossible* rather than merely detected, and close a documented
+  `SECURITY.md` non-defense in both directions. Needs a decision on
+  socket location: `/tmp/argo-anywhere-$(id -u)` at `0700` (node-local,
+  survives logout) — **not** `/run/user` (`Linger=no` destroys it while
+  `KillUserProcesses=no` keeps the proxy alive) and **not** `$HOME`
+  (NFS-shared; an orphaned socket wedges later `bind()`s).
+- **The structural assumption itself.** A single default port for every
+  user is still the root cause; the fixes make collisions loud and
+  recoverable rather than rare. Options: per-user derived defaults, or
+  defaulting `--auto-port` on now that its probe is trustworthy.
+- **Local-collision auto-recovery.** The *remote* collision path
+  recovers (prompt or `--auto-port`); the *local* `external-healthy`
+  path dead-ends with "pick another port" while the free-port probe
+  sits unused. Asymmetric, and the dead end is what pushes users toward
+  `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1`.
+- **Q7 — notifying the co-tenants.** A people problem, not a code one,
+  and still open.
+
+**Related decisions.** D-003 (mux master owns the forward — why a
+local listener is not self-evidently ours). D-020 (port as
+transport-layer state). D-024 (`connect`/`configure`/`run`; the verbs
+these fixes run under). D-031 (the web UI whose diagram overclaimed).
+D-005 (the globals-not-`$()` pattern, violated once during this work
+and caught by `set -u`).
+
+---
+
 ## 8. Code-paper coupling
 
 **None.** This is a standalone tool, not a paper-supporting library.
@@ -2314,25 +2463,28 @@ project's commit/tag pin; the script itself is downstream-of-nobody.
 
 ## 9. Lifecycle stage
 
-- **Now**: v2.2.0 released 2026-05-18 (Phase 4 multi-tool
-  framework landed + live-tested PASS per
-  `notes/test_plan_phase4.md`). v2.2.1 in progress on `main`
-  (2026-06-24): D-022 `update` subcommand + D-023 self-update +
-  canonical install both landed; per-phase test plan at
-  `notes/test_plan_phase_v2_2_1.md` awaits release-gate live
-  verification before tagging. Audit-coverage state: **42 of 43
-  findings closed** (only L8 `curl|bash claude.ai` remains as
-  documented no-fix); v2.2.1 will partially address UP-02
-  (`update argoproxy` exposes a user-facing upgrade path) but the
-  formal `_version_ge` soft-floor inside
-  `ensure_argoproxy_installed` is still queued. Maintenance posture
-  active.
-- **Next 6 months**: tag v2.2.1 after `notes/test_plan_phase_v2_2_1.md`
-  live verification passes. Pick up the remaining v2.2.x backlog
-  (UP-01/03/04/05/06 + SH-04 + SCOPE-NOOP) as patch releases.
-  Phase 5 (aider integration) deferred (no scheduled trigger;
-  becomes scheduled when a user asks). Phase 4 cursor docs
-  deferred to v2.3.
+- **Now** *(as of 2026-08-12; see [`CHANGELOG.md`](CHANGELOG.md) for
+  release history)*: **v3.2.1** is the current release on PyPI
+  (2026-07-16). `main` carries **unreleased** work from the 2026-08-10
+  and 2026-08-12 sessions — the D-034 shared-node transport fixes
+  (five defects + Q10), the OpenCode live-model fix, and the web-UI
+  honesty fix. The release is held by the maintainer's gate: nothing
+  ships until the upgrade is tested end-to-end. Remaining gate items
+  are the `run` live pass and a version decision (behaviour changed —
+  the tool now refuses foreign proxies and declines to name unverified
+  nodes — so this is not a pure patch). **Users on v3.2.1 are hitting
+  the collision this work fixes**, which is what makes the gate a live
+  trade-off rather than a formality. Audit-coverage state: 42 of 43
+  findings from `docs/AUDIT_2026-05-12.md` closed (only L8
+  `curl|bash claude.ai` remains as documented no-fix).
+- **Next 6 months**: close the gate and tag. Then the D-034 deferrals
+  in priority order — the structural default-port question (a single
+  compile-time port for every user is still the root cause),
+  local-collision auto-recovery, Defect 5b warm-path identity, and the
+  Q1/Q3 Unix-socket transport decision. The upstream-hardening plan
+  ([`notes/impl_upstream_hardening.md`](notes/impl_upstream_hardening.md),
+  UP-11..UP-13) is drafted and awaiting a go-signal. Phase 5b (codex)
+  stays gated on argo-proxy's `/v1/responses` maturity.
 - **Long term**: Maintenance posture — single-author project; releases
   follow ANL-AI4Dev or Argo upstream changes that affect the
   protocols this script speaks. Abandonment criteria: when the upstream

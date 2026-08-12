@@ -70,12 +70,22 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.2.1 RELEASED on PyPI (2026-07-16)** — the current
-  release. It hotfixes a username-resolution bug in v3.2.0 where
-  `ssh -G`'s *default* `User` (the local OS username, which it emits
-  for every host whether ssh_config configures one or not) outranked
-  the username cache and suppressed the interactive username prompt;
-  recorded as amendment **A7** under D-032 in `PLAN.md`.
+- **Status**: **v3.2.1 is the current PyPI release (2026-07-16);
+  `main` carries UNRELEASED work ahead of it.** As of 2026-08-12
+  `main` is ~21 commits ahead with the **D-034** shared-node transport
+  fixes (five composing defects + the Q10 shared-`$HOME` fix), the
+  OpenCode live-model fix, and the web-UI honesty fix. Held by the
+  maintainer's gate: nothing ships until the upgrade is tested
+  end-to-end. **Users on v3.2.1 are hitting the port collision this
+  work fixes**, so the gate is a live trade-off, not a formality.
+  Remaining: the `run` live pass and a version decision (behaviour
+  changed — the tool now refuses unattributable proxies — so not a
+  pure patch). v3.2.1 itself hotfixed a username-resolution bug in
+  v3.2.0 where `ssh -G`'s *default* `User` (the local OS username,
+  which it emits for every host whether ssh_config configures one or
+  not) outranked the username cache and suppressed the interactive
+  username prompt; recorded as amendment **A7** under D-032 in
+  `PLAN.md`.
   **Per-release history belongs in [`CHANGELOG.md`](CHANGELOG.md), not
   here.** The remainder of this bullet is accumulated *project facts*
   (what exists and how it works) — useful, but it drifted into
@@ -275,7 +285,7 @@ Section 6.4):
 |:----|:---------|:-------------|
 | [`README.md`](README.md) | New + returning humans | Project overview; quick start |
 | [`CHANGELOG.md`](CHANGELOG.md) | Users upgrading; maintainer | **Single source of truth for "what shipped when"** (per-release, since v3.1.0). Re-ground the status claims in `README.md` / `PLAN.md` / this file at tag time; put the narrative here. |
-| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-032 |
+| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-034 |
 | [`docs/UPGRADING.md`](docs/UPGRADING.md) | v1.x users upgrading | What changes for them across v2.0 / v2.1 / v2.2 |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |
 | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Prospective users + contributors | Known limitations + rationale (includes "Upstream stack" section for argo-proxy / Claude Code limitations as of v2.2.0) |
@@ -690,6 +700,67 @@ port that demonstrably serves means "someone else's", not "nobody's".
 Pinned by `tests/test_engine_listener_identity.py`. Background:
 [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md)
 §2.4 (Defect 4), Tier 1 item 2.
+
+### No-silent-model-deletion invariant (config writers)
+
+**A config writer must never remove a key the user already had.**
+Search the engine for `NO-SILENT-MODEL-DELETION INVARIANT`.
+
+`write_opencode_config` emitted a hardcoded five-model block, and
+`handle_config_file`'s `[b]` replaces the target wholesale — so
+`configure` cut a live 34-model config to 5, silently, including the
+model the user was working in. Same family as the identity defects
+above: a writer asserting a list it had not consulted the proxy for.
+
+The writer now resolves models via `_opencode_models_block`, which
+fetches `/v1/models` and unions with the existing config. Four rules
+for anyone touching it:
+
+- **Degrade, never die.** No channel / no `jq` / malformed body →
+  hardcoded fallback. A writer that dies on a curl hiccup is worse
+  than one that writes a stale list.
+- **Never drop an existing key.** The writer runs twice inside
+  `handle_config_file` (once to render the diff) and cannot prompt, so
+  it cannot obtain consent — therefore deletion is not its business.
+  Removal stays `update-models`, which asks per model.
+- **Fetch once per run** (`_OPENCODE_MODELS_CACHE`). Otherwise the two
+  writer calls can disagree and the diff the user approved is not the
+  file they get.
+- **Union against the resolved scope path, never `"$dest"`.** On the
+  diff call `$dest` is an empty temp file; unioning against it reads
+  `{}` and drops everything — the same bug one layer down.
+
+`_opencode_models_block` conveys its result through globals, **not**
+stdout; do not wrap it in `$(...)` (D-005 — the first draft did, and
+`set -u` caught the lost provenance).
+
+Applies to any future `write_<tool>_config` that emits an enumerable
+list. Pinned by `tests/test_engine_opencode_models.py`.
+
+### Web-UI honesty: never render the cache as a measurement
+
+**`status.py` may report only what it can establish locally; the
+dashboard may name only what `status.py` verified.**
+
+The channel diagram derived "connected" from an `lsof` hit on the
+cached port and then drew the *cached node name* beside it — the same
+overclaim the engine's `status` card had (Defect 3), stated more
+forcefully because a diagram asserts more than a text row.
+
+`status.tunnel_destination(port)` is the Python mirror of the engine's
+`local_tunnel_destination`: parse the ControlPath socket basename,
+which openssh names after its real destination. **If one changes,
+change both** — same lockstep discipline as the D-032 surfaces.
+
+- It is **local only** (`lsof` + `ps`). `status.py` documents "no ANL
+  contact of its own"; do not add an SSH round trip to it.
+- `/api/status`'s `verified_node` is `null` when unknown and **must
+  never fall back to `cached.node`**. That fallback is the bug.
+- The UI degrades to `unverified` rather than guessing. New surfaces
+  that name a destination follow the same rule.
+
+Pinned by `tests/test_status.py`, `tests/test_web.py`, and
+`tests/test_web_ui_smoke.py`. Design record: PLAN.md **D-034**.
 
 ### Server-mode logging trick
 

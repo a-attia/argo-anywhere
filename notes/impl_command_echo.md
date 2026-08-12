@@ -4,7 +4,12 @@
 **Owner**: Ahmed Attia. **Last updated**: 2026-07-16.
 **Target repo**: <https://github.com/a-attia/argo-anywhere>.
 **Linked PLAN.md sections**: none yet — this note precedes the design
-decision. If it ships, it earns a **D-033** entry in PLAN.md.
+decision. If it ships, it earns a **D-036** entry in PLAN.md.
+*(Renumbered 2026-08-12: this note claimed D-033, which was already
+taken by the shipped ControlPersist decision of 2026-07-22. D-034 went
+to the shared-node transport work and D-035 is reserved for
+[`impl_channel_persistence.md`](impl_channel_persistence.md); D-036 is
+the next free number.)*
 
 ## Purpose
 
@@ -235,7 +240,7 @@ is unusually testable without ANL infra, because the assertion is about
 2. Resolve redaction (invariant vs. redaction pass) — **pending** — Ahmed.
 3. Add `_echo_ssh_cmd` + the four call sites — **pending**.
 4. Add tests 1-3 — **pending**.
-5. Record as D-033 in PLAN.md; add `--show-commands` to engine help +
+5. Record as D-036 in PLAN.md; add `--show-commands` to engine help +
    `ARGO_ANYWHERE_SHOW_COMMANDS` to the AGENTS.md env-var list —
    **pending**.
 6. Live-verify (test 4) — **pending** — Ahmed (requires ANL infra).

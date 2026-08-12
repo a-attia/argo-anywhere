@@ -217,10 +217,20 @@ and ships the web UI and native app alongside the CLI. Releases are published
 from CI via PyPI Trusted Publishing on their version tag.
 
 Per-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the design decision
-behind each change (D-001..D-032) lives in [`PLAN.md`](PLAN.md). This section
+behind each change (D-001..D-034) lives in [`PLAN.md`](PLAN.md). This section
 names the current release and points at those two documents rather than
 restating them — it drifted four releases behind by trying to be a changelog
 before one existed.
+
+> **Heads up if you use a busy shared compute node** *(as of 2026-08-12)*.
+> On a node where several people run argo-anywhere, v3.2.1 and earlier can
+> attach to **another user's** argo-proxy: it answers the health check
+> identically, so the tool reported success and your requests went out under
+> their Argo identity. You would see either an Argo authentication error or,
+> worse, nothing at all. The fixes are on `main` and not yet released — see
+> the `Unreleased` section of [`CHANGELOG.md`](CHANGELOG.md). If you hit this
+> before the next tag, choose `[n] next free port` when argo-anywhere reports
+> a collision, and treat a green `status` on a shared node as unconfirmed.
 
 Older tags — `v1.0.0`–`v1.2.0` and the v2.x line (`v2.0.0`, `v2.1.0`, `v2.2.0`,
 the last `.sh`-era release) — still resolve, and legacy pinned `.sh` URLs keep
@@ -959,7 +969,7 @@ run `argo-anywhere help`.
 | [`docs/TESTING.md`](docs/TESTING.md) | Maintainers/contributors: live-verify the `client` path before tagging. |
 | [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | The fix trail across v2.0 → v2.2 (43 findings; 42 closed). |
 | [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Comparative audit vs. `argo-shim`, the Phase-C-rejection rationale, slide-ready summary. |
-| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-030 + roadmap. |
+| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-034 + roadmap. |
 | [`AGENTS.md`](AGENTS.md) | AI coding tools working on this codebase: conventions + skill loading. |
 
 ## Upgrading
@@ -1025,7 +1035,7 @@ Key project files:
 - [`AGENTS.md`](AGENTS.md) — canonical project conventions for AI coding tools.
   [`CLAUDE.md`](CLAUDE.md) is a symlink to it for Claude Code's discovery.
 - [`PLAN.md`](PLAN.md) — plan-of-record (scope, architecture, milestones,
-  design decisions D-001..D-030).
+  design decisions D-001..D-034).
 - [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) — active fresh-eyes
   audit (43 findings; 42 closed). New closures append a STATUS block in place.
 - [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)

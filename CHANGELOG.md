@@ -14,7 +14,60 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ## Unreleased
 
+> **Theme of this release**: the tool stops claiming things it has not
+> verified. A 2026-08-10 field incident on a busy shared compute node
+> had argo-anywhere reporting `ALL GREEN` while routing traffic through
+> **another user's argo-proxy** — so those requests reached the Argo
+> gateway under someone else's identity. The cause was one inference
+> ("something answered, therefore it is ours") applied in five separate
+> places, on top of one structural fact: every install ships the same
+> default port, and on a shared node a collision is the expected case,
+> not an edge case. Recorded as **D-034** in [`PLAN.md`](PLAN.md);
+> full analysis in
+> [`notes/impl_shared_node_transport.md`](notes/impl_shared_node_transport.md).
+>
+> **If you are on v3.2.1 or earlier and hitting port collisions or Argo
+> authentication errors on a busy node, this is the release you want.**
+
 ### Fixed
+
+- **`configure` no longer deletes models from your OpenCode config.**
+  argo-anywhere wrote a fixed list of five models whenever it wrote the
+  config, and choosing `[b]ackup + overwrite` at the prompt replaced the
+  file wholesale. If your model list had been filled in by
+  `update-models` — the normal case — everything beyond those five was
+  removed. Measured on a real laptop: a 34-model config came back with
+  5, none added, including the model the user was actively working in.
+  The hardcoded list had also gone stale, naming Opus 4.7 as current
+  while the proxy served Opus 5.
+
+  The config writer now reads the live model list from the channel it
+  just confirmed is up, and merges it with whatever your config already
+  had. **It never removes a model.** Entries the proxy no longer serves
+  are kept, because the writer runs without a prompt and so cannot ask
+  you first; removing models remains the job of `update-models`, which
+  asks about each one. Without a reachable channel it falls back to the
+  built-in list, still merging rather than replacing.
+
+  Side effect worth having: re-running `configure` for OpenCode is now
+  genuinely a no-op when nothing has changed — it reports "already up to
+  date" instead of rewriting the file and leaving another `.bak`.
+
+- **Web UI: the dashboard no longer names a compute node it cannot
+  confirm.** The channel diagram lit the node hop green and displayed
+  `localhost:<port> → <node>` whenever *anything* was listening on the
+  remembered port, taking the node name from the last successful
+  connection. Neither fact establishes a link: the listener's owner and
+  destination were both unchecked, and on a shared node it may be a
+  co-tenant's argo-proxy. This is the same overclaim the `status` card
+  had — and a diagram asserts it more strongly than a line of text.
+
+  argo-anywhere now determines where the tunnel actually goes by
+  inspecting the local SSH connection (no network access, no contact
+  with ANL). When it can confirm the destination it names it; when it
+  cannot, the node hop stays neutral and the address line reads
+  `unverified` instead of substituting the remembered name. The cached
+  value still appears in the channel details, labelled as cached.
 
 - **A port collision on the compute node now fails in ~1s with the real
   reason, instead of hanging silently for 20s.** When the port argo-proxy
