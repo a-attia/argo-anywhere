@@ -3114,6 +3114,210 @@ EOF
 # legacy ANL_USERNAME as fallback. This writer is invoked indirectly via
 # handle_config_file (which always passes only the destination path), so we
 # can't accept user as a positional arg without changing that contract.
+
+# ----------------------------------------------------------------------------
+# LIVE MODEL LIST (2026-08-12)
+# ----------------------------------------------------------------------------
+# NO-SILENT-MODEL-DELETION INVARIANT.
+#
+# write_opencode_config used to emit a hardcoded five-model block. Because
+# handle_config_file's [b]ackup+overwrite replaces the file wholesale, a user
+# whose config had been populated by `update-models` lost every model beyond
+# those five -- silently, while running a command ('configure') they had no
+# reason to think would touch their model picker. Measured on the maintainer's
+# laptop 2026-08-12: 34 models -> 5, none gained, including the model the
+# session was actively using.
+#
+# The writer now populates from the live /v1/models on the open channel, which
+# is reachable BY CONSTRUCTION at every call site: configure/run go through
+# _configure_ensure_channel_or_die, and the client flow writes configs only
+# after the tunnel is up.
+#
+# Three rules for anyone touching this:
+#
+#   1. DEGRADE, NEVER DIE. No channel / no jq / malformed body -> fall back to
+#      the hardcoded block below. A writer that dies on a curl hiccup is worse
+#      than one that writes a stale list, and `configure` must keep working for
+#      a user who is mid-setup.
+#   2. NEVER DROP AN EXISTING KEY. Models present in the user's config but not
+#      served right now are PRESERVED, not removed. The writer cannot prompt
+#      (handle_config_file calls it once for the diff and again for the write;
+#      an `ask` in that path is the D-005 subshell trap), so consent is
+#      impossible here -- therefore deletion is not this function's business.
+#      Removing orphans stays `update-models`, which asks per model.
+#   3. FETCH ONCE PER RUN. The double call above would otherwise mean two HTTP
+#      round trips and, worse, a proposal that can differ from what gets
+#      written if the model list changes between them. _OPENCODE_MODELS_CACHE
+#      makes the two calls byte-identical.
+#
+# Pinned by tests/test_engine_opencode_models.py.
+
+# _opencode_models_hardcoded: the offline fallback block. Kept as the writer's
+# floor so a laptop with no channel and no jq still produces a working config.
+_opencode_models_hardcoded() {
+  cat <<'EOF'
+{
+  "gpt54": {
+    "name": "GPT-5.4",
+    "modalities": { "input": ["text", "image"], "output": ["text"] }
+  },
+  "claudeopus47": {
+    "name": "Claude Opus 4.7",
+    "modalities": { "input": ["text", "image"], "output": ["text"] }
+  },
+  "claudeopus46": {
+    "name": "Claude Opus 4.6",
+    "modalities": { "input": ["text", "image"], "output": ["text"] }
+  },
+  "claudesonnet46": {
+    "name": "Claude Sonnet 4.6",
+    "modalities": { "input": ["text", "image"], "output": ["text"] }
+  },
+  "claudehaiku45": {
+    "name": "Claude Haiku 4.5",
+    "modalities": { "input": ["text", "image"], "output": ["text"] }
+  }
+}
+EOF
+}
+
+# _opencode_models_block <existing-config-path>: resolve the models object to
+# embed. Live list if we can get one, hardcoded otherwise; either way unioned
+# with whatever the existing config already had (rule 2).
+#
+# D-005: this function does NOT print the block, and callers MUST NOT wrap it
+# in $(...). It sets four globals:
+#
+#   _OPENCODE_MODELS_CACHE   the block itself (also the fetch-once memo)
+#   _OPENCODE_MODELS_SOURCE  "live" | "fallback"
+#   _OPENCODE_MODELS_ADDED   models the proxy serves that the config lacked
+#   _OPENCODE_MODELS_KEPT    config models the proxy no longer serves (preserved)
+#
+# The first draft of this function printed the block to stdout and the writer
+# captured it with $(...). That works for the value and silently loses all
+# three reporting globals to the subshell -- caught here by `set -u` firing on
+# the first read. It is the same class of bug D-005 was written for, and it
+# would have shipped a summary line that either crashed or lied. Keeping the
+# result in a global makes the value and its provenance travel together.
+_opencode_models_block() {
+  local existing_cfg="${1:-}"
+
+  # Fetch-once memo (rule 3). Populated == already resolved this run.
+  if [ -n "${_OPENCODE_MODELS_CACHE:-}" ]; then
+    return 0
+  fi
+
+  local have_jq=0
+  command -v jq >/dev/null 2>&1 && have_jq=1
+
+  # Existing keys, so we can union them back in and report honestly.
+  local old_block='{}'
+  if [ "$have_jq" -eq 1 ] && [ -n "$existing_cfg" ] && [ -f "$existing_cfg" ]; then
+    old_block="$( { jq '.provider.argo.models // {}' "$existing_cfg" 2>/dev/null; } || true )"
+    [ -n "$old_block" ] || old_block='{}'
+  fi
+
+  local live_block="" body=""
+  if [ "$have_jq" -eq 1 ]; then
+    # fetch_proxy_models already swallows curl failure (|| true).
+    body="$(fetch_proxy_models)"
+    if [ -n "$body" ]; then
+      # Same selection rules as mode_update_models: drop embeddings (not
+      # chat-usable), dedupe on internal_name (several ids alias one model),
+      # key on internal_name, friendly name = id minus the 'argo:' prefix.
+      # Kept deliberately in sync with that filter; if one changes, change both.
+      live_block="$( { printf '%s' "$body" | jq '
+        [ .data[]
+          | select(.id | test("embedding") | not)
+        ]
+        | unique_by(.internal_name)
+        | map({
+            (.internal_name): {
+              name: (.id | sub("^argo:"; "")),
+              modalities: { input: ["text","image"], output: ["text"] }
+            }
+          })
+        | add // {}
+      ' 2>/dev/null; } || true )"
+      # A jq failure or a body without .data yields empty/null -> treat as miss.
+      case "$live_block" in ''|null) live_block="" ;; esac
+    fi
+  fi
+
+  local result
+  if [ -n "$live_block" ]; then
+    _OPENCODE_MODELS_SOURCE="live"
+    # Union: live wins on collision (fresher display names), existing keys the
+    # proxy no longer serves are preserved (rule 2).
+    result="$( { jq -n --argjson old "$old_block" --argjson new "$live_block" \
+      '$old + $new' 2>/dev/null; } || true )"
+    [ -n "$result" ] || result="$live_block"
+    _OPENCODE_MODELS_ADDED="$( { jq -rn --argjson o "$old_block" --argjson n "$live_block" \
+      '(($n | keys) - ($o | keys)) | length' 2>/dev/null; } || echo 0 )"
+    _OPENCODE_MODELS_KEPT="$( { jq -rn --argjson o "$old_block" --argjson n "$live_block" \
+      '(($o | keys) - ($n | keys)) | length' 2>/dev/null; } || echo 0 )"
+  else
+    _OPENCODE_MODELS_SOURCE="fallback"
+    local hard; hard="$(_opencode_models_hardcoded)"
+    if [ "$have_jq" -eq 1 ]; then
+      result="$( { jq -n --argjson old "$old_block" --argjson new "$hard" \
+        '$old + $new' 2>/dev/null; } || true )"
+      [ -n "$result" ] || result="$hard"
+      _OPENCODE_MODELS_ADDED="$( { jq -rn --argjson o "$old_block" --argjson n "$hard" \
+        '(($n | keys) - ($o | keys)) | length' 2>/dev/null; } || echo 0 )"
+      _OPENCODE_MODELS_KEPT="$( { jq -rn --argjson o "$old_block" --argjson n "$hard" \
+        '(($o | keys) - ($n | keys)) | length' 2>/dev/null; } || echo 0 )"
+    else
+      # No jq AND no live list. The first draft emitted the hardcoded five
+      # here and rationalised it in a comment: "a jq-less laptop can't have a
+      # populated config anyway, since update-models hard-requires jq". That
+      # is false -- the config is portable. Copy one from a colleague, sync a
+      # dotfiles repo, or uninstall jq after a year of use, and this path
+      # deletes 29 models. Verified by execution, not argument: with jq masked
+      # off PATH the writer took a 4-model config to the hardcoded 5, dropping
+      # the orphan. That is the very bug this block exists to fix, surviving
+      # in the corner where nobody would look for it.
+      #
+      # Python3 is the sanctioned escape hatch for structured data (D-002) and
+      # is a hard dependency of the package anyway, so use it to do the union
+      # jq would have done. Only a laptop with neither jq NOR python3 falls
+      # through to the raw hardcoded block.
+      result=""
+      if [ -n "$existing_cfg" ] && [ -f "$existing_cfg" ] && command -v python3 >/dev/null 2>&1; then
+        result="$( { ARGO_HARD_BLOCK="$hard" ARGO_EXISTING_CFG="$existing_cfg" python3 -c '
+import json, os, sys
+try:
+    with open(os.environ["ARGO_EXISTING_CFG"]) as fh:
+        old = json.load(fh)["provider"]["argo"].get("models", {})
+except Exception:
+    old = {}
+if not isinstance(old, dict):
+    old = {}
+new = json.loads(os.environ["ARGO_HARD_BLOCK"])
+old.update(new)
+print(json.dumps(old, indent=2))
+print(len(new.keys() - (old.keys() & new.keys())), file=sys.stderr)
+' 2>/dev/null; } || true )"
+      fi
+      if [ -n "$result" ]; then
+        # Counting without jq is not worth a second interpreter start; the
+        # union is what matters and the summary degrades to "unknown".
+        _OPENCODE_MODELS_ADDED="?"
+        _OPENCODE_MODELS_KEPT="?"
+      else
+        result="$hard"
+        _OPENCODE_MODELS_ADDED=0
+        _OPENCODE_MODELS_KEPT=0
+      fi
+    fi
+  fi
+
+  # Indent to sit at the config's "models" nesting level (6 spaces), leaving
+  # the first line flush for the `"models": ` prefix it follows.
+  result="$(printf '%s' "$result" | sed '2,$s/^/      /')"
+  _OPENCODE_MODELS_CACHE="$result"
+}
+
 write_opencode_config() {
   local dest="$1"
   local user="${ARGO_ANYWHERE_USER:-${ANL_USERNAME:-}}"
@@ -3127,6 +3331,24 @@ write_opencode_config() {
   # could bypass it; this assert ensures the broken-config silent-fail
   # is converted to a fail-loud die at the writer entry.
   [ -n "${PROXY_PORT:-}" ] || die "write_opencode_config: PROXY_PORT is empty (resolve_port not called?). Refusing to write a config with baseURL 'http://localhost:/v1' that would silently fail to connect."
+
+  # Models come from the live channel when one is up, unioned with whatever
+  # the user's config already had. See the NO-SILENT-MODEL-DELETION INVARIANT.
+  #
+  # Union against the REAL config path, never "$dest": handle_config_file's
+  # FIRST call renders the proposal into an empty mktemp file, so a $dest-based
+  # union would read {} and drop every existing model right where the diff is
+  # computed -- reintroducing the bug one layer down. The real path is the
+  # resolved scope path, falling back to the global config.
+  #
+  # Call directly, NOT via $(...): _opencode_models_block conveys its result
+  # AND its provenance through globals (D-005). A subshell capture would drop
+  # the latter.
+  local _oc_existing="${_OPENCODE_SCOPE_PATH:-${OPENCODE_GLOBAL_CONFIG:-}}"
+  _opencode_models_block "$_oc_existing"
+  local models_block="${_OPENCODE_MODELS_CACHE:-}"
+  [ -n "$models_block" ] || die "write_opencode_config: model block resolution produced nothing (internal error)."
+
   cat > "$dest" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
@@ -3141,28 +3363,7 @@ write_opencode_config() {
           "Authorization": "Bearer ${user}"
         }
       },
-      "models": {
-        "gpt54": {
-          "name": "GPT-5.4",
-          "modalities": { "input": ["text", "image"], "output": ["text"] }
-        },
-        "claudeopus47": {
-          "name": "Claude Opus 4.7",
-          "modalities": { "input": ["text", "image"], "output": ["text"] }
-        },
-        "claudeopus46": {
-          "name": "Claude Opus 4.6",
-          "modalities": { "input": ["text", "image"], "output": ["text"] }
-        },
-        "claudesonnet46": {
-          "name": "Claude Sonnet 4.6",
-          "modalities": { "input": ["text", "image"], "output": ["text"] }
-        },
-        "claudehaiku45": {
-          "name": "Claude Haiku 4.5",
-          "modalities": { "input": ["text", "image"], "output": ["text"] }
-        }
-      }
+      "models": ${models_block}
     }
   }
 }
