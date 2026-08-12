@@ -1046,6 +1046,13 @@ pytest -q                  # the package test suite (no ANL infra)
 ruff check src tests       # lint
 ```
 
+Both checks are pinned so they mean the same thing on your laptop and in CI.
+`ruff` is bounded (`>=0.16,<0.17`) and the rule set is stated explicitly
+(`[tool.ruff.lint] select = ["E", "F"]`) rather than inherited from ruff's
+defaults — those defaults grow between minor releases, which silently redefined
+"clean" for this repo in July 2026 and failed a release whose code was fine.
+Widening the rule set is welcome; do it as its own commit, with the fixes.
+
 `pytest` always tests the working tree: `pythonpath = ["src"]` in
 `pyproject.toml` puts this checkout on `sys.path`, so the suite does not depend
 on an editable install being present in whichever interpreter you run it with —

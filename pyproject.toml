@@ -49,7 +49,17 @@ dependencies = [
 dev = [
     "pytest>=8",
     "httpx>=0.27",
-    "ruff>=0.4",
+    # Upper-bounded deliberately. ruff's DEFAULT rule set grows between minor
+    # releases, and the lint step is a hard CI gate -- so an unbounded floor
+    # means CI's definition of "clean" changes under us with no commit. That
+    # is not hypothetical: `ruff>=0.4` resolved to 0.15.22 when v3.2.1
+    # published green on 2026-07-16, 0.16.0 promoted a batch of rules into
+    # the defaults on 2026-07-23, and by 2026-08-12 the SAME v3.2.1 tree
+    # failed with 125 errors. The v3.3.0 tag was the first thing to touch CI
+    # after that, so it looked like the release broke the build. See the
+    # explicit `select` under [tool.ruff.lint]: pinning the version bounds
+    # the blast radius, pinning the rules removes it.
+    "ruff>=0.16,<0.17",
     "rich>=13.0",
     "playwright>=1.40",
 ]
@@ -80,6 +90,29 @@ line-length = 100
 target-version = "py310"
 # The vendored bash engine + web static assets are not Python; nothing to lint.
 extend-exclude = ["src/argo_anywhere/engine", "src/argo_anywhere/web/static"]
+
+[tool.ruff.lint]
+# State the rule set explicitly instead of inheriting ruff's defaults.
+#
+# `E` + `F` (pycodestyle errors + pyflakes) is what ruff's defaults happened to
+# mean for every green build this project has had, so this is a codification of
+# the existing gate, not a new standard -- no historical commit becomes
+# retroactively dirty. Inheriting the default was the actual bug: it let an
+# upstream release redefine "clean" for a repo nobody had touched.
+#
+# Adopting more (B, SIM, UP, I, ...) is a fine idea and a deliberate one: add
+# the code here, fix what it finds, in its own commit. One note for whoever
+# does that: `BLE001` / `S110` will flag the broad `except Exception` and
+# `try/except: pass` in the config writers and focus-raise helpers -- those are
+# deliberate (D-034's "degrade, never die"), so they want `# noqa` with a
+# reason rather than a rewrite.
+select = ["E", "F"]
+
+# E501 (line length) is opt-in even inside `E`, so it was NOT part of the
+# historical gate; enabling it here would newly fail ~21 lines that predate
+# this change, in files nobody is touching. `line-length = 100` above still
+# governs the formatter. Turn this on in its own commit, with the reflow.
+ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
