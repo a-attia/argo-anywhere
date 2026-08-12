@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import textwrap
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -186,3 +187,133 @@ def test_cli_info_json(capsys: pytest.CaptureFixture[str]) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["package"]["package_version"] == argo_anywhere.__version__
     assert isinstance(payload["listeners"], list)
+
+
+# -- tunnel destination (web-UI Defect 3) ------------------------------------
+#
+# The dashboard used to derive "connected to <node>" from two things that
+# support no such claim: an lsof hit on the cached port (ownership unknown,
+# destination unknown) and the node NAME out of the cache (a memory of a past
+# run). Rendered together as a lit node hop plus "localhost:PORT -> compute-01",
+# that is reachability presented as topology -- the same inference that let the
+# 2026-08-10 incident show ALL GREEN while traffic went through a stranger's
+# argo-proxy, and a diagram asserts it more forcefully than a text row.
+#
+# tunnel_destination mirrors the engine's local_tunnel_destination: parse the
+# ControlPath socket basename out of the listener's command line, which openssh
+# names after the host it is really talking to. Verified byte-equal against the
+# engine on a live channel (both returned compute-01.cels.anl.gov for :64751).
+
+
+def test_tunnel_destination_unknown_port_is_none() -> None:
+    """No listener => None. Never a guess, never the cache."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    assert status.tunnel_destination(free_port) is None
+
+
+def test_tunnel_destination_plain_listener_is_none() -> None:
+    """A listener that is not one of our tunnels is unattributable.
+
+    This is the case that matters: something IS serving the port, so the old
+    code lit the node hop. It may be a co-tenant's argo-proxy.
+    """
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        assert status.tunnel_destination(srv.getsockname()[1]) is None
+    finally:
+        srv.close()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # mux master, as macOS renders it
+        ("ssh: /Users/jdoe/.ssh/sockets/argo-anywhere-jdoe-compute-01.cels.anl.gov-22 [mux]",
+         "compute-01.cels.anl.gov"),
+        # foreground tunnel carrying an explicit ControlPath
+        ("ssh -N -L 64751:localhost:64751 -o ControlPath=/Users/jdoe/.ssh/sockets/"
+         "argo-anywhere-jdoe-compute-02.cels.anl.gov-22 jdoe@compute-02.cels.anl.gov",
+         "compute-02.cels.anl.gov"),
+        # legacy v1.x socket prefix, still alive mid-upgrade
+        ("ssh: /Users/jdoe/.ssh/sockets/argo-opencode-jdoe-compute-03.cels.anl.gov-22 [mux]",
+         "compute-03.cels.anl.gov"),
+        # a foreign ssh tunnel on the same port -- not ours, so unknown
+        ("ssh -N -L 64751:localhost:64751 someone@elsewhere.example.com", None),
+        # some unrelated server
+        ("/usr/bin/python3 -m http.server 64751", None),
+    ],
+)
+def test_tunnel_destination_parses_control_path(
+    monkeypatch: pytest.MonkeyPatch, command: str, expected: str | None
+) -> None:
+    """Parsing mirrors the engine's basename walk: strip prefix, port, user."""
+    import subprocess as _sp
+
+    def fake_run(argv, **kwargs):  # noqa: ANN001, ANN003
+        if argv[0].endswith("lsof"):
+            return _sp.CompletedProcess(argv, 0, stdout="4242\n", stderr="")
+        if argv[0] == "ps":
+            return _sp.CompletedProcess(argv, 0, stdout=command + "\n", stderr="")
+        raise AssertionError(f"unexpected call: {argv}")
+
+    monkeypatch.setattr(status.shutil, "which", lambda _tool: "/usr/bin/lsof")
+    monkeypatch.setattr(status.subprocess, "run", fake_run)
+    assert status.tunnel_destination(64751) == expected
+
+
+def test_tunnel_destination_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Degrade to None on any tooling failure; the dashboard must not 500."""
+    def boom(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise OSError("lsof exploded")
+
+    monkeypatch.setattr(status.shutil, "which", lambda _tool: "/usr/bin/lsof")
+    monkeypatch.setattr(status.subprocess, "run", boom)
+    assert status.tunnel_destination(64751) is None
+
+
+def test_tunnel_destination_makes_no_network_call() -> None:
+    """The 'no ANL contact of its own' contract still holds.
+
+    Local inspection only: lsof + ps. If this ever grows an ssh round trip it
+    belongs behind an explicit user action, not the status poll.
+    """
+    import ast
+    import inspect
+
+    src = inspect.getsource(status.tunnel_destination)
+    # Strip comments + docstrings: the prose legitimately says "openssh" and
+    # "no SSH", and a substring match on the raw source would fail on those.
+    # Only executable code is in scope here.
+    tree = ast.parse(textwrap.dedent(src))
+    code_strings = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    # The only string literals this function should carry are argv fragments
+    # for lsof / ps and the regex bits -- nothing naming ssh or a URL scheme.
+    for literal in code_strings:
+        low = literal.lower()
+        assert not low.startswith(("http://", "https://")), (
+            f"tunnel_destination must not contact anything; found {literal!r}"
+        )
+    argv_commands = {
+        node.value
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        for arg in call.args
+        if isinstance(arg, ast.List)
+        for node in arg.elts[:1]
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert argv_commands <= {"ps"}, (
+        f"tunnel_destination may only shell out to lsof/ps; got {argv_commands}"
+    )
+    for banned in ("urlopen", "create_connection", "urllib"):
+        assert banned not in src, (
+            f"tunnel_destination must stay local; found {banned!r}"
+        )

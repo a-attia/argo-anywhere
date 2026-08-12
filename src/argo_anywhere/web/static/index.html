@@ -235,6 +235,12 @@
     .channel-addr { font-family: var(--mono); font-size: var(--t-meta);
                     color: var(--ink-dim); }
     .channel-addr b { color: var(--ink); font-weight: 500; }
+    /* Web-UI Defect 3: a destination we could not confirm. Reuses --warn-badge
+       (defined in all three palette blocks, contrast-checked) rather than a hex
+       literal, so the theme toggle covers it. Deliberately warn-coloured, not
+       danger: an unverified tunnel is usually fine, just not something we are
+       entitled to state as fact. */
+    .channel-addr b.unverified, #channelMeta b.unverified { color: var(--warn-badge); font-weight: 500; }
 
     /* ---- signal path (signature) ---- */
     .signalpath { display: flex; align-items: flex-start; gap: 0; padding: 6px 2px 14px; }
@@ -1022,6 +1028,24 @@
       const listeners = data.listeners || []; lastSessions = data.sessions || [];
       tunnelUp = !!(cachedPort && listeners.some((l) => l.port === cachedPort));
 
+      // Web-UI Defect 3 (2026-08-12). `tunnelUp` means only "something holds
+      // the cached port" -- an lsof hit with no ownership and no destination.
+      // The node NAME came from the cache, i.e. a memory of a previous run.
+      // Rendering those two together as "localhost:PORT -> compute-01" with a
+      // lit node hop asserted a verified link from evidence that supports no
+      // such claim; on a shared node the listener can be a co-tenant's
+      // argo-proxy. That is the same inference behind the 2026-08-10 incident,
+      // and a diagram states it more forcefully than the engine's text row did.
+      //
+      // verified_node is parsed from the tunnel's own ControlPath, so it IS
+      // evidence about this connection. null means we could not establish it;
+      // the UI must then say so rather than fall back to the cached name.
+      const verifiedNode = data.verified_node || null;
+      const nodeVerified = tunnelUp && !!verifiedNode;
+      // A tunnel we can see but cannot attribute: real, and not what the
+      // cache claims it is. Worth flagging, not worth alarming.
+      const nodeUnverified = tunnelUp && !verifiedNode;
+
       // The port shown on the wire is the CACHED port (last known), which is
       // meaningful only while a tunnel is actually forwarding it. When the
       // channel is down it is remembered configuration, not live state, so it
@@ -1031,8 +1055,19 @@
       // Every hop reflects the CHANNEL's state, including the laptop: this is
       // a diagram of the link, not of which machines exist.
       setHop('hopLaptop', tunnelUp ? 'up' : 'unknown');
-      setHop('hopNode', tunnelUp ? 'up' : 'unknown');
-      el('nodeSub').textContent = st.node ? st.node.split('.')[0] : '—';
+      // The node hop goes green only when the destination is VERIFIED. A
+      // tunnel we cannot attribute leaves it 'unknown' -- we know something is
+      // forwarding, we do not know where.
+      setHop('hopNode', nodeVerified ? 'up' : 'unknown');
+      el('nodeSub').textContent = nodeVerified
+        ? verifiedNode.split('.')[0]
+        : (nodeUnverified ? 'unverified' : '—');
+      el('nodeSub').title = nodeVerified
+        ? `Verified from the tunnel's ControlPath: ${verifiedNode}`
+        : (nodeUnverified
+            ? 'Something is forwarding this port, but argo-anywhere cannot '
+              + 'confirm which host it reaches. It may not be the cached node.'
+            : '');
       setWire('wireTunnel', tunnelUp ? 'up' : 'faint', tunnelUp ? 'up' : 'faint');
       setWire('wireProxy', tunnelUp ? 'up' : 'faint', 'faint');
 
@@ -1046,15 +1081,27 @@
       const chState = el('chState');
       chState.textContent = tunnelUp ? 'connected' : 'not connected';
       chState.classList.toggle('down', !tunnelUp);
-      el('chAddr').innerHTML = tunnelUp
-        ? `localhost:<b>${cachedPort}</b> &rarr; <b>${st.node ? st.node.split('.')[0] : '—'}</b>`
-        : '';
+      // Only name a destination we verified. When we cannot, show the port we
+      // are actually forwarding and say the far end is unconfirmed -- never
+      // substitute the cached name, which is what made this line a claim
+      // rather than a report.
+      el('chAddr').innerHTML = !tunnelUp
+        ? ''
+        : (nodeVerified
+            ? `localhost:<b>${cachedPort}</b> &rarr; <b>${verifiedNode.split('.')[0]}</b>`
+            : `localhost:<b>${cachedPort}</b> &rarr; <b class="unverified">unverified</b>`);
       el('connectCta').hidden = tunnelUp;
       el('channelUp').hidden = !tunnelUp;
       if (tunnelUp) {
         const held = lastSessions.find((s) => s.alive && s.owns_channel);
+        // The node here is the verified destination when we have one. The
+        // cached value is still shown when we don't, but labelled as cached so
+        // it reads as "last known", not "current".
+        const nodeCell = nodeVerified
+          ? `<b>${verifiedNode}</b>`
+          : `<b class="unverified">unverified</b>${st.node ? ` (cached: ${st.node})` : ''}`;
         el('channelMeta').innerHTML =
-          `user <b>${st.user || '—'}</b>node <b>${st.node || '—'}</b>port <b>${cachedPort}</b>` +
+          `user <b>${st.user || '—'}</b>node ${nodeCell}port <b>${cachedPort}</b>` +
           `held by <b>${held ? 'this UI (' + held.id + ')' : 'external terminal'}</b>`;
       } else { setHop('hopProxy', 'unknown'); el('proxySub').textContent = '—'; }
 

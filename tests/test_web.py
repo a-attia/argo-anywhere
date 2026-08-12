@@ -83,6 +83,40 @@ def test_api_status(client: TestClient) -> None:
     # The API reports the actual package version (don't pin a frozen patch).
     assert body["package"]["package_version"] == argo_anywhere.__version__
     assert isinstance(body["listeners"], list)
+    # Web-UI Defect 3: the dashboard needs a destination it can defend, kept
+    # separate from the cached name so the UI cannot conflate them.
+    assert "verified_node" in body
+
+
+def test_api_status_never_falls_back_to_the_cached_node(
+    client: TestClient, monkeypatch
+) -> None:
+    """``verified_node`` must be None when the destination is unknown.
+
+    The bug this guards: a listener on the cached port (ownership and far end
+    both unknown) plus a cached node NAME were rendered together as a verified
+    link. On a shared node that listener can be a co-tenant's argo-proxy. If
+    ``verified_node`` ever silently inherits the cache, the UI goes back to
+    asserting a topology it cannot see.
+    """
+    from argo_anywhere import status as status_mod
+
+    monkeypatch.setattr(
+        status_mod, "cached_state", lambda *_a, **_k: {
+            "user": "jdoe", "node": "compute-99.cels.anl.gov", "port": 64751
+        }
+    )
+    monkeypatch.setattr(
+        status_mod, "local_listeners",
+        lambda *_a, **_k: [status_mod.Listener(port=64751, pid=1, command="python3")],
+    )
+    monkeypatch.setattr(status_mod, "tunnel_destination", lambda *_a, **_k: None)
+
+    body = client.get("/api/status").json()
+    assert body["cached"]["node"] == "compute-99.cels.anl.gov"
+    assert body["verified_node"] is None, (
+        "an unattributable listener must not inherit the cached node name"
+    )
 
 
 def test_static_assets_served(client: TestClient) -> None:

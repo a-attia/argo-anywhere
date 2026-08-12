@@ -332,6 +332,111 @@ def test_signal_path_claims_nothing_while_disconnected(browser, ui_server) -> No
     assert state["portIdle"], "cached port not dimmed while the channel is down"
 
 
+def test_unattributable_tunnel_is_not_rendered_as_a_named_node(
+    browser, ui_server
+) -> None:
+    """Web-UI Defect 3 (2026-08-12): the dashboard's version of the overclaim.
+
+    Set up exactly the incident shape: something IS listening on the cached
+    port, but its destination cannot be established (``verified_node: null``),
+    while the cache still remembers ``compute-01``. The old code lit the node
+    hop green and rendered ``localhost:64742 -> compute-01`` -- a verified
+    topology asserted from an lsof hit plus a memory. On a shared node that
+    listener may be a co-tenant's argo-proxy, which is how the 2026-08-10
+    incident produced ALL GREEN while traffic left under a stranger's identity.
+
+    The UI must now decline to name a node it cannot confirm.
+    """
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '{"package":{"package_version":"0","engine_version":"0",'
+                '"app_cwd_short":"~"},'
+                '"cached":{"user":"u","node":"compute-01.example.org","port":64742},'
+                '"listeners":[{"port":64742,"pid":4242,"command":"python3"}],'
+                '"sessions":[],"verified_node":null}'
+            ),
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(900)
+    state = pg.evaluate(
+        """() => ({
+          nodeHop: document.querySelector('#hopNode').className,
+          nodeSub: document.querySelector('#nodeSub').textContent.trim(),
+          addr: document.querySelector('#chAddr').textContent.trim(),
+          meta: document.querySelector('#channelMeta').textContent.trim(),
+        })"""
+    )
+    pg.close()
+
+    assert "up" not in state["nodeHop"].split(), (
+        f"node hop is 'up' for an unattributable tunnel: {state['nodeHop']!r}"
+    )
+    assert "compute-01" not in state["nodeSub"], (
+        f"node hop names the CACHED host as if verified: {state['nodeSub']!r}"
+    )
+    assert "compute-01" not in state["addr"], (
+        "the channel address asserts a destination we could not confirm: "
+        f"{state['addr']!r}"
+    )
+    assert "unverified" in state["addr"].lower(), (
+        f"the unverified far end must be stated, not omitted: {state['addr']!r}"
+    )
+    # The cached value may still appear in the detail line, but only labelled
+    # as cached -- "last known", never presented as the current destination.
+    if "compute-01" in state["meta"]:
+        assert "cached" in state["meta"].lower(), (
+            f"cached node shown without the 'cached' qualifier: {state['meta']!r}"
+        )
+
+
+def test_verified_tunnel_is_named_from_the_probe_not_the_cache(
+    browser, ui_server
+) -> None:
+    """The positive case: a confirmed destination is named, and it is the
+    VERIFIED one -- so a stale cache disagreeing with reality cannot win.
+    """
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '{"package":{"package_version":"0","engine_version":"0",'
+                '"app_cwd_short":"~"},'
+                '"cached":{"user":"u","node":"stale-cache.example.org","port":64742},'
+                '"listeners":[{"port":64742,"pid":4242,"command":"ssh"}],'
+                '"sessions":[],"verified_node":"compute-07.cels.anl.gov"}'
+            ),
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(900)
+    state = pg.evaluate(
+        """() => ({
+          nodeHop: document.querySelector('#hopNode').className,
+          nodeSub: document.querySelector('#nodeSub').textContent.trim(),
+          addr: document.querySelector('#chAddr').textContent.trim(),
+        })"""
+    )
+    pg.close()
+
+    assert "up" in state["nodeHop"].split(), "a verified node hop should be up"
+    assert state["nodeSub"] == "compute-07", (
+        f"node hop should name the verified host; got {state['nodeSub']!r}"
+    )
+    assert "compute-07" in state["addr"]
+    assert "stale-cache" not in state["addr"], (
+        "the stale cached name must never outrank the verified destination"
+    )
+
+
 _CONTRAST_JS = """
 (sel) => {
   const L = c => {

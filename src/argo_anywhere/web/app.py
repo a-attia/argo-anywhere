@@ -283,15 +283,35 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         # Local-only: versions + loopback listeners + live managed sessions.
         # Does NOT poll channel /health (that would traverse an ANL tunnel); the
         # dashboard requests health explicitly on user action via /api/health.
-        from ..status import cached_state, local_listeners, package_info
+        from ..status import (
+            cached_state,
+            local_listeners,
+            package_info,
+            tunnel_destination,
+        )
 
         state = cached_state()
         ports = sorted({p for p in (state["port"], 8799) if p})
+        listeners = local_listeners(ports)
+
+        # Web-UI Defect 3 (2026-08-12). The dashboard used to derive "connected
+        # to <node>" from `a listener exists on the cached port` plus the node
+        # NAME out of the cache. That is reachability rendered as topology: on
+        # a shared node the listener may be a co-tenant's argo-proxy, and the
+        # cached name is a memory of a past run, so the diagram could assert a
+        # link that did not exist. Report the destination we can actually
+        # establish -- parsed from the tunnel's own ControlPath -- and let the
+        # UI degrade honestly when it is unknown.
+        cached_port = state.get("port")
+        verified_node = tunnel_destination(cached_port) if cached_port else None
         return JSONResponse({
             "package": package_info(),
             "cached": state,
-            "listeners": [ln.as_dict() for ln in local_listeners(ports)],
+            "listeners": [ln.as_dict() for ln in listeners],
             "sessions": registry.snapshots(),
+            # None => we could not establish it. NEVER fall back to the cache
+            # here; that is the overclaim this field exists to remove.
+            "verified_node": verified_node,
         })
 
     @app.get("/api/sessions")

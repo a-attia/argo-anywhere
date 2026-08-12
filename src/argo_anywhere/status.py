@@ -160,6 +160,91 @@ class Listener:
         return asdict(self)
 
 
+#: Mux-socket basename prefixes the engine writes (``argo-anywhere-%r-%h-%p``);
+#: the legacy ``argo-opencode-`` form still exists on v1.x masters mid-upgrade.
+_MUX_PREFIXES = ("argo-anywhere-", "argo-opencode-")
+
+_MUX_SOCKET_RE = re.compile(
+    r"[/=\s](argo-(?:anywhere|opencode)-\S+)"
+)
+
+
+def tunnel_destination(port: int) -> str | None:
+    """Host the tunnel on ``port`` actually forwards to, or ``None``.
+
+    Python mirror of the engine's ``local_tunnel_destination`` (D-032-style
+    coupling: if one changes, change both). Pure local inspection -- ``lsof``
+    to find the listener pid, ``ps`` to read its command line, then parse the
+    ControlPath socket basename, which openssh names after the destination it
+    is really talking to. No SSH, no network, no ANL contact, consistent with
+    this module's "no ANL contact of its own" contract.
+
+    Why this exists (web-UI Defect 3): the dashboard used to light the node hop
+    and render ``localhost:PORT -> <node>`` whenever *anything* held the cached
+    port, taking the node name from the cache. That is reachability presented
+    as topology -- exactly the inference that let the 2026-08-10 incident show
+    ALL GREEN while traffic went through a stranger's argo-proxy. A cached name
+    is a memory of a past connection, not evidence about the current one.
+
+    Returns ``None`` whenever the destination cannot be established -- no
+    listener, no ``lsof``/``ps``, an unparseable command line, or a listener
+    that is not one of our tunnels. Callers must treat ``None`` as "unknown",
+    never as "fine".
+    """
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return None
+    try:
+        out = subprocess.run(
+            [lsof, "-nP", f"-i:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    pid = next((ln.strip() for ln in out.splitlines() if ln.strip()), None)
+    if not pid:
+        return None
+
+    try:
+        cmd = subprocess.run(
+            ["ps", "-o", "command=", "-p", pid],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not cmd:
+        return None
+
+    match = _MUX_SOCKET_RE.search(cmd)
+    if not match:
+        return None
+    basename = match.group(1)
+
+    for prefix in _MUX_PREFIXES:
+        if basename.startswith(prefix):
+            basename = basename[len(prefix) :]
+            break
+    else:  # pragma: no cover - the regex guarantees one of the prefixes
+        return None
+
+    # Strip the trailing -PORT (numeric), then the leading USER- field. ANL
+    # usernames are alphanumeric, so the first hyphen-separated field is the
+    # user and the remainder is the host.
+    without_port = re.sub(r"-\d+$", "", basename)
+    _, _, host = without_port.partition("-")
+    if not host:
+        return None
+    # Sanity: a hostname has a dot or is a bare alphanumeric label.
+    if "." in host or host.isalnum():
+        return host
+    return None
+
+
 def local_listeners(ports: list[int] | None = None) -> list[Listener]:
     """Loopback TCP listeners, via ``lsof`` (best-effort; empty if lsof absent).
 
