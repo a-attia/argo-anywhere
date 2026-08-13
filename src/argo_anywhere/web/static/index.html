@@ -275,7 +275,14 @@
     .channel-meta b { color: var(--ink); font-weight: 500; }
     .channel-actions { display: flex; align-items: center; gap: 11px; margin-top: 12px; }
     .act-note { font-size: var(--t-meta); color: var(--ink-dim); }
-    .act-note.err { color: var(--down); } .act-note.ok { color: var(--up); }
+    .act-note.err { color: var(--down); }
+    /* --up-badge, not --up: at small text sizes on --panel-raised the plain
+       token measures 3.94:1 in the light theme, under the 4.5:1 AA floor. The
+       badge variants exist for exactly this and are contrast-checked in all
+       three palette blocks. Previously invisible because this line only
+       renders once a health probe has succeeded, which the contrast test did
+       not reach until channel discovery started surfacing a live channel. */
+    .act-note.ok { color: var(--up-badge); }
     /* Reachable but unattributable: warn, not danger. Uses --warn-badge,
        which is defined + contrast-checked in all three palette blocks. */
     .act-note.warn { color: var(--warn-badge); }
@@ -1031,9 +1038,38 @@
       if (p.app_cwd_short) {
         el('appCwd').innerHTML = `app cwd: <b>${p.app_cwd_short}</b>`;
       }
-      const st = data.cached || {}; cachedPort = st.port || null;
-      const listeners = data.listeners || []; lastSessions = data.sessions || [];
-      tunnelUp = !!(cachedPort && listeners.some((l) => l.port === cachedPort));
+      const st = data.cached || {}; lastSessions = data.sessions || [];
+      const listeners = data.listeners || [];
+
+      // "Are we connected?" is answered by what EXISTS, not by what the cache
+      // remembers (2026-08-12). Keying off a listener on the cached port made
+      // the cache load-bearing for a question it cannot answer: a run that
+      // aborted or moved ports leaves it naming a dead port, and the dashboard
+      // then reported "not connected" while a healthy channel ran in the
+      // embedded terminal beside it. The user chased the contradiction and
+      // lost the session.
+      //
+      // `discovered` lists tunnels found by inspecting ssh processes, so it is
+      // true regardless of the cache. The cache now only picks WHICH channel to
+      // foreground when several exist.
+      const discovered = data.discovered || [];
+      const cachedMatch = discovered.find((c) => c.port === st.port) || null;
+      const active = cachedMatch || discovered[0] || null;
+
+      // Three states, not two. Discovery only recognises OUR tunnels, so
+      // "nothing discovered" does not mean "nothing there": something may hold
+      // the cached port that we cannot attribute -- on a shared node, quite
+      // possibly a co-tenant's argo-proxy. Collapsing that into "not
+      // connected" would hide it, and reporting it as connected would be the
+      // 2026-08-10 overclaim. It is its own state: occupied, unverified.
+      const occupiedUnverified =
+        !active && !!st.port && listeners.some((l) => l.port === st.port);
+      tunnelUp = !!active || occupiedUnverified;
+      cachedPort = active ? active.port : (st.port || null);
+      // Cache disagrees with reality: a channel is up, but not the one the
+      // cache names. Surfaced rather than silently papered over -- the client
+      // configs may still point at the stale port.
+      const cacheStale = !!(active && st.port && st.port !== active.port);
 
       // Web-UI Defect 3 (2026-08-12). `tunnelUp` means only "something holds
       // the cached port" -- an lsof hit with no ownership and no destination.
@@ -1047,7 +1083,10 @@
       // verified_node is parsed from the tunnel's own ControlPath, so it IS
       // evidence about this connection. null means we could not establish it;
       // the UI must then say so rather than fall back to the cached name.
-      const verifiedNode = data.verified_node || null;
+      // Prefer the active channel's own destination (discovery already parsed
+      // it from that tunnel's ControlPath); fall back to the API's field for
+      // the cached port. Both are evidence; neither is the cache's node name.
+      const verifiedNode = (active && active.node) || data.verified_node || null;
       const nodeVerified = tunnelUp && !!verifiedNode;
       // A tunnel we can see but cannot attribute: real, and not what the
       // cache claims it is. Worth flagging, not worth alarming.
@@ -1107,9 +1146,16 @@
         const nodeCell = nodeVerified
           ? `<b>${verifiedNode}</b>`
           : `<b class="unverified">unverified</b>${st.node ? ` (cached: ${st.node})` : ''}`;
+        // A live channel on a port the cache does not name is worth saying out
+        // loud: the client configs may still point at the stale one, which is
+        // the shape the "connected but nothing works" reports take.
+        const staleCell = cacheStale
+          ? `<b class="unverified">saved port ${st.port} is stale</b>`
+          : '';
         el('channelMeta').innerHTML =
           `user <b>${st.user || '—'}</b>node ${nodeCell}port <b>${cachedPort}</b>` +
-          `held by <b>${held ? 'this UI (' + held.id + ')' : 'external terminal'}</b>`;
+          `held by <b>${held ? 'this UI (' + held.id + ')' : 'external terminal'}</b>` +
+          staleCell;
       } else { setHop('hopProxy', 'unknown'); el('proxySub').textContent = '—'; }
 
       // Live health: probe immediately when the tunnel first comes up; reset

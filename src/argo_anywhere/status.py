@@ -287,3 +287,46 @@ def local_listeners(ports: list[int] | None = None) -> list[Listener]:
         seen.add((port, pid))
         listeners.append(Listener(port=port, pid=pid, command=command))
     return listeners
+
+
+@dataclass(frozen=True)
+class DiscoveredChannel:
+    """A live argo-anywhere tunnel found by inspection, not by the cache."""
+
+    port: int
+    pid: int
+    node: str
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def discover_channels() -> list[DiscoveredChannel]:
+    """Every loopback listener that is one of our SSH tunnels, cache-ignored.
+
+    The dashboard used to answer "are we connected?" with "is something
+    listening on the *cached* port?". That makes the cache load-bearing for a
+    question it cannot answer: the cache records what a run intended, and a run
+    that aborted, failed, or moved ports leaves it naming a port with nothing
+    on it. Observed 2026-08-12 — the cache said one port, a healthy channel was
+    on another, and the dashboard reported "not connected" while a working
+    session ran in the embedded terminal beside it.
+
+    Discovery inverts that. A tunnel is identified by what it *is* — an ssh
+    process whose ControlPath names an argo-anywhere socket
+    (:func:`tunnel_destination`) — so the cache becomes a hint about which
+    channel is the interesting one, never the evidence that one exists.
+
+    Local only: ``lsof`` + ``ps``, no network, no ANL contact. Empty list means
+    no tunnel found, which is a real answer; it never means "unknown".
+    """
+    found: list[DiscoveredChannel] = []
+    for listener in local_listeners():
+        if listener.command not in ("ssh", "sshd"):
+            continue
+        node = tunnel_destination(listener.port)
+        if node:
+            found.append(
+                DiscoveredChannel(port=listener.port, pid=listener.pid, node=node)
+            )
+    return sorted(found, key=lambda c: c.port)

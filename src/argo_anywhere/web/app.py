@@ -285,14 +285,28 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         # dashboard requests health explicitly on user action via /api/health.
         from ..status import (
             cached_state,
+            discover_channels,
             local_listeners,
             package_info,
             tunnel_destination,
         )
 
         state = cached_state()
-        ports = sorted({p for p in (state["port"], 8799) if p})
+        # Include every discovered tunnel's port, not just the cached one.
+        # Filtering to the cache meant a live channel on a different port was
+        # absent from the Tunnels panel entirely -- the panel showed only the
+        # web UI's own listener while a working ssh tunnel sat beside it.
+        discovered_objs = discover_channels()
+        ports = sorted(
+            {p for p in (state["port"], 8799) if p}
+            | {c.port for c in discovered_objs}
+        )
         listeners = local_listeners(ports)
+        # Cache-independent: what tunnels actually exist right now. The
+        # dashboard keys "connected?" off this, not off a listener on the
+        # cached port -- see discover_channels() for why the cache cannot
+        # answer that question.
+        discovered = [c.as_dict() for c in discovered_objs]
 
         # Web-UI Defect 3 (2026-08-12). The dashboard used to derive "connected
         # to <node>" from `a listener exists on the cached port` plus the node
@@ -312,6 +326,11 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             # None => we could not establish it. NEVER fall back to the cache
             # here; that is the overclaim this field exists to remove.
             "verified_node": verified_node,
+            # Live tunnels found by inspection, cache or no cache. When this is
+            # non-empty but `cached.port` matches none of them, the cache is
+            # stale and the UI says so instead of reporting "not connected"
+            # over a working channel.
+            "discovered": discovered,
         })
 
     @app.get("/api/sessions")

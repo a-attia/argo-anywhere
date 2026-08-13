@@ -358,7 +358,12 @@ def test_unattributable_tunnel_is_not_rendered_as_a_named_node(
                 '"app_cwd_short":"~"},'
                 '"cached":{"user":"u","node":"compute-01.example.org","port":64742},'
                 '"listeners":[{"port":64742,"pid":4242,"command":"python3"}],'
-                '"sessions":[],"verified_node":null}'
+                '"sessions":[],"verified_node":null,'
+                # A listener we cannot attribute is NOT a discovered channel:
+                # discovery requires an ssh process whose ControlPath names one
+                # of our sockets. It is still in `listeners`, so the UI must
+                # decide what to say about it.
+                '"discovered":[]}'
             ),
         ),
     )
@@ -418,7 +423,7 @@ def test_health_200_does_not_light_the_proxy_hop_when_unverified(
                 '"app_cwd_short":"~"},'
                 '"cached":{"user":"u","node":"compute-01.example.org","port":64742},'
                 '"listeners":[{"port":64742,"pid":4242,"command":"python3"}],'
-                '"sessions":[],"verified_node":null}'
+                '"sessions":[],"verified_node":null,"discovered":[]}'
             ),
         ),
     )
@@ -466,7 +471,9 @@ def test_health_200_lights_the_proxy_hop_when_verified(browser, ui_server) -> No
                 '"app_cwd_short":"~"},'
                 '"cached":{"user":"u","node":"compute-01.example.org","port":64742},'
                 '"listeners":[{"port":64742,"pid":4242,"command":"ssh"}],'
-                '"sessions":[],"verified_node":"compute-01.example.org"}'
+                '"sessions":[],"verified_node":"compute-01.example.org",'
+                '"discovered":[{"port":64742,"pid":4242,'
+                '"node":"compute-01.example.org"}]}'
             ),
         ),
     )
@@ -511,7 +518,9 @@ def test_verified_tunnel_is_named_from_the_probe_not_the_cache(
                 '"app_cwd_short":"~"},'
                 '"cached":{"user":"u","node":"stale-cache.example.org","port":64742},'
                 '"listeners":[{"port":64742,"pid":4242,"command":"ssh"}],'
-                '"sessions":[],"verified_node":"compute-07.cels.anl.gov"}'
+                '"sessions":[],"verified_node":"compute-07.cels.anl.gov",'
+                '"discovered":[{"port":64742,"pid":4242,'
+                '"node":"compute-07.cels.anl.gov"}]}'
             ),
         ),
     )
@@ -538,20 +547,49 @@ def test_verified_tunnel_is_named_from_the_probe_not_the_cache(
 
 _CONTRAST_JS = """
 (sel) => {
-  const L = c => {
-    const n = c.match(/\\d+/g).slice(0, 3).map(v => v / 255)
-      .map(v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-    return 0.2126 * n[0] + 0.7152 * n[1] + 0.0722 * n[2];
+  // Parse 'rgb(r,g,b)' / 'rgba(r,g,b,a)' -> [r,g,b,a].
+  const parse = c => {
+    const n = (c.match(/[\\d.]+/g) || []).map(Number);
+    return [n[0] || 0, n[1] || 0, n[2] || 0, n.length > 3 ? n[3] : 1];
+  };
+  const lum = ([r, g, b]) => {
+    const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+  };
+  // Composite src OVER dst (both [r,g,b,a]); returns an opaque colour.
+  const over = (src, dst) => {
+    const a = src[3];
+    return [0, 1, 2].map(i => src[i] * a + dst[i] * (1 - a)).concat([1]);
+  };
+  // Resolve the EFFECTIVE background by compositing every translucent layer
+  // down to the first opaque ancestor.
+  //
+  // The first version stopped at the first background that was not exactly
+  // 'rgba(0, 0, 0, 0)' and treated it as opaque. A translucent tint --
+  // .btn-soft uses `--link-soft`, which is the link colour at 10% alpha --
+  // was therefore compared against ITSELF, giving ratio 1 and failing a
+  // button that is perfectly legible. The test measured its own arithmetic,
+  // not the page.
+  const effBg = el => {
+    const layers = [];
+    let p = el;
+    while (p) {
+      const c = parse(getComputedStyle(p).backgroundColor);
+      if (c[3] > 0) layers.push(c);
+      if (c[3] === 1) break;
+      p = p.parentElement;
+    }
+    let acc = layers.length ? layers[layers.length - 1] : [255, 255, 255, 1];
+    for (let i = layers.length - 2; i >= 0; i--) acc = over(layers[i], acc);
+    return acc;
   };
   return [...document.querySelectorAll(sel)]
     .filter(e => e.offsetParent !== null && e.textContent.trim())
     .map(e => {
       const s = getComputedStyle(e);
-      let bg = s.backgroundColor, p = e;
-      while (bg === 'rgba(0, 0, 0, 0)' && p.parentElement) {
-        p = p.parentElement; bg = getComputedStyle(p).backgroundColor;
-      }
-      const a = L(s.color), c = L(bg);
+      const bg = effBg(e);
+      const fg = over(parse(s.color), bg);   // text can be translucent too
+      const a = lum(fg), c = lum(bg);
       const hi = Math.max(a, c), lo = Math.min(a, c);
       return {text: e.textContent.trim().slice(0, 30),
               ratio: +(((hi + 0.05) / (lo + 0.05)).toFixed(2))};
@@ -642,3 +680,64 @@ def test_topbar_buttons_stay_on_screen_at_mobile_width(browser, ui_server) -> No
     pg.close()
     assert offscreen == 0, f"{offscreen} topbar button(s) off-screen at 420px"
     assert not overflow, "page scrolls horizontally at 420px"
+
+
+def test_stale_cache_does_not_hide_a_live_channel(browser, ui_server) -> None:
+    """The 2026-08-12 field incident, driven through the real page.
+
+    A healthy tunnel on :64743; the cache still names :64742 from an aborted
+    run. The dashboard used to report "not connected" -- because it asked "is
+    something on the cached port?" -- while a working session ran in the
+    embedded terminal beside it. The user chased the contradiction, reconnected
+    repeatedly, and lost the channel.
+
+    Connected-ness must come from what exists, and the stale cache must be
+    called out rather than silently papered over: the client configs may still
+    point at the dead port, which is what turns "connected but nothing works"
+    into a support thread.
+    """
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '{"package":{"package_version":"0","engine_version":"0",'
+                '"app_cwd_short":"~"},'
+                '"cached":{"user":"u","node":"compute-01.example.org","port":64742},'
+                '"listeners":[{"port":64743,"pid":53133,"command":"ssh"}],'
+                '"sessions":[],"verified_node":null,'
+                '"discovered":[{"port":64743,"pid":53133,'
+                '"node":"compute-01.example.org"}]}'
+            ),
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(900)
+    state = pg.evaluate(
+        """() => ({
+          chState: document.querySelector('#chState').textContent.trim(),
+          addr: document.querySelector('#chAddr').textContent.trim(),
+          nodeHop: document.querySelector('#hopNode').className,
+          meta: document.querySelector('#channelMeta').textContent.trim(),
+          tunnels: document.querySelector('#listeners').textContent.trim(),
+        })"""
+    )
+    pg.close()
+
+    assert state["chState"] == "connected", (
+        f"a live channel was reported as {state['chState']!r} because the cache "
+        "named a different port"
+    )
+    assert "64743" in state["addr"], (
+        f"the address must show the port actually forwarding; got {state['addr']!r}"
+    )
+    assert "64742" not in state["addr"], "the dead cached port must not be shown as live"
+    assert "up" in state["nodeHop"].split(), "verified destination should light the hop"
+    assert "stale" in state["meta"].lower(), (
+        f"a stale cache must be surfaced, not hidden; got {state['meta']!r}"
+    )
+    assert "64743" in state["tunnels"], (
+        f"the live tunnel must appear in the Tunnels panel; got {state['tunnels']!r}"
+    )

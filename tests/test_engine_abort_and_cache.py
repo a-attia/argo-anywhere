@@ -24,6 +24,7 @@ the port cache was left behind.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -273,3 +274,257 @@ def test_engine_copies_stay_byte_identical() -> None:
         pytest.skip("root engine copy not present in this layout")
     with engine_path() as vendored:
         assert root_copy.read_bytes() == vendored.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Cross-client port coherence (2026-08-12)
+# ---------------------------------------------------------------------------
+#
+# enumerate_client_ports is what makes "do my clients agree on the port?"
+# answerable -- detect_port_disagreement walks it, and both `status` and client
+# startup act on the result. aider was missing from it since Phase 5a shipped,
+# so aider's config was invisible to every coherence check.
+#
+# Observed after a collision moved the port: cache and opencode both said
+# 64743, aider still said 64751, nothing warned, and `aider` failed with
+# connection-refused against a port that no longer existed -- which reads to a
+# user as "argo-anywhere broke aider".
+
+
+def _enumerate(tmp_path: Path, *, opencode_port=None, aider_port=None) -> str:
+    """Run the real enumerate_client_ports against synthetic configs."""
+    src = _engine_source()
+    oc = tmp_path / "opencode.json"
+    if opencode_port:
+        oc.write_text(
+            json.dumps({"provider": {"argo": {"options": {
+                "baseURL": f"http://localhost:{opencode_port}/v1"}}}})
+        )
+    ai = tmp_path / ".aider.conf.yml"
+    if aider_port:
+        ai.write_text(f"openai-api-base: http://localhost:{aider_port}/v1\n")
+
+    script = "\n".join(
+        (
+            "set -uo pipefail",
+            f'OPENCODE_GLOBAL_CONFIG={oc}',
+            # read_port_from_opencode_config reads OPENCODE_CONFIG (the legacy
+            # alias), not OPENCODE_GLOBAL_CONFIG. Set both, as the engine does.
+            f'OPENCODE_CONFIG={oc}',
+            'CLAUDECODE_GLOBAL_CONFIG=/nonexistent',
+            'CLAUDECODE_PROJECT_CONFIG=/nonexistent',
+            f'AIDER_GLOBAL_CONFIG={ai}',
+            _function_body(src, "read_port_from_opencode_config"),
+            _function_body(src, "_get_port_from_claudecode_config"),
+            _function_body(src, "_get_port_from_aider_config"),
+            _function_body(src, "enumerate_client_ports"),
+            "enumerate_client_ports",
+        )
+    )
+    path = tmp_path / "enum.sh"
+    path.write_text(script)
+    out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def test_aider_is_visible_to_the_coherence_check(tmp_path: Path) -> None:
+    """aider's port must be enumerated, or nothing can notice it drifting."""
+    out = _enumerate(tmp_path, opencode_port=64743, aider_port=64751)
+    assert "aider global 64751" in out, (
+        f"aider is invisible to enumerate_client_ports; got:\n{out}"
+    )
+    assert "opencode global 64743" in out
+
+
+def test_disagreement_is_detected_across_tools(tmp_path: Path) -> None:
+    """The field case: one tool moved, another did not."""
+    src = _engine_source()
+    oc = tmp_path / "opencode.json"
+    oc.write_text('{"provider":{"argo":{"options":{"baseURL":"http://localhost:64743/v1"}}}}')
+    ai = tmp_path / ".aider.conf.yml"
+    ai.write_text("openai-api-base: http://localhost:64751/v1\n")
+    script = "\n".join(
+        (
+            "set -uo pipefail",
+            f'OPENCODE_GLOBAL_CONFIG={oc}',
+            # read_port_from_opencode_config reads OPENCODE_CONFIG (the legacy
+            # alias), not OPENCODE_GLOBAL_CONFIG. Set both, as the engine does.
+            f'OPENCODE_CONFIG={oc}',
+            'CLAUDECODE_GLOBAL_CONFIG=/nonexistent',
+            'CLAUDECODE_PROJECT_CONFIG=/nonexistent',
+            f'AIDER_GLOBAL_CONFIG={ai}',
+            _function_body(src, "read_port_from_opencode_config"),
+            _function_body(src, "_get_port_from_claudecode_config"),
+            _function_body(src, "_get_port_from_aider_config"),
+            _function_body(src, "enumerate_client_ports"),
+            _function_body(src, "detect_port_disagreement"),
+            'detect_port_disagreement 64743 || true',
+        )
+    )
+    path = tmp_path / "d.sh"
+    path.write_text(script)
+    out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=30)
+    assert "aider" in out.stdout and "64751" in out.stdout, (
+        f"the drifted client must be reported; got:\n{out.stdout}"
+    )
+    assert "opencode" not in out.stdout, "an agreeing client must not be reported"
+
+
+def test_agreeing_clients_produce_no_disagreement(tmp_path: Path) -> None:
+    src = _engine_source()
+    oc = tmp_path / "opencode.json"
+    oc.write_text('{"provider":{"argo":{"options":{"baseURL":"http://localhost:64743/v1"}}}}')
+    ai = tmp_path / ".aider.conf.yml"
+    ai.write_text("openai-api-base: http://localhost:64743/v1\n")
+    script = "\n".join(
+        (
+            "set -uo pipefail",
+            f'OPENCODE_GLOBAL_CONFIG={oc}',
+            # read_port_from_opencode_config reads OPENCODE_CONFIG (the legacy
+            # alias), not OPENCODE_GLOBAL_CONFIG. Set both, as the engine does.
+            f'OPENCODE_CONFIG={oc}',
+            'CLAUDECODE_GLOBAL_CONFIG=/nonexistent',
+            'CLAUDECODE_PROJECT_CONFIG=/nonexistent',
+            f'AIDER_GLOBAL_CONFIG={ai}',
+            _function_body(src, "read_port_from_opencode_config"),
+            _function_body(src, "_get_port_from_claudecode_config"),
+            _function_body(src, "_get_port_from_aider_config"),
+            _function_body(src, "enumerate_client_ports"),
+            _function_body(src, "detect_port_disagreement"),
+            'detect_port_disagreement 64743 || true',
+        )
+    )
+    path = tmp_path / "a.sh"
+    path.write_text(script)
+    out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=30)
+    assert out.stdout.strip() == "", f"expected no disagreement; got:\n{out.stdout}"
+
+
+def test_every_config_writing_tool_is_enumerated() -> None:
+    """A tool that writes a port but is not enumerated is invisible to coherence.
+
+    Grep-level, deliberately: the point is to fail when someone adds a fourth
+    tool and forgets this function, which is exactly how aider was missed.
+    """
+    src = _engine_source()
+    body = _function_body(src, "enumerate_client_ports")
+    for tool in ("opencode", "claudecode", "aider"):
+        assert tool in body, (
+            f"{tool} writes a port into its config but is absent from "
+            "enumerate_client_ports, so no coherence check can see it"
+        )
+
+
+def _coherence(tmp_path: Path, *, port: int, opencode=None, aider=None,
+               packaged=False) -> str:
+    """Run the real report_client_coherence against synthetic configs."""
+    src = _engine_source()
+    oc = tmp_path / "opencode.json"
+    if opencode:
+        oc.write_text(json.dumps({"provider": {"argo": {"options": {
+            "baseURL": f"http://localhost:{opencode}/v1"}}}}))
+    ai = tmp_path / ".aider.conf.yml"
+    if aider:
+        ai.write_text(f"openai-api-base: http://localhost:{aider}/v1\n")
+    fns = "\n".join(
+        _function_body(src, f) for f in (
+            "read_port_from_opencode_config",
+            "_get_port_from_claudecode_config",
+            "_get_port_from_aider_config",
+            "enumerate_client_ports",
+            "detect_port_disagreement",
+            "report_client_coherence",
+        )
+    )
+    script = "\n".join(
+        (
+            "set -uo pipefail",
+            'warn(){ echo "[warn] $*"; }',
+            f'OPENCODE_GLOBAL_CONFIG={oc}',
+            f'OPENCODE_CONFIG={oc}',
+            'CLAUDECODE_GLOBAL_CONFIG=/nonexistent',
+            'CLAUDECODE_PROJECT_CONFIG=/nonexistent',
+            f'AIDER_GLOBAL_CONFIG={ai}',
+            f'ARGO_ANYWHERE_PACKAGED={1 if packaged else 0}',
+            f'PROXY_PORT={port}',
+            fns,
+            f"report_client_coherence {port}",
+        )
+    )
+    path = tmp_path / "c.sh"
+    path.write_text(script)
+    out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def test_coherence_names_the_drifted_client_and_the_fix(tmp_path: Path) -> None:
+    """The field case: a collision moved the channel, one client stayed behind.
+
+    Reporting the disagreement is not enough on its own -- the user needs the
+    command. "aider still says :64751" without "run `configure aider`" is a
+    diagnosis with no treatment.
+    """
+    out = _coherence(tmp_path, port=64743, opencode=64743, aider=64751,
+                     packaged=True)
+    assert "aider" in out and "64751" in out, f"drifted client not named:\n{out}"
+    assert "argo-anywhere configure aider" in out, (
+        f"the fix command must be spelled out; got:\n{out}"
+    )
+    assert "configure opencode" not in out, (
+        "a client that already agrees must not be listed"
+    )
+
+
+def test_coherence_is_silent_when_everything_agrees(tmp_path: Path) -> None:
+    """No news is good news -- this runs on every successful connect."""
+    out = _coherence(tmp_path, port=64743, opencode=64743, aider=64743)
+    assert out.strip() == "", f"expected silence; got:\n{out}"
+
+
+def test_coherence_uses_the_command_the_user_can_actually_type(tmp_path: Path) -> None:
+    """Under the package the command is `argo-anywhere`, not the script name."""
+    out = _coherence(tmp_path, port=64743, aider=64751, packaged=True)
+    assert "argo-anywhere configure aider" in out
+    assert ".sh configure" not in out, (
+        "packaged mode must not print the vendored script's filename"
+    )
+
+
+def test_coherence_runs_after_every_channel_is_established() -> None:
+    """It must fire for channel-only verbs too, and after the port is final.
+
+    The pre-existing startup check missed this twice over: it is gated on
+    `with_opencode_setup=1` (so `connect` / `tunnel` / `--ensure` skip it), and
+    it runs BEFORE ensure_or_reuse_tunnel (so a collision-moved port is never
+    re-checked). Pinning it to the cache-commit sites keeps both properties:
+    those are exactly the points where a channel is known to be up on a known
+    port.
+    """
+    src = _engine_source()
+    lines = src.splitlines()
+    commits = [i for i, ln in enumerate(lines)
+               if ln.strip() == '_persist_port_cache "$PROXY_PORT"']
+    assert commits, "no cache-commit sites found -- did they get renamed?"
+    for i in commits:
+        window = "\n".join(lines[i : i + 4])
+        assert "report_client_coherence" in window, (
+            f"channel established at line {i + 1} without a coherence report:\n"
+            f"{window}"
+        )
+
+
+def test_coherence_only_reports_never_rewrites() -> None:
+    """It must not silently fix configs this run was not asked to touch.
+
+    Unattended state changes are what produced the v3.3.0 incident; the whole
+    point of reporting is that the user stays in control.
+    """
+    body = _function_body(_engine_source(), "report_client_coherence")
+    for forbidden in ("write_opencode_config", "write_aider_config",
+                      "handle_config_file", "_persist_port_cache",
+                      "write_port_cache"):
+        assert forbidden not in body, (
+            f"report_client_coherence calls {forbidden}; it must only report"
+        )

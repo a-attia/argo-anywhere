@@ -738,6 +738,15 @@ _ensure_state_dir() {
 # Cached in a global the first time it's computed because hostname lookups
 # can be slow on stalled-DNS systems.
 _ON_ANL_NODE_CACHE=""
+# NOTE on the memo below: every caller uses `$(on_anl_compute_node)`, so the
+# assignment to _ON_ANL_NODE_CACHE happens in a subshell and never reaches the
+# parent -- the memo is effectively dead and `hostname` runs once per call
+# (~13 sites). That is D-005's lost-global half, but harmless here: the answer
+# is a pure function of the host, `hostname` is cheap and local, and the value
+# is only ever read through this accessor. Audited 2026-08-12 and deliberately
+# left alone; converting it to the globals-based contract would touch 13 call
+# sites to save microseconds. Do NOT "fix" the memo by making callers read
+# _ON_ANL_NODE_CACHE directly -- it is genuinely unset in the parent.
 on_anl_compute_node() {
   if [ -n "$_ON_ANL_NODE_CACHE" ]; then
     printf '%s' "$_ON_ANL_NODE_CACHE"; return
@@ -1513,6 +1522,32 @@ enumerate_client_ports() {
       printf '%s\n' "claudecode project $p $CLAUDECODE_PROJECT_CONFIG"
     fi
   fi
+
+  # aider global. Added 2026-08-12: aider was missing from this enumeration
+  # since it shipped (Phase 5a), so the port-coherence machinery -- the
+  # startup mismatch warning and the D-021 cross-client check -- was blind to
+  # it. Observed on the maintainer's laptop after a collision moved the port:
+  # cache and opencode both said 64743, aider still said 64751, and nothing
+  # noticed. `aider` then fails with connection-refused against a port that no
+  # longer exists, which reads as "argo-anywhere broke aider".
+  #
+  # Any future tool that records a port in its config MUST be added here too;
+  # this function is what makes "do my clients agree?" answerable.
+  p="$(_get_port_from_aider_config "$AIDER_GLOBAL_CONFIG" 2>/dev/null || true)"
+  if [ -n "$p" ]; then
+    printf '%s\n' "aider global $p $AIDER_GLOBAL_CONFIG"
+  fi
+}
+
+# _get_port_from_aider_config <path>: print the port from an aider config's
+# openai-api-base, or nothing. Best-effort text scrape rather than a YAML
+# parse: PyYAML is a compute-node dependency, not a laptop one, and the line
+# we own is one we wrote ourselves in a fixed shape.
+_get_port_from_aider_config() {
+  local cfg="$1"
+  [ -f "$cfg" ] || return 0
+  { grep -E '^[[:space:]]*openai-api-base:' "$cfg" 2>/dev/null \
+      | sed -nE 's|.*://[^:/]+:([0-9]+).*|\1|p' | head -n1; } || true
 }
 
 # detect_port_disagreement <chosen_port>: enumerate all installed client
@@ -1596,6 +1631,66 @@ _persist_port_cache() {
   [ "$_cur" = "$p" ] && { _PORT_CACHE_PENDING=""; return 0; }
   write_port_cache "$p"
   _PORT_CACHE_PENDING=""
+}
+
+# report_client_coherence <port>: after a channel is up on <port>, tell the
+# user which client configs do NOT point at it, and exactly how to fix each.
+#
+# Why this exists (2026-08-12). The startup coherence check runs inside
+# _client_common_setup, which has two blind spots that compose into the bug a
+# user actually hits:
+#
+#   1. It is gated on `with_opencode_setup=1`, so `connect` / `tunnel` /
+#      `--ensure` -- every channel-only verb -- skip it entirely.
+#   2. It runs BEFORE ensure_or_reuse_tunnel, so a port that a collision moves
+#      afterwards is never re-checked against the configs.
+#
+# Together: a collision moves you from :A to :B, the channel comes up on :B,
+# and your clients are still pointing at :A with nothing to tell you. Observed
+# with aider left on a dead port while opencode and the cache had both moved;
+# `aider` then fails with connection-refused, which reads as "argo-anywhere
+# broke aider".
+#
+# This runs AFTER the channel is established, at every channel-owning site, so
+# it sees the port that actually won. It only REPORTS -- rewriting a config the
+# user did not ask this run to touch is the kind of unattended state change
+# that caused the v3.3.0 incident. Naming the one-line fix is enough.
+report_client_coherence() {
+  local port="${1:-$PROXY_PORT}"
+  [ -n "$port" ] || return 0
+  local lines; lines="$(detect_port_disagreement "$port" || true)"
+  [ -n "$lines" ] || return 0
+
+  warn ""
+  warn "These clients are NOT pointing at the channel that is now up (:${port}):"
+  local tool scope cport cpath
+  while IFS= read -r _l; do
+    [ -n "$_l" ] || continue
+    tool="$(printf '%s' "$_l" | awk '{print $1}')"
+    scope="$(printf '%s' "$_l" | awk '{print $2}')"
+    cport="$(printf '%s' "$_l" | awk '{print $3}')"
+    cpath="$(printf '%s' "$_l" | awk '{for (i=4;i<=NF;i++) printf "%s%s", $i, (i<NF?" ":"")}')"
+    warn "  ${tool} (${scope}) still says :${cport}  -- ${cpath}"
+  done <<EOF
+$lines
+EOF
+  warn ""
+  warn "  They will fail to connect until they agree. Fix with:"
+  # One line per distinct tool, deduped -- a tool with two disagreeing scopes
+  # still only needs one command.
+  # Under the package the user's command is `argo-anywhere`, not the vendored
+  # script's filename -- printing the latter gives a command they cannot type.
+  local _cmd
+  if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
+    _cmd="argo-anywhere"
+  else
+    _cmd="$(basename "$0")"
+  fi
+  printf '%s\n' "$lines" | awk 'NF {print $1}' | sort -u | while IFS= read -r _t; do
+    [ -n "$_t" ] || continue
+    warn "    ${_cmd} configure ${_t}"
+  done
+  warn ""
 }
 
 resolve_port() {
@@ -7033,9 +7128,16 @@ _client_common_setup() {
   # that node. (Cannot open against ANL_JUMP -- jump host is shell-restricted.)
   # Order under --no-mfa: preflight against the jump host first (BatchMode
   # test is fast and gives clean SSH-key error message), then pick node.
+  # pick_node has eight `die` paths (unreachable --node, empty ANL_NODES, SSH
+  # lock fired, too many failed picks, ...). It is captured in $(), so each of
+  # those exits the SUBSHELL only -- the parent would continue with node="" and
+  # carry an empty hostname into ssh, scp and the node cache. Same class as the
+  # abort-that-did-not-abort bug (D-005 / ABORT-MUST-ABORT INVARIANT); guard the
+  # capture instead of restructuring a 200-line interactive picker.
   local node
   if mfa_enabled; then
-    node="$(pick_node "$ANL_USERNAME")"
+    node="$(pick_node "$ANL_USERNAME")" || die "Node selection failed (see the error above)."
+    [ -n "$node" ] || die "Node selection produced no host (see the error above)."
     log "Selected node: ${node}" >&2
     # D-032 (A5 amendment 2026-07-15): announce alias routing ONCE
     # in the parent shell, BEFORE any ssh_args-driven subshell can
@@ -7044,7 +7146,8 @@ _client_common_setup() {
     ssh_preflight "$ANL_USERNAME" "$node"
   else
     ssh_preflight "$ANL_USERNAME"
-    node="$(pick_node "$ANL_USERNAME")"
+    node="$(pick_node "$ANL_USERNAME")" || die "Node selection failed (see the error above)."
+    [ -n "$node" ] || die "Node selection produced no host (see the error above)."
     log "Selected node: ${node}" >&2
     _announce_alias_routing_once "$node" "$ANL_USERNAME"
   fi
@@ -7085,6 +7188,8 @@ _client_common_setup() {
     write_node_cache "$node"
     # Same rule for the port (CACHE-AFTER-SUCCESS INVARIANT).
     _persist_port_cache "$PROXY_PORT"
+    # Then say which clients disagree with the port that actually won.
+    report_client_coherence "$PROXY_PORT"
     _PICKED_NODE=""  # signal short-circuit (caller should bail out)
     return 0
   fi
@@ -7153,6 +7258,8 @@ mode_tunnel() {
   # that the channel is genuinely up, so an abort/die upstream leaves the
   # cache describing the last channel that actually worked.
   _persist_port_cache "$PROXY_PORT"
+  # Then say which clients disagree with the port that actually won.
+  report_client_coherence "$PROXY_PORT"
   gather_summary
   render_summary
   log "Channel is up; no client configured (this is '${_INVOKED_MODE:-tunnel}' mode)."
@@ -7229,6 +7336,8 @@ mode_client() {
   # that the channel is genuinely up, so an abort/die upstream leaves the
   # cache describing the last channel that actually worked.
   _persist_port_cache "$PROXY_PORT"
+  # Then say which clients disagree with the port that actually won.
+  report_client_coherence "$PROXY_PORT"
   do_post_tunnel_for_cli_tool "$chosen_client"
   if [ "$rc" -eq 2 ]; then
     log "(external listener; not entering monitor loop. The proxy is reachable"
@@ -7311,6 +7420,8 @@ _configure_ensure_channel_or_die() {
   ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
   write_node_cache "$node"
   _persist_port_cache "$PROXY_PORT"
+  # Then say which clients disagree with the port that actually won.
+  report_client_coherence "$PROXY_PORT"
   _CONFIGURE_ENSURED_NODE="$node"
   return 0
 }
@@ -9000,7 +9111,20 @@ mode_status() {
     printf '%s\n' "$_disagree_lines" | while IFS= read -r _l; do
       warn "    $_l"
     done
-    warn "  Run 'argo-anywhere.sh client' to canonicalize via the [m/u/k/a] prompt."
+    # Name the narrow fix, not `client`. `client` re-runs the whole flow
+    # (pick node, open a tunnel, install a tool) to repoint one config file,
+    # and it only touches the tool THIS run selects -- so it would leave the
+    # other disagreeing configs exactly as stale. `configure <tool>` is the
+    # operation the user actually wants, per tool, against the live channel.
+    printf '%s\n' "$_disagree_lines" | awk 'NF {print $1}' | sort -u \
+      | while IFS= read -r _t; do
+          [ -n "$_t" ] || continue
+          if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
+            warn "  Fix with:  argo-anywhere configure ${_t}"
+          else
+            warn "  Fix with:  $(basename "$0") configure ${_t}"
+          fi
+        done
   fi
 
   # Exit code reflects health for use in && chains. D-021 disagreement

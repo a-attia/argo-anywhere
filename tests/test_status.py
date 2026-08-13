@@ -317,3 +317,74 @@ def test_tunnel_destination_makes_no_network_call() -> None:
         assert banned not in src, (
             f"tunnel_destination must stay local; found {banned!r}"
         )
+
+
+# -- channel discovery (2026-08-12 field incident) ---------------------------
+#
+# The dashboard answered "are we connected?" with "is something listening on
+# the CACHED port?", which makes the cache load-bearing for a question it
+# cannot answer. A run that aborted, died, or moved ports left the cache naming
+# a dead port, and the UI reported "not connected" while a healthy channel ran
+# in the embedded terminal beside it. discover_channels() answers from what
+# exists: an ssh listener whose ControlPath names an argo-anywhere socket.
+
+
+def test_discover_channels_ignores_the_cache(monkeypatch) -> None:
+    """Discovery must not consult cached state at all."""
+    import inspect
+
+    src = inspect.getsource(status.discover_channels)
+    assert "cached_state" not in src, (
+        "discover_channels must answer from live inspection; consulting the "
+        "cache reintroduces the bug it exists to fix"
+    )
+
+
+def test_discover_channels_finds_a_tunnel_on_an_uncached_port(monkeypatch) -> None:
+    """The field case: a live channel on a port the cache does not name."""
+    monkeypatch.setattr(
+        status, "local_listeners",
+        lambda *_a, **_k: [
+            status.Listener(port=64743, pid=53133, command="ssh"),
+            status.Listener(port=8799, pid=1, command="python3.1"),
+        ],
+    )
+    monkeypatch.setattr(
+        status, "tunnel_destination",
+        lambda port: "compute-01.cels.anl.gov" if port == 64743 else None,
+    )
+    found = status.discover_channels()
+    assert [c.port for c in found] == [64743], (
+        "a live tunnel must be found regardless of what the cache says"
+    )
+    assert found[0].node == "compute-01.cels.anl.gov"
+
+
+def test_discover_channels_ignores_non_ssh_listeners(monkeypatch) -> None:
+    """A random loopback server is not a channel.
+
+    Real laptops have plenty (Box, Adobe, adb, the web UI itself); calling one
+    of those a channel would be the same overclaim in a new place.
+    """
+    monkeypatch.setattr(
+        status, "local_listeners",
+        lambda *_a, **_k: [status.Listener(port=17223, pid=2097, command="Box")],
+    )
+    monkeypatch.setattr(status, "tunnel_destination", lambda _p: "somewhere")
+    assert status.discover_channels() == []
+
+
+def test_discover_channels_ignores_unattributable_ssh(monkeypatch) -> None:
+    """An ssh tunnel that is not ours has no ControlPath we can parse."""
+    monkeypatch.setattr(
+        status, "local_listeners",
+        lambda *_a, **_k: [status.Listener(port=2222, pid=99, command="ssh")],
+    )
+    monkeypatch.setattr(status, "tunnel_destination", lambda _p: None)
+    assert status.discover_channels() == []
+
+
+def test_discover_channels_empty_means_no_channel(monkeypatch) -> None:
+    """Empty is a real answer, never 'unknown'."""
+    monkeypatch.setattr(status, "local_listeners", lambda *_a, **_k: [])
+    assert status.discover_channels() == []
