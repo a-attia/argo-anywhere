@@ -76,6 +76,37 @@ none of these, though it also lacks the v3.3.0 collision fixes.
 > **If you are on v3.2.1 or earlier and hitting port collisions or Argo
 > authentication errors on a busy node, this is the release you want.**
 
+### Added
+
+- **Your default port is now derived from your Argonne username.** Every
+  install used to start on the same port. On a shared compute node that
+  made a collision the expected case rather than an edge case — the node
+  behind the 2026-08-10 incident was running 22 argo-proxy processes,
+  all competing for one number. The default is now spread across 500
+  ports, so two people are unlikely to pick the same one to begin with.
+
+  This only affects a **fresh** setup. An existing cached port, a port
+  already in your client configs, and `--port` all take precedence — the
+  derivation seeds a default, it never overrides a decision you or your
+  configs already made. Users whose Argonne username differs per machine
+  get an independent port per identity, since the username is resolved
+  per target from `~/.ssh/config`.
+
+  Collisions are still possible (two usernames can hash to one slot, or
+  a co-tenant may hold it for unrelated reasons), so the detection,
+  prompt and free-port search are all unchanged.
+
+- **`connect` now tells you what to do next.** It used to end with "no
+  client configured" and the endpoint URL, which describes the channel
+  rather than the next step — a first-time user with nothing set up got
+  nothing actionable. It now lists your tools in three groups: ready to
+  use, needs `configure <tool>` (the port moved), and not set up yet
+  (offering `run <tool>`, which configures and launches in one step).
+
+  `connect` still writes no config files. It opens the channel and tells
+  you what to run; changing a tool's configuration remains something you
+  ask for explicitly.
+
 ### Changed — please read
 
 - **A port collision now moves you to a free port automatically.**
@@ -310,8 +341,8 @@ the pre-3.3.0 behaviour exactly:
 **What is still not fixed**: every install ships the same default port,
 so collisions remain as *likely* as before — they are now detected,
 explained, and recovered from automatically rather than silently
-mis-routing. Making them *rare* (a per-user default port) is planned for
-a later release.
+mis-routing. Making them *rare* (a per-user default port) landed in
+v3.3.1.
 
 ### Internals
 

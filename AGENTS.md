@@ -83,9 +83,10 @@ loading set for normal sessions.
   passes plus verification against a **real** cross-user collision on
   `compute-386-01` — the incident's collision was still active, so
   nothing had to be simulated. Engine `SCRIPT_VERSION` → `2.4.0`; suite
-  at 556. **Known-not-fixed**: every install still ships the same
-  default port, so collisions remain as likely — Option B (per-user
-  derived default) is deferred to D-035.
+  at 556. **Known-not-fixed at v3.3.0**: every install shipped the same
+  default port. v3.3.1 derives it per-user (D-035, first half); the
+  local/remote port split that would stop a collision from moving the
+  *local* port — and so stranding client configs — is still open.
   **Per-release history belongs in [`CHANGELOG.md`](CHANGELOG.md), not
   here.** The remainder of this bullet is accumulated *project facts*
   (what exists and how it works) — useful, but it drifted into

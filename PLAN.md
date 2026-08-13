@@ -2317,11 +2317,15 @@ session handoff: [`notes/handoff_2026-08-10_shared_node.md`](notes/handoff_2026-
 
 **Number allocation.** D-034 was contended between three notes.
 Resolved here: it belongs to **this** decision (the shared-node
-transport work, which shipped). `impl_channel_persistence.md` and
-`impl_command_echo.md` both speculatively claimed a number for work
-that has not shipped; they are renumbered to **D-035** and **D-036**
-respectively, *if and when* they ship. A note that has not shipped
-does not hold a number.
+transport work, which shipped). The rule applied — and worth keeping —
+is that **a note that has not shipped does not hold a number**; numbers
+are assigned when work lands, in the order it lands.
+
+Consequently `impl_channel_persistence.md` and `impl_command_echo.md`,
+which had both speculatively claimed one, hold none. **D-035** went to
+the local/remote port split (below), whose first half shipped in
+v3.3.1. Those two notes take the next free numbers if and when they
+ship; their headers say so and should not be read as reservations.
 
 **Symptom (field incident, 2026-08-10).** On `compute-386-01`, a node
 with at least ten argo-anywhere tenants, the tool reported `ALL GREEN`
@@ -2510,14 +2514,18 @@ their own Argo identity right now.
   survives logout) — **not** `/run/user` (`Linger=no` destroys it while
   `KillUserProcesses=no` keeps the proxy alive) and **not** `$HOME`
   (NFS-shared; an orphaned socket wedges later `bind()`s).
-- **The structural assumption itself — partially addressed; see Option A
-  below.** A single default port for every user remains the root cause.
-  **Option A shipped** (auto-pick on by default): collisions are now
-  self-healing rather than merely legible. **Option B — per-user derived
-  defaults** (hash the username into a range so tenants do not all race
-  for the same port) attacks the cause and would make collisions *rare*
-  rather than *recovered*. Deferred to **D-035**; it wants its own design
-  note and a decision about what happens to an existing cached port.
+- **The structural assumption itself — addressed in v3.3.1, but only
+  halfway.** A single default port shared by every install was the root
+  cause. v3.3.1 derives the default per-user
+  (`_derive_default_port`), which spreads starting points and makes a
+  collision unlikely rather than expected. What it does NOT do is
+  decouple the local and remote ports: they are still one number, so a
+  remote-side collision still moves the *local* port and still strands
+  client configs. That split is **D-035**, and it is the fix that
+  removes the churn rather than reporting it.
+  *(Option A — auto-pick on by default — shipped in v3.3.0 and was
+  reverted in v3.3.1; see D-035 for why it is unsafe while the two ports
+  are coupled.)*
 - **Local-collision auto-recovery.** The *remote* collision path
   recovers (prompt or `--auto-port`); the *local* `external-healthy`
   path dead-ends with "pick another port" while the free-port probe
@@ -2532,6 +2540,114 @@ transport-layer state). D-024 (`connect`/`configure`/`run`; the verbs
 these fixes run under). D-031 (the web UI whose diagram overclaimed).
 D-005 (the globals-not-`$()` pattern, violated once during this work
 and caught by `set -u`).
+
+---
+
+### D-035 — Decouple the local and remote ports; per-user remote default (PLANNED, not implemented)
+
+**Status**: design note, targeted at the cycle after v3.3.1. Partially
+pre-empted: the per-user *derived default* shipped in v3.3.1 (see
+"Shipped early" below); the local/remote **split** — the part that
+actually removes the client-config churn — has not.
+
+**The question that opened it** (maintainer, 2026-08-12): *do the remote
+and local ports have to agree?* They do not. `ssh -L LOCAL:host:REMOTE`
+takes two independent numbers; the engine passes
+`"${PROXY_PORT}:localhost:${PROXY_PORT}"` — one variable, twice. That is
+a choice made early and never revisited, and it is the root of a problem
+the v3.3.x releases spent their time treating rather than curing.
+
+**Why one number is the wrong shape.** The two ends are contended
+against different populations:
+
+| end | competes with | wants to vary by |
+|:--|:--|:--|
+| remote `node:P` | **other users** on that node | user |
+| local `localhost:P` | **your own** other tunnels, and any local process | node / session |
+
+Tying them together means neither can be solved cleanly, and each end's
+problem propagates to the other:
+
+- A **remote** collision (a co-tenant holds the port) forces the *local*
+  port to move — which is exactly why the maintainer's client configs
+  went stale on 2026-08-12. Had only the remote side moved,
+  `localhost:<P>` would still have been valid and nothing would have
+  needed reconfiguring.
+- A purely **local** conflict (an unrelated app on that port) forces a
+  *remote* move for no reason at all.
+
+Every coherence mechanism in v3.3.1 — `report_client_coherence`, the
+web UI's stale-cache banner, the D-021 disagreement report in `status` —
+exists to manage fallout from the first bullet. They are good defences,
+and they are treating a symptom.
+
+**Proposed shape: fixed local port, derived remote port.**
+
+- The **local** port is what clients see and what gets written into
+  every config. Pin it (the current default is fine) and it never
+  changes, so client configs never need rewriting after a collision.
+- The **remote** port is what actually collides with other people. Derive
+  it per-user, and re-derive/walk freely on collision — invisible to the
+  clients, because the tunnel absorbs the difference.
+
+The asymmetry is worth stating plainly: the local port collides only
+with *yourself*, and `ensure_or_reuse_tunnel` already refuses that case
+outright ("Refusing to silently reuse a tunnel pointed at a different
+node"). So the local side may not need to vary at all.
+
+**Shipped early in v3.3.1** (do not redo): the per-user derived default
+(`_derive_default_port`, `PROXY_PORT_BASE` + `PROXY_PORT_SPAN=500`,
+re-derived after `resolve_username` so it uses the username resolved for
+*this* target). Under the current coupled design it moves both ends
+together. When the split lands, the derivation should apply to the
+**remote** port only.
+
+Span sizing is a birthday-problem calculation and should not be narrowed
+casually: over 100 slots ten co-tenants collide 37% of the time and
+twenty collide 87% — on the incident node, which had 22 argo-proxy
+processes. At 500 those are 8.7% and 32%. Ceiling is 65535 − 64742 = 793
+usable slots, so 500 leaves ~290 for the free-port walk to escape into.
+
+**Why this was not folded into v3.3.1.** `PROXY_PORT` has **253
+references**. Splitting it touches the port cache, both config-writer
+families, the collision prompt, the bind-test probe, the identity gate,
+`status`, the web UI's channel discovery and diagram, and every message
+that says "port". That is not a hotfix; it needs its own cycle and its
+own live verification against a real shared node.
+
+**Open questions to resolve before implementing.**
+
+1. Does the local port stay a single fixed constant, or vary per user
+   (so two accounts on one laptop don't fight)? The latter reintroduces
+   config churn on account switch.
+2. What happens to an existing `~/.config/argo_anywhere/port` holding one
+   number? A migration that guesses wrong strands a live channel — and
+   the 2026-08-12 incident was precisely a cache disagreeing with
+   reality.
+3. `status`, `info` and the web UI must show two ports without making
+   the common case (they're equal, or the user doesn't care) noisier.
+   The channel diagram already carries a lot.
+4. Does the node cache need to become per-(node, remote-port)? Today one
+   `port` file describes one channel; two ports may need two facts.
+5. Does `--port` set the local port, the remote port, or both? Existing
+   users' muscle memory says "the one my client talks to" — the local
+   one — but the flag's current job is both.
+
+**Also deferred here from D-034**: the non-interactive collision gap.
+`-y`, `--ensure` and every web-UI launch cannot answer the collision
+prompt, so they still fail on a collision rather than recovering.
+Auto-picking was tried as the fix in v3.3.0 and reverted the same day —
+it silently migrated a live session's port, which is unsafe precisely
+*because* the two ports are coupled and the cache/configs/UI must all
+agree. Decoupling removes the reason it was unsafe: a remote-side move
+that no client can observe is a much smaller claim. Revisit auto-pick
+for non-interactive callers **after** the split, not before.
+
+**Related decisions.** D-020 (port as transport-layer state — the
+property that makes an unattended change expensive). D-034 (the
+collision detection + honesty work this builds on). D-003 (mux-owned
+forward). D-024 (`connect` is channel-only, which is why it reports
+config drift rather than fixing it).
 
 ---
 

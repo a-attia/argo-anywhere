@@ -337,8 +337,35 @@ ANL_JUMP="logins.cels.anl.gov"
 #   2. ARGO_ANYWHERE_PORT env var (canonical override)
 #   3. PROXY_PORT env var         (deprecated alias; warns once)
 #   4. baseURL in ~/.config/opencode/config.json   (the source of truth)
-#   5. PROXY_PORT_DEFAULT below   (used only on first install)
-PROXY_PORT_DEFAULT=64742
+#   5. the per-user derived default (see _derive_default_port)
+#   6. PROXY_PORT_BASE below      (only if the username is unknown)
+#
+# PROXY_PORT_BASE is the bottom of the range, NOT the port anyone gets. Every
+# install shipping the same literal 64742 is what made collisions the expected
+# case on a shared node: ten tenants, one port, first binder wins. The default
+# is now derived per-user inside that range -- see _derive_default_port.
+PROXY_PORT_BASE=64742
+#: Width of the derived-default range, in slots above PROXY_PORT_BASE.
+#:
+#: 500, not 100. The birthday problem governs this, and it is unforgiving: with
+#: 100 slots, ten co-tenants collide 37% of the time and twenty collide 87% --
+#: which would leave the structural problem substantially intact on exactly the
+#: nodes that motivated the fix (the 2026-08-10 incident node had 22 argo-proxy
+#: processes). At 500 the same numbers are 8.7% and 32%.
+#:
+#: The ceiling is 65535 - 64742 = 793 usable slots, so 500 leaves ~290 above the
+#: derived range for the free-port walk to escape into. Widening further buys
+#: less than it costs in walk headroom.
+#:
+#: Note this is INDEPENDENT of the collision walk's range (which still starts at
+#: PROXY_PORT_BASE and spans 100 by default, tunable via --port-range): the
+#: derivation spreads starting points, the walk escapes a collision once one
+#: happens. They are different jobs and should not be tied together.
+PROXY_PORT_SPAN=500
+# Back-compat alias: help text, the --port-range default and several messages
+# refer to PROXY_PORT_DEFAULT as "the bottom of the range". It is no longer the
+# port anyone is given.
+PROXY_PORT_DEFAULT="$PROXY_PORT_BASE"
 PROXY_PORT=""                      # populated by resolve_port() in main()
 # shellcheck disable=SC2016
 VENV_PATH='$HOME/argovenv'         # path on the ANL node (single quotes intentional;
@@ -1581,6 +1608,113 @@ detect_port_disagreement() {
   [ "$saw_disagreement" = 0 ] && return 0 || return 1
 }
 
+# _username_for_port_derivation: the username to hash, or empty.
+#
+# Deliberately NOT resolve_username: that can prompt, and it is called later
+# from _client_common_setup, after the mode has dispatched. resolve_port runs
+# in main() before any mode, so it must answer from what is already on disk or
+# in the environment, and stay silent if it cannot.
+#
+# Checks the same sources resolve_username does, minus the interactive prompt
+# and minus the ssh-config probe (which shells out to `ssh -G`; too heavy for a
+# path that runs on every invocation, including `help`).
+_username_for_port_derivation() {
+  if [ -n "${ARGO_ANYWHERE_USER:-}" ]; then
+    printf '%s' "$ARGO_ANYWHERE_USER"; return 0
+  fi
+  if [ -n "${ANL_USERNAME:-}" ]; then
+    printf '%s' "$ANL_USERNAME"; return 0
+  fi
+  if [ -f "$USER_CACHE" ]; then
+    { cat "$USER_CACHE" 2>/dev/null | tr -d '[:space:]'; } || true
+  fi
+}
+
+# _derive_default_port [username]: a per-user default port in
+# [PROXY_PORT_BASE, PROXY_PORT_BASE + PROXY_PORT_SPAN).
+#
+# THE STRUCTURAL FIX (D-035). Every install shipped the same literal default,
+# against a resource that is node-global and first-binder-wins: on a node with
+# ten argo-anywhere tenants, a collision was not an edge case, it was the
+# expected outcome. The 2026-08-10 incident, and everything built on top of it
+# -- the bind-test oracle, the identity gate, the collision prompt -- treats
+# the collision as a thing to survive. This makes it unlikely in the first
+# place.
+#
+# Deterministic, so the same user gets the same port on every machine and
+# every run: the port is transport state that must agree across the cache, the
+# client configs and the far end, and a random default would fight that.
+#
+# It is a HINT, not a reservation. Two usernames can hash to the same slot, and
+# a co-tenant may hold it for unrelated reasons -- so everything downstream is
+# unchanged: bind-test detection, the collision prompt, and the free-port walk
+# all still apply. This narrows the odds; it does not replace the guards.
+#
+# cksum is the hash: POSIX, present everywhere this runs, and stable across
+# platforms (unlike `md5sum` vs `md5`, or bash's RANDOM). We only need spread,
+# not cryptographic properties.
+_derive_default_port() {
+  local user="${1:-}"
+  [ -n "$user" ] || user="$(_username_for_port_derivation)"
+  # No username to derive from (true cold start, before any prompt): fall back
+  # to the base. The user gets today's behaviour until their name is known,
+  # and the next run -- once the cache exists -- derives properly.
+  if [ -z "$user" ]; then
+    printf '%s' "$PROXY_PORT_BASE"
+    return 0
+  fi
+  local sum
+  sum="$( { printf '%s' "$user" | cksum 2>/dev/null | awk '{print $1}'; } || true )"
+  case "$sum" in
+    ''|*[!0-9]*)
+      # cksum missing or unparseable: degrade to the base rather than die.
+      printf '%s' "$PROXY_PORT_BASE"
+      return 0 ;;
+  esac
+  printf '%s' "$(( PROXY_PORT_BASE + (sum % PROXY_PORT_SPAN) ))"
+}
+
+# _maybe_rederive_default_port: re-run the D-035 derivation once the ANL
+# username for THIS target is known.
+#
+# resolve_port runs in main(), before any mode dispatches and therefore before
+# resolve_username -- which can prompt, so it cannot be hoisted there. On a
+# true cold start the derivation had no username and fell back to
+# PROXY_PORT_BASE, handing a brand-new user the one port every other install
+# also starts on: the worst possible choice, at the moment they are most likely
+# to collide.
+#
+# It also matters for a case the single global USER_CACHE cannot express: a
+# user whose Argonne username differs per machine (say aattia on CELS,
+# attia_a on Aurora). ~/.ssh/config resolution is per-target and outranks the
+# cache, so the name resolved by resolve_username is the right one for the host
+# we are about to reach, while the cache may hold whichever name was prompted
+# first. Deriving from the resolved name gives those identities independent
+# ports -- correct, because they are different accounts competing for different
+# slots on the node.
+#
+# Fires ONLY when the port came from the base fallback. An explicit --port, a
+# cached port, or a port migrated from a client config all outrank it: the
+# derivation seeds a default, it never overrides a decision. Callers invoke it
+# right after setting ANL_USERNAME.
+_maybe_rederive_default_port() {
+  case "$PORT_SOURCE" in
+    *"username not yet known"*) : ;;
+    *) return 0 ;;
+  esac
+  [ -n "${ANL_USERNAME:-}" ] || return 0
+  local _p; _p="$(_derive_default_port "$ANL_USERNAME")"
+  [ -n "$_p" ] || return 0
+  [ "$_p" = "$PROXY_PORT" ] && return 0
+  log "Re-deriving the default port now that the username is known:"
+  log "  ${PROXY_PORT} -> ${_p}  (derived from '${ANL_USERNAME}')"
+  PROXY_PORT="$_p"
+  PORT_SOURCE="derived from username '${ANL_USERNAME}'"
+  # Stage, do not write: the CACHE-AFTER-SUCCESS INVARIANT still applies, so
+  # this is committed by _persist_port_cache once a channel is actually up.
+  _PORT_CACHE_PENDING="$_p"
+}
+
 # read_cached_port: read PROXY_PORT from PORT_CACHE if it exists and
 # parses as a valid integer. Returns empty (no output, exit 0) on
 # missing file / unreadable / non-integer content. Best-effort read;
@@ -1693,6 +1827,76 @@ EOF
   warn ""
 }
 
+# report_next_steps <port>: after a channel-only verb succeeds, say what to do
+# next, per tool, based on what is actually configured.
+#
+# `connect` deliberately does not write client configs -- it is channel-only by
+# contract (D-024's three-level split), and writing three config files from a
+# verb named "connect" is the kind of unattended state change that caused the
+# v3.3.0 incident. But the old tail then said only "no client configured" and
+# "point any OpenAI-compatible client at ...", which describes the channel
+# rather than telling the user what to run. A first-time user with no configs
+# at all got nothing actionable.
+#
+# Three states, three different answers:
+#   * agrees with this channel -> ready, name the binary
+#   * points somewhere else    -> needs `configure <tool>` (also reported by
+#                                 report_client_coherence, in more detail)
+#   * no config at all         -> needs `run <tool>` or `configure <tool>`
+report_next_steps() {
+  local port="${1:-$PROXY_PORT}"
+  [ -n "$port" ] || return 0
+
+  local _cmd
+  if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
+    _cmd="argo-anywhere"
+  else
+    _cmd="$(basename "$0")"
+  fi
+
+  local _enum; _enum="$(enumerate_client_ports 2>/dev/null || true)"
+  local entry name ready="" stale="" absent=""
+  for entry in "${CLI_TOOLS_AVAILABLE[@]}"; do
+    name="${entry%%|*}"
+    local _line
+    _line="$( { printf '%s\n' "$_enum" | awk -v t="$name" 'NF && $1==t {print $3; exit}'; } || true )"
+    if [ -z "$_line" ]; then
+      absent="${absent:+${absent} }${name}"
+    elif [ "$_line" = "$port" ]; then
+      ready="${ready:+${ready} }${name}"
+    else
+      stale="${stale:+${stale} }${name}"
+    fi
+  done
+
+  log ""
+  log "Next steps:"
+  if [ -n "$ready" ]; then
+    log "  Ready now (config already points at :${port}):"
+    for name in $ready; do
+      local _bin="$name"
+      [ "$name" = "claudecode" ] && _bin="claude"
+      log "    ${_bin}"
+    done
+  fi
+  if [ -n "$stale" ]; then
+    log "  Needs updating (points at a different port):"
+    for name in $stale; do
+      log "    ${_cmd} configure ${name}"
+    done
+  fi
+  if [ -n "$absent" ]; then
+    log "  Not set up yet:"
+    for name in $absent; do
+      log "    ${_cmd} run ${name}          # configure + launch"
+      log "    ${_cmd} configure ${name}    # configure only"
+    done
+  fi
+  log ""
+  log "  Any other OpenAI-compatible client: http://localhost:${port}/v1"
+  log "    with Authorization: Bearer ${ANL_USERNAME:-<your-anl-username>}"
+}
+
 resolve_port() {
   local p=""
   # M3 fix (audit Phase 2c) preserved: hoist read_port_from_opencode_config
@@ -1716,10 +1920,23 @@ resolve_port() {
     # report."
     local _enum; _enum="$(enumerate_client_ports 2>/dev/null || true)"
     if [ -z "$_enum" ]; then
-      # Case 1: no existing client configs with a baseURL; seed default.
-      p="$PROXY_PORT_DEFAULT"
-      PORT_SOURCE="built-in default (no cache, no existing client configs; seeding ${PORT_CACHE})"
-      log "Port cache (${PORT_CACHE}) empty on first run; no existing client configs found. Seeding default port ${p}."
+      # Case 1: no existing client configs with a baseURL. Seed the per-user
+      # derived default (D-035) rather than the shared literal -- this is the
+      # only branch that hands out a fresh port, so it is the only one that
+      # needs to change to stop every install starting on the same one.
+      local _derive_user; _derive_user="$(_username_for_port_derivation)"
+      p="$(_derive_default_port "$_derive_user")"
+      if [ -n "$_derive_user" ]; then
+        PORT_SOURCE="derived from username '${_derive_user}' (no cache, no existing client configs; seeding ${PORT_CACHE})"
+        log "Port cache (${PORT_CACHE}) empty on first run; no existing client configs found."
+        log "  Seeding port ${p}, derived from your username so co-tenants on a shared"
+        log "  node are unlikely to pick the same one. Override with --port N."
+      else
+        PORT_SOURCE="built-in base (no cache, no configs, username not yet known; seeding ${PORT_CACHE})"
+        log "Port cache (${PORT_CACHE}) empty on first run; no existing client configs found."
+        log "  Username not known yet, so seeding the base port ${p}. Once your username"
+        log "  is cached, a later fresh start will derive a per-user port instead."
+      fi
     else
       # Count unique ports across all enumerated configs.
       local _unique_ports
@@ -6992,6 +7209,9 @@ _client_common_setup() {
   # differs from the Argonne username (the common case).
   ARGO_ANYWHERE_USER="$ANL_USERNAME"
   log "Using ANL username: ${ANL_USERNAME} (source: ${_USERNAME_SOURCE})"
+  # D-035: the username for THIS target is now known; re-derive the default
+  # port if resolve_port had to guess without one. No-op otherwise.
+  _maybe_rederive_default_port
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
   # If we appear to be running ON a compute node already, the script's
@@ -7262,9 +7482,9 @@ mode_tunnel() {
   report_client_coherence "$PROXY_PORT"
   gather_summary
   render_summary
-  log "Channel is up; no client configured (this is '${_INVOKED_MODE:-tunnel}' mode)."
-  log "Point any OpenAI-compatible client at http://localhost:${PROXY_PORT}/v1"
-  log "  with Authorization: Bearer ${ANL_USERNAME}"
+  log "Channel is up on http://localhost:${PROXY_PORT} (this is '${_INVOKED_MODE:-tunnel}' mode:"
+  log "  it opens the channel and does not touch any client's config)."
+  report_next_steps "$PROXY_PORT"
   if [ "$rc" -eq 2 ]; then
     log "(external listener; not entering monitor loop. Tunnel/proxy is not"
     log "  managed by this script invocation.)"
@@ -7451,6 +7671,9 @@ mode_configure() {
   [ "$_USERNAME_SHOULD_CACHE" = 1 ] && _persist_username_cache "$ANL_USERNAME"
   ARGO_ANYWHERE_USER="$ANL_USERNAME"
   log "Using ANL username: ${ANL_USERNAME} (source: ${_USERNAME_SOURCE})"
+  # D-035: the username for THIS target is now known; re-derive the default
+  # port if resolve_port had to guess without one. No-op otherwise.
+  _maybe_rederive_default_port
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
   # Precondition: the channel must exist (or --ensure brings it up).
@@ -7511,6 +7734,9 @@ mode_run() {
   [ "$_USERNAME_SHOULD_CACHE" = 1 ] && _persist_username_cache "$ANL_USERNAME"
   ARGO_ANYWHERE_USER="$ANL_USERNAME"
   log "Using ANL username: ${ANL_USERNAME} (source: ${_USERNAME_SOURCE})"
+  # D-035: the username for THIS target is now known; re-derive the default
+  # port if resolve_port had to guess without one. No-op otherwise.
+  _maybe_rederive_default_port
   log "Using port: ${PROXY_PORT}  (source: ${PORT_SOURCE})"
 
   # run brings the channel up if missing. Default: prompt (unless -y or

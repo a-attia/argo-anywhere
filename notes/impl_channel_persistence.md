@@ -8,10 +8,11 @@ factual baseline; the open questions in §6 are the point of the doc.
 **Linked PLAN.md sections**: D-003 (mux master owns the forward), D-012
 (SSH failure tracker), D-024 (connect/configure/run split), D-031
 (web-UI Channel + Utility panels). Earns a new **D-035** if any of §5
-ships. *(Renumbered 2026-08-12: this note previously claimed D-034,
-which was contended between three notes. D-034 went to the shared-node
-transport work in [`impl_shared_node_transport.md`](impl_shared_node_transport.md),
-which shipped. A note that has not shipped does not hold a number.)*
+ships. *(2026-08-12: this note previously claimed D-034, then D-035;
+it holds neither. D-034 went to the shared-node transport work and
+D-035 to the local/remote port split, both of which shipped code. Per
+PLAN.md's rule, a note that has not shipped does not hold a number --
+this one takes the next free number if and when it does.)*
 
 ## Contents
 

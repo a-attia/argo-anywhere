@@ -4,12 +4,11 @@
 **Owner**: Ahmed Attia. **Last updated**: 2026-07-16.
 **Target repo**: <https://github.com/a-attia/argo-anywhere>.
 **Linked PLAN.md sections**: none yet — this note precedes the design
-decision. If it ships, it earns a **D-036** entry in PLAN.md.
-*(Renumbered 2026-08-12: this note claimed D-033, which was already
-taken by the shipped ControlPersist decision of 2026-07-22. D-034 went
-to the shared-node transport work and D-035 is reserved for
-[`impl_channel_persistence.md`](impl_channel_persistence.md); D-036 is
-the next free number.)*
+decision. If it ships, it earns the next free D-number in PLAN.md.
+*(2026-08-12: this note claimed D-033, which was already taken by the
+shipped ControlPersist decision. D-034 and D-035 have since gone to
+shipped work. Per PLAN.md's rule, a note that has not shipped does not
+hold a number -- do not read this as a reservation.)*
 
 ## Purpose
 
