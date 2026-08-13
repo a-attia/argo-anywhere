@@ -70,11 +70,16 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.3.1 released 2026-08-12** — a same-day hotfix for three
-  v3.3.0 regressions (abort that did not abort; a port cache written before
-  success, which made the web UI report "not connected" over a live channel;
-  and auto-port-by-default silently migrating a live session). **v3.3.0 is
-  yanked-in-spirit — do not run it.** Prior line: **v3.3.0 tagged 2026-08-12** — the **D-034** release
+- **Status**: **v3.4.0 released 2026-08-13** — carries the three v3.3.0
+  regression fixes that were prepared as v3.3.1 but never published (that
+  tag stayed local while the engine-invariant tests were converted from
+  grep-based to behavioural), plus the per-user derived default port,
+  per-tool status chips in the web UI, and an actionable `connect`.
+  The v3.3.0 regressions were: abort that did not abort; a port cache written
+  before success, which made the web UI report "not connected" over a live
+  channel; and auto-port-by-default silently migrating a live session.
+  **v3.3.0 was the published release from 2026-08-12 until v3.4.0 — do not
+  run it; yank it on PyPI.** Prior line: **v3.3.0 tagged 2026-08-12** — the **D-034** release
   ("evidence, not reachability"). Closes the shared-node transport work:
   five composing defects, the Q10 shared-`$HOME` fix, the OpenCode +
   aider live-model fixes, the web-UI honesty fix, and Option A
@@ -272,7 +277,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: **v3.3.1** (2026-08-12). Release
+- **Current release**: **v3.4.0** (2026-08-13). Release
   history: [`CHANGELOG.md`](CHANGELOG.md) — the single source of
   truth for "what shipped when"; do not restate it here.
 - **Repo**: <https://github.com/a-attia/argo-anywhere>

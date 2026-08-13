@@ -12,12 +12,20 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
-## v3.3.1 — 2026-08-12
+## v3.4.0 — 2026-08-13
 
-**Upgrade immediately if you are on v3.3.0.** Three regressions, all
-reported from the field within an hour of that release. If you cannot
-upgrade yet, `pipx install "argo-anywhere==3.2.1"` is safe; v3.2.1 has
-none of these, though it also lacks the v3.3.0 collision fixes.
+**Upgrade immediately if you are on v3.3.0.** That release had three
+regressions, all reported from the field within an hour, and this is the
+release that fixes them — v3.3.1 was prepared but never published, so
+v3.3.0 is the version you are most likely running. If you cannot upgrade
+yet, `pipx install "argo-anywhere==3.2.1"` is safe; v3.2.1 has none of
+these, though it also lacks the v3.3.0 collision fixes.
+
+This is a minor rather than a patch release because the fixes arrived
+alongside three user-facing additions (a per-user default port, tool
+status in the dashboard, and an actionable `connect`). Nothing here is a
+breaking change, and the port derivation applies only to fresh setups —
+see **Added** below.
 
 ### Fixed
 

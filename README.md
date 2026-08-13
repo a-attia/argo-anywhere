@@ -210,7 +210,7 @@ Section 4 for the rationale.
 
 ## Status
 
-**v3.3.1 is the current release** — `pipx install argo-anywhere` installs it.
+**v3.4.0 is the current release** — `pipx install argo-anywhere` installs it.
 The installable unit is the Python package (Model A; design decisions
 D-026..D-030): the package owns the runtime, vendors the bash engine verbatim,
 and ships the web UI and native app alongside the CLI. Releases are published
@@ -227,9 +227,10 @@ before one existed.
 > **another user's** argo-proxy — it answers the health check identically, so
 > the tool reported success while your requests went out under their Argo
 > identity. You would see an Argo authentication error, or nothing at all.
-> v3.3.1 refuses to route through a proxy it cannot attribute to you, and
+> v3.4.0 refuses to route through a proxy it cannot attribute to you, and
 > offers to move you to a free port. **Skip v3.3.0** — it shipped three
-> regressions and was superseded the same day. Details in
+> regressions and was never superseded on PyPI until now, so it is the
+> version most people are running. Details in
 > [`CHANGELOG.md`](CHANGELOG.md); the full analysis is **D-034** in
 > [`PLAN.md`](PLAN.md).
 

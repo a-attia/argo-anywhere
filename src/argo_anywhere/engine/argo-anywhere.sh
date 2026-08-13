@@ -253,7 +253,7 @@ _legacy_CLAUDECODE_SCOPE="${CLAUDECODE_SCOPE:-}"
 # release process). Format: "<major>.<minor>.<patch>" with optional
 # "-rc<N>" / "-dev" suffix for pre-release builds; _extract_version
 # normalizes both forms.
-SCRIPT_VERSION="2.4.1"
+SCRIPT_VERSION="2.5.0"
 
 # Canonical install root for the script itself (managed by the
 # bootstrap helper triggered on first 'client' / 'setup' run, and by
