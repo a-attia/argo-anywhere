@@ -12,6 +12,53 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
+## v3.3.1 — 2026-08-12
+
+**Upgrade immediately if you are on v3.3.0.** Three regressions, all
+reported from the field within an hour of that release. If you cannot
+upgrade yet, `pipx install "argo-anywhere==3.2.1"` is safe; v3.2.1 has
+none of these, though it also lacks the v3.3.0 collision fixes.
+
+### Fixed
+
+- **Answering `[a] abort` at a prompt now actually stops.** It printed
+  `Aborted at …` and then carried on — copying the engine to the compute
+  node and starting argo-proxy. Every prompt that offers `[a]` was
+  affected: the port-mismatch prompt and all three scope-conflict
+  prompts. The tool said it had stopped and then did the thing, which is
+  the worst kind of bug we can ship.
+
+- **A run that fails or is aborted no longer leaves a wrong port
+  cached.** argo-anywhere recorded the port it *intended* to use before
+  anything was established. Abort at a prompt, or fail to reach the
+  node, and the cache named a port with nothing on it. Because the web
+  UI decides whether you are connected by looking for a listener on the
+  cached port, the dashboard then said **not connected** while a working
+  session ran in the embedded terminal — and following that up cost at
+  least one user their channel. The port is now recorded only once a
+  channel is actually up.
+
+- **A port collision prompts again instead of silently moving you.**
+  v3.3.0 made `--auto-port` the default. On a busy node that quietly
+  migrated a live session to a different port, leaving the cache, the
+  client configs and the dashboard disagreeing about which one was real.
+  `--auto-port` still works when you ask for it; it is no longer
+  automatic. Reverting this leaves the gap it was meant to close: `-y`,
+  `--ensure` and web-UI launches cannot answer a prompt, so they still
+  fail on a collision. That is the correct failure until unattended port
+  migration is safe.
+
+### Changed
+
+- **Prompts are shorter and say what we recommend.** They had grown to a
+  dozen lines that explained internals before listing the options and
+  never named a preferred answer. Each option now leads with its
+  outcome, exactly one is marked `[recommended]`, and that one is the
+  default — so pressing Enter without reading gives you the safe answer.
+  The recommendation is context-aware: after a collision the tool
+  suggests moving your config to the new port, because the old one is
+  demonstrably taken; at startup it suggests keeping what you have.
+
 ## v3.3.0 — 2026-08-12
 
 > **Theme of this release**: the tool stops claiming things it has not

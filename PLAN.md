@@ -7,7 +7,9 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: **v3.3.0 tagged** (2026-08-12) — the **D-034** release,
+**Status**: **v3.3.1 released** (2026-08-12; hotfixes three v3.3.0
+regressions — see CHANGELOG. v3.3.0 should not be run.) Prior: **v3.3.0
+tagged** (2026-08-12) — the **D-034** release,
 "evidence, not reachability". Closes the shared-node transport work
 after a field incident in which the tool reported `ALL GREEN` while
 routing a user's traffic through a stranger's `argo-proxy`: five

@@ -70,7 +70,11 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.3.0 tagged 2026-08-12** — the **D-034** release
+- **Status**: **v3.3.1 released 2026-08-12** — a same-day hotfix for three
+  v3.3.0 regressions (abort that did not abort; a port cache written before
+  success, which made the web UI report "not connected" over a live channel;
+  and auto-port-by-default silently migrating a live session). **v3.3.0 is
+  yanked-in-spirit — do not run it.** Prior line: **v3.3.0 tagged 2026-08-12** — the **D-034** release
   ("evidence, not reachability"). Closes the shared-node transport work:
   five composing defects, the Q10 shared-`$HOME` fix, the OpenCode +
   aider live-model fixes, the web-UI honesty fix, and Option A
@@ -267,7 +271,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: **v3.3.0** (2026-08-12). Release
+- **Current release**: **v3.3.1** (2026-08-12). Release
   history: [`CHANGELOG.md`](CHANGELOG.md) — the single source of
   truth for "what shipped when"; do not restate it here.
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
@@ -778,9 +782,10 @@ Canonical names:
 - `ARGO_ANYWHERE_FORCE_REINSTALL`
 - `ARGO_ANYWHERE_SHOW_MODELS`
 - `ARGO_ANYWHERE_CONTROL_PERSIST`
-- `ARGO_ANYWHERE_AUTO_PORT` (**default ON** since D-034 Option A; set `0`
-  or pass `--no-auto-port` for the interactive collision prompt. Single
-  decision site: `_auto_port_enabled`; never re-inline the default)
+- `ARGO_ANYWHERE_AUTO_PORT` (**default OFF**; Option A flipped it on in
+  v3.3.0 and v3.3.1 reverted it — a port is transport state the cache, the
+  configs and the web UI must agree on, so migrating it unattended is not
+  safe yet. Single decision site: `_auto_port_enabled`; never re-inline)
 - `ARGO_ANYWHERE_PORT_RANGE`
 - `ARGO_ANYWHERE_VERBOSE_SERVER`
 - `ARGO_ANYWHERE_KEEP_ORPHANS`

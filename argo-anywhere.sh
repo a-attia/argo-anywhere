@@ -253,7 +253,7 @@ _legacy_CLAUDECODE_SCOPE="${CLAUDECODE_SCOPE:-}"
 # release process). Format: "<major>.<minor>.<patch>" with optional
 # "-rc<N>" / "-dev" suffix for pre-release builds; _extract_version
 # normalizes both forms.
-SCRIPT_VERSION="2.4.0"
+SCRIPT_VERSION="2.4.1"
 
 # Canonical install root for the script itself (managed by the
 # bootstrap helper triggered on first 'client' / 'setup' run, and by
@@ -1579,6 +1579,25 @@ write_port_cache() {
   mv -f "$_tmp" "$PORT_CACHE" || die "write_port_cache: failed to rename ${_tmp} -> ${PORT_CACHE}."
 }
 
+# _persist_port_cache: commit the port resolve_port staged, now that a channel
+# is actually up. See the CACHE-AFTER-SUCCESS INVARIANT in resolve_port.
+#
+# Idempotent and safe to call unconditionally: a no-op when nothing is pending
+# (the resolved port already matched the cache) or when the mode is not allowed
+# to persist. Takes the port to commit so a caller that moved off the staged
+# value -- auto-port, or the [m]igrate branch -- records what it actually used.
+_persist_port_cache() {
+  local p="${1:-${_PORT_CACHE_PENDING:-}}"
+  [ -n "$p" ] || return 0
+  [ "${PORT_PERSIST_OK:-1}" = 1 ] || return 0
+  [ "${CLEAN_DRY_RUN:-0}" != 1 ] || return 0
+  # Nothing to do if it already says this.
+  local _cur; _cur="$( { cat "$PORT_CACHE" 2>/dev/null | tr -d '[:space:]'; } || true )"
+  [ "$_cur" = "$p" ] && { _PORT_CACHE_PENDING=""; return 0; }
+  write_port_cache "$p"
+  _PORT_CACHE_PENDING=""
+}
+
 resolve_port() {
   local p=""
   # M3 fix (audit Phase 2c) preserved: hoist read_port_from_opencode_config
@@ -1646,6 +1665,10 @@ resolve_port() {
         local _ppc_choice
         _ppc_choice="$(prompt_port_choice "$_first_port" "$_other_port" "multiple client configs (see warnings above)")"
         case "$_ppc_choice" in
+          abort)
+            # Sentinel, not die: prompt_port_choice runs inside $() where
+            # die would exit only the subshell (ABORT-MUST-ABORT INVARIANT).
+            die "Aborted at port-reconciliation step." ;;
           migrate)
             p="$_first_port"
             PORT_SOURCE="user-chosen canonical from multi-config migration (cached)"
@@ -1696,9 +1719,30 @@ resolve_port() {
   # channel/port-owning modes persist; read/teardown modes never rewrite the
   # cache from a one-shot --port. Also never write during a dry-run. Default 1
   # so any direct caller (tests) keeps the historical write-through.
+  #
+  # CACHE-AFTER-SUCCESS INVARIANT (2026-08-12). The write is DEFERRED, not
+  # done here. Writing at resolve time records an intention; the cache is read
+  # as a statement of fact -- by the next run, and by the web UI, which decides
+  # "are we connected?" by looking for a listener on the cached port.
+  #
+  # Field-observed in v3.3.0: `connect --port 64742` cached 64742 immediately,
+  # then the user aborted at the collision prompt. Their live channel was still
+  # on :64751, but the cache now said :64742, so the dashboard read
+  # "not connected" while a working session ran in the embedded terminal. The
+  # user chased the discrepancy and lost the channel.
+  #
+  # This mirrors the P3 fix for the NODE cache, which had the identical bug
+  # (pick_node cached eagerly, so the same-port-different-node check compared
+  # a value against itself and always passed). write_node_cache now runs only
+  # after ensure_or_reuse_tunnel returns; the port cache now does the same.
+  #
+  # Callers that establish a channel MUST call _persist_port_cache on success.
+  # Anything that exits earlier -- an abort, a die, a failed bootstrap -- leaves
+  # the cache describing the last channel that actually worked.
+  _PORT_CACHE_PENDING=""
   if [ "${PORT_PERSIST_OK:-1}" = 1 ] && [ "${CLEAN_DRY_RUN:-0}" != 1 ]; then
     if [ -z "$PORT_FROM_CACHE" ] || [ "$PROXY_PORT" != "$PORT_FROM_CACHE" ]; then
-      write_port_cache "$PROXY_PORT"
+      _PORT_CACHE_PENDING="$PROXY_PORT"
     fi
   fi
 }
@@ -1730,29 +1774,69 @@ resolve_port() {
 # (old) lines 3500-3524 and 3786-3825. The text below is the merged "best
 # of both sites" wording (the longer, more explanatory variant from the
 # startup site, since it's the more common path).
+# prompt_port_choice <new_port> <config_port> <config_label> [recommended]
+#
+# PROMPT STYLE (2026-08-12). Field feedback: the prompts had grown long enough
+# that users could not tell what was being asked or which answer was right.
+# This one ran twelve lines, explained the client's baseURL caching mechanism
+# BEFORE listing the options, and named no recommendation -- so the reader had
+# to derive the answer from an explanation of internals.
+#
+# Rules for every interactive prompt in this engine:
+#   1. One line saying what is wrong.
+#   2. One line per option, each starting with the OUTCOME, not the mechanism.
+#   3. Mark exactly one option [recommended], and make it the default.
+#   4. Explain internals only when the choice genuinely turns on them, and put
+#      that after the options, not before.
+# A user who presses Enter without reading should get the safe answer.
+#
+# `recommended` is the caller's, because the right answer is contextual: after
+# a collision forced us off the config's port, that port is unusable and
+# migrating is correct; at startup, when the config is simply ahead of a stale
+# cache, keeping it is correct. Defaults to `k` (change nothing).
 prompt_port_choice() {
   local new_port="$1" config_port="$2" config_label="$3"
-  warn "Port mismatch:"
-  warn "  Script wants to use         : ${new_port}"
-  warn "  ${config_label} currently says: ${config_port}"
+  local recommended="${4:-k}"
+  local _m="" _u="" _k=""
+  case "$recommended" in
+    m) _m="  [recommended]" ;;
+    u) _u="  [recommended]" ;;
+    *) _k="  [recommended]"; recommended="k" ;;
+  esac
+  warn "Port mismatch: this run wants ${new_port}, ${config_label} says ${config_port}."
   cat >&2 <<EOF
+    [m] point the config at ${new_port} and continue${_m}
+    [u] use ${new_port} just this once, leave the config on ${config_port}${_u}
+    [k] use ${config_port} instead, as the config says${_k}
+    [a] stop and let me sort it out
 
-  The client reads its baseURL once at launch, so a tunnel on ${new_port}
-  while config still says ${config_port} means the client will fail to
-  connect (refused/wrong port). Choose:
-    [m] migrate config to ${new_port}, then continue (writes the config file)
-    [u] use ${new_port} for THIS run only; do NOT touch config
-        (parallel/test tunnel; the client will keep talking to ${config_port})
-    [k] keep config at ${config_port}; use that port for the tunnel too
-    [a] abort; resolve manually
+  (Whichever port the tunnel ends on, the client must agree: it reads the
+  config once at launch, so a mismatch shows up as a refused connection.)
 EOF
-  local choice; choice="$(ask "Your choice [m/u/k/a]:" "k")"
+  local choice; choice="$(ask "Your choice [m/u/k/a, default=${recommended}]:" "$recommended")"
   case "$choice" in
     m|M) printf '%s' "migrate" ;;
     u|U) printf '%s' "use-once" ;;
     k|K) printf '%s' "keep" ;;
-    a|A) die "Aborted at port-reconciliation step." ;;
-    *)   die "Unrecognized choice; aborting." ;;
+    # ABORT-MUST-ABORT INVARIANT (2026-08-12). Do NOT `die` here.
+    #
+    # Every caller captures this function as `x="$(prompt_port_choice ...)"`,
+    # so `die`'s `exit 1` terminates the COMMAND SUBSTITUTION SUBSHELL, not the
+    # script. Field-observed in v3.3.0: a user answered [a] at a port-collision
+    # prompt, saw `[err] Aborted at port-reconciliation step.`, and the run
+    # carried straight on to scp the engine to the node and bootstrap
+    # argo-proxy. The tool said it had stopped and then did the thing.
+    #
+    # This is D-005 exactly ("$() capture of a function that mutates globals /
+    # exits"), which AGENTS.md documents -- the pattern is easy to reintroduce
+    # because the code reads correctly in isolation.
+    #
+    # Emit a sentinel instead and let the CALLER die in the parent shell. Every
+    # call site must handle `abort`; a `*)` arm that silently ignores an
+    # unknown verdict would recreate the bug in a new shape.
+    a|A) printf '%s' "abort" ;;
+    *)   warn "Unrecognized choice '${choice}'; treating as abort." >&2
+         printf '%s' "abort" ;;
   esac
 }
 
@@ -2064,6 +2148,12 @@ SSH_MUX_PERSIST_DEFAULT=3600
 # indefinite persist does not leak beyond an explicit teardown.
 _CHANNEL_PERSIST=0
 
+# Port staged by resolve_port, committed by _persist_port_cache once a channel
+# is genuinely up (CACHE-AFTER-SUCCESS INVARIANT). Empty means nothing pending.
+# Declared here so `set -u` is satisfied on any path that reads it before
+# resolve_port has run.
+_PORT_CACHE_PENDING=""
+
 mfa_enabled() {
   [ "${ARGO_ANYWHERE_NO_MFA:-0}" = 1 ] && return 1
   return 0
@@ -2296,30 +2386,35 @@ ssh_attempt_fail() {
 # _auto_port_enabled: return 0 if a remote port collision should be resolved
 # by auto-picking the next free port, 1 if the user should be prompted.
 #
-# DEFAULT-ON since D-034 Option A (2026-08-12). It was default-OFF, which was
-# right while the probe was untrustworthy: the pre-2026-08-10 walk used an
-# unprivileged `lsof` that cannot see another user's socket, so --auto-port --
-# the flag advertised as the escape from a collision -- recommended ports a
-# co-tenant already held. Verified live on compute-386-01: the old walk over
-# 64742-64760 returned 64742, the occupied port. With the bind-test walk it
-# returns 64743, confirmed bindable. The reason to distrust the flag is gone.
+# DEFAULT-OFF. It was flipped ON in v3.3.0 (D-034 Option A) and reverted in
+# v3.3.1 the same day, after a field report from the maintainer. Recording why,
+# because the argument for default-on still sounds good and should not be
+# re-made without answering this:
 #
-# Why default-on matters beyond convenience: the interactive prompt is
-# unreachable for non-TTY callers. `-y`, `--ensure`, and EVERY web-UI launch
-# fall through to the prompt branch and die on a collision, on a node where
-# collision is the expected state (every install ships the same
-# PROXY_PORT_DEFAULT). Default-off meant the tool had a working recovery path
-# that its own GUI could never take.
+#   A port is not a runtime detail. It is transport-layer state (D-020) written
+#   into client configs and cached in ~/.config/argo_anywhere/port, and the web
+#   UI reads that cache to decide whether a channel exists. Auto-migrating it
+#   mid-run means a user with a LIVE channel on :A silently acquires a second
+#   one on :B, while the cache, the dashboard and the client configs disagree
+#   about which is real. Observed: the dashboard read "not connected" while the
+#   embedded terminal held a working session, and the user lost the channel
+#   chasing the discrepancy.
+#
+#   The prompt was not friction -- it was the thing that kept the user's mental
+#   model and the tool's state in sync during the one operation that changes
+#   both.
+#
+# The non-interactive gap that motivated Option A is real and unfixed: `-y`,
+# `--ensure` and web-UI launches cannot reach the prompt, so they still fail on
+# a collision. That is the correct failure until port migration is safe to do
+# unattended -- which needs the cache/config/UI coherence problem solved first
+# (D-035), not a default flipped. Users who want the old behaviour opt in
+# explicitly with --auto-port.
 #
 # Precedence (explicit beats implicit, both directions):
 #   1. --auto-port / --no-auto-port on the CLI  -> AUTO_PORT=1 / 0
 #   2. ARGO_ANYWHERE_AUTO_PORT=0 or 1           -> that
-#   3. default                                  -> ON
-#
-# NOTE this only fires AFTER a collision is detected on the already-chosen
-# port; it never influences the initial choice (that is resolve_port). The
-# structural fix -- not every user starting at the same port -- is deferred to
-# D-035; see PLAN.md D-034 "Deferred".
+#   3. default                                  -> OFF (prompt)
 _auto_port_enabled() {
   if [ -n "${AUTO_PORT:-}" ]; then
     [ "$AUTO_PORT" = 1 ]
@@ -2329,7 +2424,7 @@ _auto_port_enabled() {
     [ "$ARGO_ANYWHERE_AUTO_PORT" = 1 ]
     return
   fi
-  return 0
+  return 1
 }
 
 # _resolve_control_persist: the single source of truth for the ControlPersist
@@ -3138,8 +3233,13 @@ EOF
   case "$choice" in
     k|K) printf '%s' "keep" ;;
     s|S) printf '%s' "switch" ;;
-    a|A) die "Aborted at scope-conflict step." ;;
-    *)   die "Unrecognized choice; aborting." ;;
+    # ABORT-MUST-ABORT INVARIANT -- see prompt_port_choice for the full
+    # rationale. Same shape: all three call sites capture this in $(), so a
+    # `die` here exits only the subshell and the caller proceeds as if the
+    # user had chosen something.
+    a|A) printf '%s' "abort" ;;
+    *)   warn "Unrecognized choice '${choice}'; treating as abort." >&2
+         printf '%s' "abort" ;;
   esac
 }
 
@@ -3615,6 +3715,11 @@ _opencode_check_conflicts() {
     local _ssc_choice
     _ssc_choice="$(prompt_scope_switch "$conflict_desc" "$intended" "$other_scope")"
     case "$_ssc_choice" in
+      abort)
+        # prompt_scope_switch returns a sentinel rather than calling die --
+        # it is invoked inside $(), where die would exit only the subshell
+        # (ABORT-MUST-ABORT INVARIANT). The caller must die in the parent.
+        die "Aborted at scope-conflict step." ;;
       keep)
         log "  Proceeding with ${intended} scope despite the conflict (user's choice)."
         ;;
@@ -3923,6 +4028,11 @@ PYEOF
     local _ssc_choice
     _ssc_choice="$(prompt_scope_switch "$conflict_desc" "$intended" "$other_scope")"
     case "$_ssc_choice" in
+      abort)
+        # prompt_scope_switch returns a sentinel rather than calling die --
+        # it is invoked inside $(), where die would exit only the subshell
+        # (ABORT-MUST-ABORT INVARIANT). The caller must die in the parent.
+        die "Aborted at scope-conflict step." ;;
       keep)
         # User accepts the conflict; proceed with intended scope.
         log "  Proceeding with ${intended} scope despite the conflict (user's choice)."
@@ -4305,6 +4415,11 @@ _aider_check_conflicts() {
     local _ssc_choice
     _ssc_choice="$(prompt_scope_switch "$conflict_desc" "$intended" "$other_scope")"
     case "$_ssc_choice" in
+      abort)
+        # prompt_scope_switch returns a sentinel rather than calling die --
+        # it is invoked inside $(), where die would exit only the subshell
+        # (ABORT-MUST-ABORT INVARIANT). The caller must die in the parent.
+        die "Aborted at scope-conflict step." ;;
       keep)
         log "  Proceeding with ${intended} scope despite the conflict (user's choice)."
         ;;
@@ -6457,8 +6572,17 @@ ensure_or_reuse_tunnel() {
           # shared helper.
           if [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
             local _ppc_choice
-            _ppc_choice="$(prompt_port_choice "$PROXY_PORT" "$PORT_FROM_CONFIG" "OpenCode config")"
+            # Recommend [m]: we are here because $PORT_FROM_CONFIG is HELD BY
+            # ANOTHER USER on this node. Defaulting to [k] would send the user
+            # back to the port that just failed -- which is what the default
+            # did before, and it reads as the safe answer because "keep" always
+            # does elsewhere.
+            _ppc_choice="$(prompt_port_choice "$PROXY_PORT" "$PORT_FROM_CONFIG" "OpenCode config" m)"
             case "$_ppc_choice" in
+              abort)
+                # Sentinel, not die: prompt_port_choice runs inside $() where
+                # die would exit only the subshell (ABORT-MUST-ABORT INVARIANT).
+                die "Aborted at port-reconciliation step." ;;
               migrate)  ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
               use-once) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
                         SKIP_OPENCODE_CONFIG_WRITE=1 ;;
@@ -6818,6 +6942,10 @@ _client_common_setup() {
     local _ppc_choice
     _ppc_choice="$(prompt_port_choice "$PROXY_PORT" "$PORT_FROM_CONFIG" "OpenCode config (~/.config/opencode/config.json baseURL)")"
     case "$_ppc_choice" in
+      abort)
+        # Sentinel, not die: prompt_port_choice runs inside $() where
+        # die would exit only the subshell (ABORT-MUST-ABORT INVARIANT).
+        die "Aborted at port-reconciliation step." ;;
       migrate)  ok "Will migrate OpenCode config to port ${PROXY_PORT}." ;;
       use-once) ok "Using port ${PROXY_PORT} for this run only; config keeps ${PORT_FROM_CONFIG}."
                 SKIP_OPENCODE_CONFIG_WRITE=1 ;;
@@ -6858,6 +6986,10 @@ _client_common_setup() {
       local _ppc_choice2
       _ppc_choice2="$(prompt_port_choice "$PROXY_PORT" "$_alt_port" "other client config(s) (see warnings above)")"
       case "$_ppc_choice2" in
+        abort)
+          # Sentinel, not die: prompt_port_choice runs inside $() where
+          # die would exit only the subshell (ABORT-MUST-ABORT INVARIANT).
+          die "Aborted at port-reconciliation step." ;;
         migrate)
           # B3-amend (Test 8): the original message claimed "will
           # canonicalize all client configs on port N this run" which
@@ -6951,6 +7083,8 @@ _client_common_setup() {
     log "  screen/tmux/nohup; use '$(basename "$0") clean' to stop everything.)"
     # P3 fix: cache the node only AFTER the on-node bootstrap succeeded.
     write_node_cache "$node"
+    # Same rule for the port (CACHE-AFTER-SUCCESS INVARIANT).
+    _persist_port_cache "$PROXY_PORT"
     _PICKED_NODE=""  # signal short-circuit (caller should bail out)
     return 0
   fi
@@ -7015,6 +7149,10 @@ mode_tunnel() {
   # external-healthy listener). On a non-success rc the script has
   # already die'd, so we won't reach here.
   write_node_cache "$node"
+  # Same rule for the port (CACHE-AFTER-SUCCESS INVARIANT): commit only now
+  # that the channel is genuinely up, so an abort/die upstream leaves the
+  # cache describing the last channel that actually worked.
+  _persist_port_cache "$PROXY_PORT"
   gather_summary
   render_summary
   log "Channel is up; no client configured (this is '${_INVOKED_MODE:-tunnel}' mode)."
@@ -7087,6 +7225,10 @@ mode_client() {
   # external-healthy listener). On a non-success rc the script has
   # already die'd, so we won't reach here.
   write_node_cache "$node"
+  # Same rule for the port (CACHE-AFTER-SUCCESS INVARIANT): commit only now
+  # that the channel is genuinely up, so an abort/die upstream leaves the
+  # cache describing the last channel that actually worked.
+  _persist_port_cache "$PROXY_PORT"
   do_post_tunnel_for_cli_tool "$chosen_client"
   if [ "$rc" -eq 2 ]; then
     log "(external listener; not entering monitor loop. The proxy is reachable"
@@ -7168,6 +7310,7 @@ _configure_ensure_channel_or_die() {
   local rc=0
   ensure_or_reuse_tunnel "$ANL_USERNAME" "$node" || rc=$?
   write_node_cache "$node"
+  _persist_port_cache "$PROXY_PORT"
   _CONFIGURE_ENSURED_NODE="$node"
   return 0
 }

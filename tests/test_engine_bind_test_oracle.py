@@ -238,9 +238,26 @@ def _auto_port_verdict(*, flag: str | None, env: str | None) -> str:
     return out.stdout.strip()
 
 
-def test_auto_port_is_on_by_default() -> None:
-    """The headline change: an unconfigured run self-heals a collision."""
-    assert _auto_port_verdict(flag=None, env=None) == "AUTO"
+def test_auto_port_is_off_by_default() -> None:
+    """A collision must PROMPT, not silently migrate the port.
+
+    v3.3.0 flipped this default ON and v3.3.1 reverted it the same day after a
+    field report. The reasoning that motivated the flip -- the interactive
+    prompt is unreachable for ``-y`` / ``--ensure`` / web-UI launches, so those
+    paths just die on a collision -- is still true and still unfixed. It is the
+    lesser problem.
+
+    A port is transport-layer state (D-020): it is written into client configs
+    and cached in ``~/.config/argo_anywhere/port``, and the web UI decides
+    whether a channel exists by looking for a listener on the cached port.
+    Migrating it unattended left a user with a live channel on one port, a
+    cache naming another, and a dashboard reporting "not connected" while a
+    working session ran in the embedded terminal.
+
+    Making migration safe to do unattended means fixing that coherence problem
+    (D-035), not flipping a default. Until then the prompt is the feature.
+    """
+    assert _auto_port_verdict(flag=None, env=None) == "PROMPT"
 
 
 @pytest.mark.parametrize(
