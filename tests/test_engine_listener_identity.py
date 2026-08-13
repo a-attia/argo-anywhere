@@ -101,40 +101,207 @@ def _run_helper_harness(body: str) -> subprocess.CompletedProcess[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_wait_loop_requires_identity_not_just_health() -> None:
-    """The post-launch wait must AND ``_listener_is_ours`` with the curl.
+def _wait_loop(src: str) -> str:
+    """Extract ``mode_server``'s post-launch wait loop verbatim.
 
-    This is the invariant. A future refactor that drops the identity check
-    restores the exact 2026-08-10 failure: a stranger's proxy satisfies our
-    wait and we report success for a process that never started.
+    The engine has three ``/health`` waits and the two tunnel-side ones look
+    almost identical, so ``local waited=0`` alone is ambiguous -- it silently
+    matched the wrong loop while writing this.
+
+    The anchor is deliberately NOT ``_listener_is_ours``, even though that
+    would disambiguate: the first version used it, and deleting the identity
+    check (the mutation these tests exist to catch) then made the *extractor*
+    raise instead of the assertions failing. Every test "failed", but for the
+    wrong reason -- which would equally have "passed" the revert-check for a
+    mutation that broke something else entirely. ``Server bootstrap failed.``
+    is unique to this loop and independent of the property under test.
     """
-    body = _function_body(_engine_source(), "mode_server")
-    wait = re.search(
-        r"^\s*until curl .*?/health.*?\n(?:.*?\n)*?.*?do$", body, re.MULTILINE
+    lines = src.splitlines()
+    anchor = next(
+        i for i, line in enumerate(lines) if 'die "Server bootstrap failed."' in line
     )
-    assert wait, "post-launch wait loop not found"
-    assert "_listener_is_ours" in wait.group(0), (
-        "the wait loop must confirm the responder is ours, not merely that "
-        "something answers /health"
+    start = next(
+        i
+        for i in range(anchor, -1, -1)
+        if lines[i].strip() == "local waited=0"
     )
+    depth = 0
+    for idx in range(start, len(lines)):
+        stripped = lines[idx].strip()
+        if stripped.startswith("until "):
+            depth += 1
+        elif stripped == "done":
+            depth -= 1
+            if depth == 0:
+                return "\n".join(lines[start : idx + 1])
+    raise AssertionError("unterminated wait loop in mode_server")
 
 
-def test_foreign_listener_is_a_hard_failure_not_a_timeout() -> None:
-    """A foreign listener must fail immediately, with an actionable message.
+def _run_wait_loop(
+    tmp_path: Path,
+    *,
+    health: bool,
+    ours: bool,
+    log: str = "",
+    launcher: str = "screen",
+) -> subprocess.CompletedProcess[str]:
+    """Drive the real wait loop against a stubbed listener.
 
-    Waiting cannot help: the port is held, so our proxy will never get it.
-    Falling through to the 20s timeout would report the wrong cause.
+    ``curl`` and ``_listener_is_ours`` are stubbed rather than a real socket
+    bound, because the case that matters -- a listener owned by *another user*
+    -- cannot be created in a test at all. Stubbing the two oracles is what
+    lets the foreign path be exercised on the real loop body.
+
+    ``sleep`` is a no-op so the 20-iteration timeout path runs instantly; the
+    loop's own ``waited`` counter still advances, so the timeout arithmetic is
+    the shipped arithmetic.
     """
-    body = _function_body(_engine_source(), "mode_server")
-    tail = body[body.index("until curl") :]
-    assert "is served by a process that is NOT ours" in tail
-    assert "Refusing to attach to another user's argo-proxy" in tail
-    # Must name a way out, not just refuse.
-    assert "--port" in tail and "--auto-port" in tail, (
-        "refusal should tell the user how to proceed"
+    loop = _wait_loop(_engine_source())
+    proxy_log = tmp_path / "argoproxy.out"
+    proxy_log.write_text(log)
+    script = "\n".join(
+        (
+            "set -uo pipefail",
+            'err(){ echo "[err] $*" >&2; }',
+            'ok(){ echo "[ok] $*"; }',
+            'die(){ err "$*"; exit 1; }',
+            "sleep(){ :; }",  # keep the timeout path fast
+            f'curl(){{ return {0 if health else 1}; }}',
+            f'_listener_is_ours(){{ return {0 if ours else 1}; }}',
+            '_log_tail_meaningful(){ tail -n "${2:-20}" "$1"; }',
+            "_dump_session_output_screen(){ echo DUMP-SCREEN; }",
+            "_dump_session_output_tmux(){ echo DUMP-TMUX; }",
+            'hostname(){ echo test-node; }',
+            "PROXY_PORT=64742",
+            f'_PROXY_LOG={proxy_log}',
+            f'launcher={launcher}',
+            "SCREEN_SESSION=argovproxy",
+            'run(){',
+            loop,
+            '  ok "argo-proxy is listening on 127.0.0.1:${PROXY_PORT}."',
+            '}',
+            "run",
+        )
     )
-    # And the refusal must come before the generic timeout message.
-    assert tail.index("NOT ours") < tail.index("did not start listening")
+    path = tmp_path / "wait.sh"
+    path.write_text(script)
+    return subprocess.run(
+        ["bash", str(path)], capture_output=True, text=True, timeout=60
+    )
+
+
+def test_wait_loop_succeeds_only_when_the_listener_is_ours(tmp_path: Path) -> None:
+    """Health plus identity is the success condition -- both, not either."""
+    out = _run_wait_loop(tmp_path, health=True, ours=True)
+    assert out.returncode == 0, f"should succeed; stderr={out.stderr}"
+    assert "argo-proxy is listening" in out.stdout
+
+
+def test_wait_loop_refuses_a_healthy_listener_that_is_not_ours(
+    tmp_path: Path,
+) -> None:
+    """The 2026-08-10 incident, reproduced against the shipped loop.
+
+    A stranger's argo-proxy answers ``/health`` exactly as ours would. Before
+    the fix this run *succeeded* and the client tunnelled into their process
+    under ALL GREEN. Now it must refuse.
+    """
+    out = _run_wait_loop(tmp_path, health=True, ours=False)
+    assert out.returncode == 1, "a foreign listener must fail the bootstrap"
+    assert "is served by a process that is NOT ours" in out.stderr
+    assert "Refusing to attach to another user's argo-proxy" in out.stderr
+    assert "did not start listening" not in out.stderr, (
+        "must name the real cause, not fall through to the generic timeout"
+    )
+
+
+def test_foreign_refusal_is_immediate_not_after_the_timeout(
+    tmp_path: Path,
+) -> None:
+    """Waiting cannot free a held port, so the refusal must not burn 20s.
+
+    Asserted through the loop's own counter rather than wall-clock (``sleep``
+    is stubbed): if the refusal came from the timeout branch, the generic
+    message would appear too. The distinction matters because a 20s wait
+    followed by the wrong diagnosis is precisely what the field report showed.
+
+    The positive assertion is load-bearing. Written with only the two
+    ``not in`` checks, this test passed under the very mutation it was
+    paired with -- deleting the identity check makes the loop *succeed*, so
+    no timeout message appears and an absence-only test is satisfied by the
+    bug. Assert the refusal happened, then assert how it happened.
+    """
+    out = _run_wait_loop(tmp_path, health=True, ours=False)
+    assert "is served by a process that is NOT ours" in out.stderr, (
+        "expected the refusal path, not success"
+    )
+    assert "did not start listening within" not in out.stderr
+    assert "Server bootstrap failed" not in out.stderr
+
+
+def test_foreign_refusal_names_a_way_out(tmp_path: Path) -> None:
+    """A refusal the user cannot act on just relocates the dead end."""
+    out = _run_wait_loop(tmp_path, health=True, ours=False)
+    assert "--port" in out.stderr
+    assert "--auto-port" in out.stderr
+
+
+def test_foreign_refusal_shows_our_own_proxys_output(tmp_path: Path) -> None:
+    """Our proxy died for a reason; the log is the only place it survives.
+
+    The port collision is the symptom the user sees, but the cause is usually
+    in our own process's output -- and by this point the session is long gone.
+    """
+    out = _run_wait_loop(
+        tmp_path, health=True, ours=False, log="ERROR: address already in use\n"
+    )
+    assert "address already in use" in out.stderr
+    assert str(tmp_path / "argoproxy.out") in out.stderr
+
+
+def test_nothing_listening_times_out_with_the_generic_message(
+    tmp_path: Path,
+) -> None:
+    """The other branch: no listener at all is a wait, then an honest timeout."""
+    out = _run_wait_loop(tmp_path, health=False, ours=False)
+    assert out.returncode == 1
+    assert "did not start listening within 20s" in out.stderr
+    assert "NOT ours" not in out.stderr, (
+        "nothing answered -- claiming a foreign listener would be a fabrication"
+    )
+
+
+def test_timeout_prefers_the_log_over_the_live_session(tmp_path: Path) -> None:
+    """LOG-DURABILITY COROLLARY: the log outlives the session, so read it first.
+
+    With the stdin redirect a prompting argo-proxy dies in ~1s and the session
+    is reaped ~18s before the timeout fires -- a session-only capture would
+    have nothing left to show.
+    """
+    out = _run_wait_loop(
+        tmp_path, health=False, ours=False, log="Traceback: boom\n"
+    )
+    assert "Traceback: boom" in out.stderr
+    assert "DUMP-SCREEN" not in out.stdout, (
+        "session capture is the fallback; it must not run when the log has content"
+    )
+
+
+def test_timeout_falls_back_to_session_capture_when_the_log_is_empty(
+    tmp_path: Path,
+) -> None:
+    """The disjoint case: a genuine hang, still alive at 20s, log empty."""
+    out = _run_wait_loop(tmp_path, health=False, ours=False, log="")
+    assert "DUMP-SCREEN" in out.stdout, (
+        "an empty log must trigger the live-session capture"
+    )
+
+
+def test_timeout_session_hint_matches_the_launcher(tmp_path: Path) -> None:
+    """A screen hint on a tmux node sends the user to a command that fails."""
+    out = _run_wait_loop(tmp_path, health=False, ours=False, launcher="tmux")
+    assert "tmux attach -t argovproxy" in out.stderr
+    assert "screen -r" not in out.stderr
 
 
 def test_identity_rationale_is_documented_in_source() -> None:
