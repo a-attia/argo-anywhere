@@ -204,6 +204,153 @@ def test_scope_rationale_is_documented() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Behaviour: gather_summary against a real listener
+# ---------------------------------------------------------------------------
+
+
+def _gather(dest: str, cached: str | None, *, listen: bool = True) -> dict[str, str]:
+    """Run the ENGINE'S OWN ``gather_summary`` and report the SUM_* globals.
+
+    A real socket supplies the listener half, so the ``lsof`` parsing is the
+    shipped parsing. ``local_tunnel_destination`` is stubbed because the thing
+    it reads -- a ControlPath socket name off an ``ssh -L`` process -- cannot
+    be manufactured without an actual SSH connection; everything downstream of
+    it (the cache comparison and the three-valued verdict) is real.
+
+    ``curl``/``fetch_proxy_models`` are stubbed to fail: this exercises the
+    destination logic, and the health/model half has its own coverage.
+    """
+    src = _engine_source()
+    body = _function_body(src, "gather_summary")
+
+    import socket
+
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    if listen:
+        sock.listen(1)
+    else:
+        # Bound but not listening: lsof's LISTEN filter finds nothing, which
+        # is the no-listener path without needing a free port to race on.
+        pass
+
+    try:
+        harness = textwrap.dedent(
+            """
+            set -uo pipefail
+            PROXY_PORT={port}
+            STATE_DIR="$PWD/state"; mkdir -p "$STATE_DIR"
+            NODE_CACHE="$STATE_DIR/node"
+            {write_cache}
+            local_tunnel_destination() {{ printf '%s' "{dest}"; }}
+            fetch_proxy_models() {{ printf ''; }}
+            curl() {{ return 1; }}
+            enumerate_client_ports() {{ :; }}
+            log() {{ :; }}; warn() {{ :; }}; err() {{ :; }}; ok() {{ :; }}
+            {body}
+            gather_summary
+            echo "LISTENER_OK=$SUM_LISTENER_OK"
+            echo "DEST=$SUM_TUNNEL_DEST"
+            echo "MATCHES=$SUM_DEST_MATCHES_CACHE"
+            """
+        ).format(
+            port=port,
+            dest=dest,
+            body=body,
+            write_cache=(
+                f"printf '%s\\n' {cached!r} > \"$NODE_CACHE\""
+                if cached is not None
+                else ": # no cache file"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td) / "g.sh"
+            script.write_text(harness)
+            out = subprocess.run(
+                ["bash", str(script)],
+                cwd=td,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+    finally:
+        sock.close()
+
+    assert out.returncode == 0, f"gather_summary failed: {out.stderr}"
+    return dict(
+        line.split("=", 1) for line in out.stdout.splitlines() if "=" in line
+    )
+
+
+def test_gather_detects_a_real_listener() -> None:
+    """Premise check: the harness's socket is actually seen by the lsof parse."""
+    result = _gather("compute-01.cels.anl.gov", "compute-01.cels.anl.gov")
+    assert result["LISTENER_OK"] == "1", (
+        "the harness listener was not detected; the tests below would pass "
+        "vacuously through the no-listener path"
+    )
+
+
+def test_gather_records_the_destination_and_agrees_with_the_cache() -> None:
+    """Matching destination and cache is the ordinary healthy case."""
+    result = _gather("compute-01.cels.anl.gov", "compute-01.cels.anl.gov")
+    assert result["DEST"] == "compute-01.cels.anl.gov"
+    assert result["MATCHES"] == "yes"
+
+
+def test_gather_reports_a_real_disagreement_as_no() -> None:
+    """The 2026-08-10 shape: the tunnel goes somewhere the cache does not name.
+
+    Every probe the card ran was truthful and the card still misled, because
+    the reader's question -- am I talking to my proxy on my node? -- was not
+    one of them. This is the value that lets the card answer it.
+    """
+    result = _gather("compute-99.cels.anl.gov", "compute-01.cels.anl.gov")
+    assert result["DEST"] == "compute-99.cels.anl.gov"
+    assert result["MATCHES"] == "no"
+
+
+def test_gather_reports_unknown_when_the_destination_is_unavailable() -> None:
+    """Unknown must stay empty, never collapse to ``no``.
+
+    A foreground tunnel with no ControlPath, or on-node local mode, yields no
+    destination. Treating that as a mismatch would fire a CHECK verdict at
+    users with nothing wrong -- the opposite failure to the one being fixed,
+    and the more annoying one because it is the common case.
+    """
+    result = _gather("", "compute-01.cels.anl.gov")
+    assert result["DEST"] == ""
+    assert result["MATCHES"] == "", (
+        "no destination means UNKNOWN; only an explicit 'no' is a real "
+        "disagreement"
+    )
+
+
+def test_gather_reports_unknown_when_there_is_no_cache() -> None:
+    """First run: a destination but nothing to compare it against."""
+    result = _gather("compute-01.cels.anl.gov", None)
+    assert result["DEST"] == "compute-01.cels.anl.gov"
+    assert result["MATCHES"] == ""
+
+
+def test_gather_does_not_probe_the_destination_without_a_listener() -> None:
+    """No listener means no ControlPath to read; claiming one would be a lie.
+
+    The stub would happily return a destination if called, so a non-empty
+    DEST here proves the guard is gone.
+    """
+    result = _gather("compute-01.cels.anl.gov", "compute-01.cels.anl.gov",
+                     listen=False)
+    assert result["LISTENER_OK"] == "0"
+    assert result["DEST"] == "", (
+        "the destination was probed with no listener present"
+    )
+    assert result["MATCHES"] == ""
+
+
+# ---------------------------------------------------------------------------
 # Behaviour: render the real box
 # ---------------------------------------------------------------------------
 
