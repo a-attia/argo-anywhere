@@ -96,6 +96,15 @@ none of these, though it also lacks the v3.3.0 collision fixes.
   a co-tenant may hold it for unrelated reasons), so the detection,
   prompt and free-port search are all unchanged.
 
+- **The dashboard shows which of your tools can actually reach the
+  channel.** The "Supported CLI tools" chips listed what argo-anywhere
+  supports — the same three, always — which is not the question you have
+  after a port moves. Each chip now says `ready`, names the port it
+  points at if that is somewhere else, or says `not set up`; when
+  anything is stale the panel spells out the `configure` command. With
+  no verified channel nothing is marked stale, because there is nothing
+  to compare against.
+
 - **`connect` now tells you what to do next.** It used to end with "no
   client configured" and the endpoint URL, which describes the channel
   rather than the next step — a first-time user with nothing set up got

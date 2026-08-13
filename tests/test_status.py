@@ -388,3 +388,101 @@ def test_discover_channels_empty_means_no_channel(monkeypatch) -> None:
     """Empty is a real answer, never 'unknown'."""
     monkeypatch.setattr(status, "local_listeners", lambda *_a, **_k: [])
     assert status.discover_channels() == []
+
+
+# -- per-tool config state (2026-08-12) --------------------------------------
+#
+# The dashboard showed only WHICH tools argo-anywhere supports, so a user whose
+# channel had moved saw three cheerful chips and no hint that two of their
+# tools pointed at a dead port. client_tool_configs is the Python mirror of the
+# engine's enumerate_client_ports; keep the two in step.
+
+
+def test_client_tool_configs_covers_every_supported_tool() -> None:
+    """A tool absent from the table is invisible to the dashboard.
+
+    That is exactly how aider went unnoticed on the engine side until
+    2026-08-12: it wrote a port into its config and no coherence check knew.
+    """
+    tools = {t.tool for t in status.client_tool_configs()}
+    assert {"opencode", "claudecode", "aider"} <= tools, (
+        f"a supported tool is missing from _TOOL_CONFIGS: {tools}"
+    )
+
+
+def test_client_tool_configs_reads_each_format(tmp_path, monkeypatch) -> None:
+    """Three tools, three different config formats, one answer shape."""
+    oc = tmp_path / "opencode.json"
+    oc.write_text(json.dumps({"provider": {"argo": {"options": {
+        "baseURL": "http://localhost:64743/v1"}}}}))
+    cc = tmp_path / "claude.json"
+    cc.write_text(json.dumps({"env": {
+        "ANTHROPIC_BASE_URL": "http://localhost:64744"}}))
+    ai = tmp_path / "aider.yml"
+    ai.write_text("model: openai/argo:gpt-4o\nopenai-api-base: http://localhost:64745/v1\n")
+
+    monkeypatch.setattr(status, "_TOOL_CONFIGS", (
+        ("opencode", str(oc)), ("claudecode", str(cc)), ("aider", str(ai)),
+    ))
+    got = {t.tool: t.port for t in status.client_tool_configs()}
+    assert got == {"opencode": 64743, "claudecode": 64744, "aider": 64745}
+
+
+def test_missing_config_reports_unconfigured_not_an_error(tmp_path, monkeypatch) -> None:
+    """"Never set up" is a distinct state from "set up wrong".
+
+    They need different advice -- `run <tool>` versus `configure <tool>` -- so
+    collapsing them into one would give half the users the wrong instruction.
+    """
+    monkeypatch.setattr(status, "_TOOL_CONFIGS", (
+        ("opencode", str(tmp_path / "nope.json")),
+    ))
+    (t,) = status.client_tool_configs()
+    assert t.configured is False and t.port is None
+
+
+def test_malformed_config_does_not_raise(tmp_path, monkeypatch) -> None:
+    """A hand-edited config must not take the whole dashboard down."""
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ this is not json")
+    empty = tmp_path / "empty.yml"
+    empty.write_text("")
+    monkeypatch.setattr(status, "_TOOL_CONFIGS", (
+        ("opencode", str(bad)), ("aider", str(empty)),
+    ))
+    got = status.client_tool_configs()
+    assert all(t.port is None and t.configured is False for t in got)
+
+
+def test_client_tool_configs_makes_no_network_call() -> None:
+    """Local file reads only -- it runs inside the status poll."""
+    import ast
+    import inspect
+    import textwrap
+
+    # Strip docstrings + comments: the prose legitimately says "no subprocess",
+    # and a raw substring match fails on the very sentence promising the
+    # property. Same trap as tunnel_destination's guard, which matched "ssh"
+    # inside "openssh". Check the CALLS instead.
+    called = set()
+    for fn in (
+        status.client_tool_configs,
+        status._port_from_opencode,
+        status._port_from_claudecode,
+        status._port_from_aider,
+    ):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if isinstance(f, ast.Name):
+                    called.add(f.id)
+                elif isinstance(f, ast.Attribute):
+                    called.add(f.attr)
+                    if isinstance(f.value, ast.Name):
+                        called.add(f"{f.value.id}.{f.attr}")
+    for banned in ("run", "Popen", "check_output", "urlopen", "system",
+                   "subprocess.run", "socket.create_connection"):
+        assert banned not in called, (
+            f"tool-config reading must stay local; it calls {banned!r}"
+        )

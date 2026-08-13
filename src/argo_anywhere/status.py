@@ -15,6 +15,7 @@ or runs ssh itself; against a down port it simply reports ``up=False``.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import platform
 import re
@@ -330,3 +331,102 @@ def discover_channels() -> list[DiscoveredChannel]:
                 DiscoveredChannel(port=listener.port, pid=listener.pid, node=node)
             )
     return sorted(found, key=lambda c: c.port)
+
+
+#: Where each CLI tool records the endpoint it talks to. Mirrors the engine's
+#: OPENCODE_GLOBAL_CONFIG / CLAUDECODE_GLOBAL_CONFIG / AIDER_GLOBAL_CONFIG and
+#: the readers in ``enumerate_client_ports``. **If a tool is added to the
+#: engine's registry, add it here too** -- a tool absent from this table is
+#: invisible to the dashboard's coherence view, which is exactly how aider went
+#: unnoticed on the engine side until 2026-08-12.
+_TOOL_CONFIGS: tuple[tuple[str, str], ...] = (
+    ("opencode", "~/.config/opencode/config.json"),
+    ("claudecode", "~/.claude/settings.json"),
+    ("aider", "~/.aider.conf.yml"),
+)
+
+_URL_PORT_RE = re.compile(r"https?://[^:/]+:(\d+)")
+
+
+@dataclass(frozen=True)
+class ToolConfig:
+    """What one CLI tool's config currently points at."""
+
+    tool: str
+    path: str
+    #: Port parsed from the config, or ``None`` when the tool has no config
+    #: (never configured) or the endpoint could not be parsed.
+    port: int | None
+    configured: bool
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def _port_from_opencode(path: Path) -> int | None:
+    try:
+        data = json.loads(path.read_text())
+        url = data["provider"]["argo"]["options"]["baseURL"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    m = _URL_PORT_RE.search(str(url))
+    return int(m.group(1)) if m else None
+
+
+def _port_from_claudecode(path: Path) -> int | None:
+    try:
+        data = json.loads(path.read_text())
+        url = data.get("env", {}).get("ANTHROPIC_BASE_URL", "")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    m = _URL_PORT_RE.search(str(url))
+    return int(m.group(1)) if m else None
+
+
+def _port_from_aider(path: Path) -> int | None:
+    # Text scrape rather than a YAML parse, matching the engine: PyYAML is a
+    # compute-node dependency, not a laptop one, and the line we own is one we
+    # wrote ourselves in a fixed shape.
+    try:
+        for line in path.read_text().splitlines():
+            if line.strip().startswith("openai-api-base:"):
+                m = _URL_PORT_RE.search(line)
+                return int(m.group(1)) if m else None
+    except OSError:
+        return None
+    return None
+
+
+_TOOL_READERS = {
+    "opencode": _port_from_opencode,
+    "claudecode": _port_from_claudecode,
+    "aider": _port_from_aider,
+}
+
+
+def client_tool_configs() -> list[ToolConfig]:
+    """What each CLI tool's config points at right now.
+
+    Python mirror of the engine's ``enumerate_client_ports``; keep the two in
+    step (same lockstep discipline as ``tunnel_destination`` ↔
+    ``local_tunnel_destination``).
+
+    Exists so the dashboard can answer the question the CLI answers after every
+    ``connect``: which tools are ready, which point somewhere stale, and which
+    were never set up. Before this, the web UI showed only *which tools exist*
+    -- so a user whose channel had moved saw three cheerful chips and no hint
+    that two of their tools would fail to connect.
+
+    Local only: reads three files. No network, no subprocess.
+    """
+    out: list[ToolConfig] = []
+    for tool, raw in _TOOL_CONFIGS:
+        path = Path(os.path.expanduser(raw))
+        if not path.is_file():
+            out.append(ToolConfig(tool=tool, path=str(path), port=None,
+                                  configured=False))
+            continue
+        port = _TOOL_READERS[tool](path)
+        out.append(ToolConfig(tool=tool, path=str(path), port=port,
+                              configured=port is not None))
+    return out

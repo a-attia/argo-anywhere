@@ -741,3 +741,134 @@ def test_stale_cache_does_not_hide_a_live_channel(browser, ui_server) -> None:
     assert "64743" in state["tunnels"], (
         f"the live tunnel must appear in the Tunnels panel; got {state['tunnels']!r}"
     )
+
+
+def _status_body(*, port: int, tools: list[dict], discovered: bool = True) -> str:
+    import json as _json
+
+    return _json.dumps({
+        "package": {"package_version": "0", "engine_version": "0",
+                    "app_cwd_short": "~"},
+        "cached": {"user": "u", "node": "compute-01.example.org", "port": port},
+        "listeners": [{"port": port, "pid": 1, "command": "ssh"}],
+        "sessions": [],
+        "verified_node": "compute-01.example.org",
+        "discovered": ([{"port": port, "pid": 1,
+                         "node": "compute-01.example.org"}] if discovered else []),
+        "tools": tools,
+    })
+
+
+def test_tool_chips_show_config_state_against_the_live_channel(
+    browser, ui_server
+) -> None:
+    """The chips used to answer the wrong question.
+
+    They listed WHICH tools argo-anywhere supports -- static, always the same
+    three -- while the question a user has after a port moves is "which of mine
+    still work?". A dashboard showing three cheerful chips over a channel two
+    of them cannot reach is the same failure as the cache-driven "not
+    connected" banner: a true fact, rendered where a different one belongs.
+    """
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=_status_body(port=64743, tools=[
+                {"tool": "opencode", "path": "/x", "port": 64743, "configured": True},
+                {"tool": "claudecode", "path": "/y", "port": None, "configured": False},
+                {"tool": "aider", "path": "/z", "port": 64751, "configured": True},
+            ]),
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(900)
+    state = pg.evaluate(
+        """() => ({
+          chips: [...document.querySelectorAll('#toolChips .chip')]
+                   .map(c => ({cls: c.className, text: c.textContent.trim()})),
+          note: document.querySelector('#toolsNote').hidden
+                  ? null
+                  : document.querySelector('#toolsNote').textContent.trim(),
+        })"""
+    )
+    pg.close()
+
+    by = {c["text"].split(":")[0].replace("ready", "").replace("not set up", ""): c
+          for c in state["chips"]}
+    assert len(state["chips"]) == 3, f"expected three chips; got {state['chips']}"
+
+    ready = [c for c in state["chips"] if "ready" in c["cls"]]
+    stale = [c for c in state["chips"] if "stale" in c["cls"]]
+    unset = [c for c in state["chips"] if "unset" in c["cls"]]
+    assert len(ready) == 1 and "opencode" in ready[0]["text"]
+    assert len(stale) == 1 and "aider" in stale[0]["text"], (
+        f"the drifted tool must be marked stale; got {state['chips']}"
+    )
+    assert "64751" in stale[0]["text"], "a stale chip should name the port it points at"
+    assert len(unset) == 1 and "claudecode" in unset[0]["text"], (
+        "'never set up' is a different state from 'set up wrong' -- they need "
+        "different advice"
+    )
+    assert state["note"] and "configure aider" in state["note"], (
+        f"a stale tool must come with its fix command; got {state['note']!r}"
+    )
+    assert by  # keep the mapping referenced; the assertions above are the contract
+
+
+def test_tool_chips_are_quiet_when_everything_agrees(browser, ui_server) -> None:
+    """No stale tools -> no advice. The note must not become wallpaper."""
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=_status_body(port=64743, tools=[
+                {"tool": "opencode", "path": "/x", "port": 64743, "configured": True},
+                {"tool": "aider", "path": "/z", "port": 64743, "configured": True},
+            ]),
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(900)
+    state = pg.evaluate(
+        """() => ({
+          stale: document.querySelectorAll('#toolChips .chip.stale').length,
+          noteHidden: document.querySelector('#toolsNote').hidden,
+        })"""
+    )
+    pg.close()
+    assert state["stale"] == 0
+    assert state["noteHidden"] is True, "no stale tools should mean no note"
+
+
+def test_tool_chips_do_not_claim_staleness_with_no_channel(browser, ui_server) -> None:
+    """With nothing connected there is no port to be stale against.
+
+    Marking every configured tool 'stale' when the channel is simply down would
+    be the overclaim in a new place -- the configs are fine, there is just
+    nothing to compare them to.
+    """
+    pg = browser.new_page(viewport={"width": 1440, "height": 800})
+    pg.route(
+        "**/api/status",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=_status_body(port=64743, discovered=False, tools=[
+                {"tool": "opencode", "path": "/x", "port": 64743, "configured": True},
+                {"tool": "aider", "path": "/z", "port": 64751, "configured": True},
+            ]),
+        ),
+    )
+    pg.goto(ui_server, wait_until="networkidle")
+    pg.wait_for_timeout(900)
+    state = pg.evaluate(
+        """() => ({
+          stale: document.querySelectorAll('#toolChips .chip.stale').length,
+          noteHidden: document.querySelector('#toolsNote').hidden,
+        })"""
+    )
+    pg.close()
+    assert state["stale"] == 0, "nothing is stale when there is no live channel"
+    assert state["noteHidden"] is True

@@ -1001,6 +1001,19 @@ change on the other in the SAME commit. No automated enforcement
 except where noted (a couple of grep-based invariant tests exist);
 reviewers verify by grep or the mirror-test suite.
 
+- **Client-port enumeration (2026-08-12)**: the engine's
+  `enumerate_client_ports` (+ its per-tool `_get_port_from_*_config`
+  readers) and `status.client_tool_configs` / `status._TOOL_CONFIGS`
+  answer the same question — "what port does each tool's config point
+  at?" — for the CLI and the dashboard respectively. **Adding a CLI
+  tool means adding it to BOTH**, or that tool is invisible to every
+  coherence check on whichever side was missed. This is not
+  hypothetical: aider shipped in Phase 5a absent from
+  `enumerate_client_ports` and stayed invisible until 2026-08-12, so a
+  user's aider config sat on a dead port with nothing warning them.
+  Pinned by `test_every_config_writing_tool_is_enumerated` (engine) and
+  `test_client_tool_configs_covers_every_supported_tool` (Python).
+
 - **D-031 scope-values (2026-07-13)**: any change to a tool's
   `<name>_scope_values()` function in the engine (adding /
   removing / renaming a legal scope value) MUST update the web UI's

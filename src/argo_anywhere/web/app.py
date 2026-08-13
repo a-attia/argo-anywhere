@@ -285,6 +285,7 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
         # dashboard requests health explicitly on user action via /api/health.
         from ..status import (
             cached_state,
+            client_tool_configs,
             discover_channels,
             local_listeners,
             package_info,
@@ -331,6 +332,12 @@ def create_app(*, engine_argv: Sequence[str] = ("connect",)) -> FastAPI:
             # stale and the UI says so instead of reporting "not connected"
             # over a working channel.
             "discovered": discovered,
+            # What each CLI tool's config points at. The dashboard used to show
+            # only WHICH tools exist, so a user whose channel had moved saw
+            # three cheerful chips and no hint that two of their tools would
+            # fail to connect. The CLI reports this after every `connect`
+            # (report_next_steps); this is the same answer for the UI.
+            "tools": [t.as_dict() for t in client_tool_configs()],
         })
 
     @app.get("/api/sessions")
