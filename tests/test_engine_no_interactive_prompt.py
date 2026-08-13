@@ -514,6 +514,289 @@ def test_log_survives_the_session_that_dies_from_the_redirect() -> None:
     assert "EOFError" in out.stdout, "the EOF death itself should be logged"
 
 
+def _tmux_launch_lines(body: str) -> str:
+    """Return the ``_tmux_cmd`` assignment plus its ``tmux new-session`` line.
+
+    The two are inseparable: the assignment does the ``printf %q`` escaping
+    that makes the launch safe, so a test that took only the ``new-session``
+    line would be testing a command the engine never issues.
+    """
+    lines = body.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.strip().startswith("_tmux_cmd=")),
+        None,
+    )
+    assert start is not None, "_tmux_cmd assignment not found in mode_server"
+    end = next(
+        (
+            i
+            for i in range(start, len(lines))
+            if lines[i].strip().startswith("tmux new-session ")
+        ),
+        None,
+    )
+    assert end is not None, "tmux new-session line not found in mode_server"
+    # Line-indexed rather than a DOTALL regex: `.*$` under DOTALL ran past the
+    # branch and pulled in the `;;` that closes it, so the harness was a syntax
+    # error rather than a launch. The failure looked like a launch failure.
+    return "\n".join(lines[start : end + 1])
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_tmux_redirect_actually_prevents_the_hang() -> None:
+    """The tmux twin of the screen behavioural test.
+
+    ``tmux new-session -d`` allocates a pty exactly as ``screen -dm`` does, so
+    it had the identical hang; it was fixed in the same commit but only ever
+    grep-tested. The two launchers reach the redirect by different routes --
+    screen passes argv, tmux builds ONE shell string through ``printf %q`` --
+    so confirming one says nothing about the other.
+    """
+    body = _function_body(_engine_source(), "mode_server")
+    fake_launch = (
+        _tmux_launch_lines(body)
+        .replace('"${SCREEN_SESSION}"', '"$SESSION"')
+        .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
+        .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
+        .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+    )
+    assert "$FAKE" in fake_launch and "$LOGFILE" in fake_launch, (
+        "substitution failed; tmux launch changed shape"
+    )
+
+    harness = textwrap.dedent(
+        """
+        set -uo pipefail
+        FAKE="$PWD/fakeproxy"
+        LOGFILE="$PWD/argoproxy.out"
+        TESTPORT=64742
+        cat > "$FAKE" <<'EOS'
+        #!/bin/bash
+        echo "WARNING | [config] Warning: Port 64742 is already in use."
+        echo -n "Enter port [56617] [Y/n/number]: "
+        read -r answer || { echo; echo "EOFError: EOF when reading a line"; exit 1; }
+        EOS
+        chmod +x "$FAKE"
+        : > "$LOGFILE"
+
+        # (1) CURRENT-BUG shape: one shell string, no redirect -> holds the pty.
+        SESSION="argo_tmux_bug_$$"
+        tmux new-session -d -s "$SESSION" "$FAKE serve"
+        sleep 2
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+          echo "unredirected=alive"
+        else
+          echo "unredirected=exited"
+        fi
+        tmux kill-session -t "$SESSION" >/dev/null 2>&1 || true
+
+        # (2) FIXED shape: the engine's own lines, fake binary.
+        SESSION="argo_tmux_fix_$$"
+        %(fake_launch)s
+        sleep 3
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+          echo "redirected=alive"
+          tmux kill-session -t "$SESSION" >/dev/null 2>&1 || true
+        else
+          echo "redirected=exited"
+        fi
+        echo "logbytes=$(wc -c < "$LOGFILE" | tr -d ' ')"
+        echo "--- LOG ---"
+        cat "$LOGFILE"
+        tmux kill-server >/dev/null 2>&1 || true
+        """
+    ) % {"fake_launch": fake_launch}
+
+    out = _run_screen_harness(harness)
+    results = dict(
+        line.split("=", 1) for line in out.stdout.splitlines() if "=" in line
+    )
+    assert results.get("unredirected") == "alive", (
+        f"expected the un-redirected tmux launch to hang (got {results}); "
+        "if this fails the test no longer reproduces the bug"
+    )
+    assert results.get("redirected") == "exited", (
+        f"stdin redirect failed to prevent the tmux hang (got {results})"
+    )
+    # The LOG-DURABILITY COROLLARY applies here too: the session is gone, so
+    # the teed log is the only surviving evidence.
+    assert int(results.get("logbytes", "0")) > 0, "tmux launch wrote no log"
+    assert "Port 64742 is already in use" in out.stdout
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_tmux_launch_survives_a_venv_path_with_spaces() -> None:
+    """The reason the tmux branch uses ``printf %q`` at all.
+
+    tmux takes ONE string interpreted by a shell, so ``$HOME=/Users/Alice
+    Smith`` would word-split into a nonexistent binary plus a stray argument.
+    Grep-testing for ``printf %q`` proves the call is present, not that the
+    escaping it produces actually survives the round trip.
+    """
+    body = _function_body(_engine_source(), "mode_server")
+    fake_launch = (
+        _tmux_launch_lines(body)
+        .replace('"${SCREEN_SESSION}"', '"$SESSION"')
+        .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
+        .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
+        .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+    )
+    harness = textwrap.dedent(
+        """
+        set -uo pipefail
+        mkdir -p "$PWD/Alice Smith/bin"
+        FAKE="$PWD/Alice Smith/bin/argo-proxy"
+        LOGFILE="$PWD/Alice Smith/argoproxy.out"
+        TESTPORT=64742
+        cat > "$FAKE" <<'EOS'
+        #!/bin/bash
+        echo "STARTED-OK args=$*"
+        EOS
+        chmod +x "$FAKE"
+        : > "$LOGFILE"
+        SESSION="argo_tmux_spaces_$$"
+        %(fake_launch)s
+        sleep 2
+        tmux kill-session -t "$SESSION" >/dev/null 2>&1 || true
+        echo "--- LOG ---"
+        cat "$LOGFILE"
+        tmux kill-server >/dev/null 2>&1 || true
+        """
+    ) % {"fake_launch": fake_launch}
+
+    out = _run_screen_harness(harness)
+    assert "STARTED-OK" in out.stdout, (
+        f"binary in a path with spaces failed to launch; stdout:\n{out.stdout}"
+    )
+    assert "serve" in out.stdout and "--port 64742" in out.stdout, (
+        f"arguments did not survive the escaping; stdout:\n{out.stdout}"
+    )
+
+
+def test_nohup_redirect_actually_prevents_the_hang(tmp_path: Path) -> None:
+    """The third launcher, on the same terms as the other two.
+
+    ``nohup`` has always had ``< /dev/null``, which is exactly why it is worth
+    a behavioural test: it is the branch nobody thinks about, so a refactor
+    that unified the three launch lines could drop it here without anyone
+    noticing. Unlike screen/tmux there is no pty, but an inherited stdin that
+    stays OPEN would hang just the same.
+
+    Getting the control right took two tries. The first version fed stdin via
+    ``subprocess.run(input=...)``, reasoning that the child would read the
+    parent's pipe. It does -- and then hits EOF the instant the pipe closes,
+    so the fake exited promptly with or without the redirect, and the test
+    passed under its own mutation. Feeding data does not reproduce a hang;
+    only a source that never EOFs does.
+
+    Hence the FIFO with a ``sleep`` holding its write end open: stdin is
+    readable, never closes, and a child that inherits it blocks forever --
+    which is what an interactive terminal actually looks like.
+
+    That still was not enough, and the reason is worth knowing: POSIX says a
+    shell WITHOUT job control redirects an async command's stdin from
+    ``/dev/null`` itself. So in a plain ``bash script.sh`` the control exited
+    even with the FIFO -- bash had silently applied the very redirect under
+    test, and the harness could not tell the two branches apart. ``set -m``
+    turns job control on, which suppresses that implicit redirect and is also
+    what the engine runs under on a real node.
+
+    The control assertion exists because of this: it fails loudly if the
+    harness ever stops reproducing the hang, rather than passing vacuously.
+    Verified in both directions before being trusted: inherited FIFO stdin
+    blocks, ``< /dev/null`` exits.
+    """
+    body = _function_body(_engine_source(), "mode_server")
+    match = re.search(r"^\s*nohup .*argo-proxy.*$", body, re.MULTILINE)
+    assert match, "nohup launch line not found"
+    fake_launch = (
+        match.group(0)
+        .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
+        .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
+        .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+    )
+    script = textwrap.dedent(
+        """
+        set -uo pipefail
+        # Job control ON: without it bash redirects an async command's stdin
+        # from /dev/null itself, which is the redirect under test.
+        set -m
+        FAKE="$PWD/fakeproxy"
+        LOGFILE="$PWD/argoproxy.out"
+        TESTPORT=64742
+        cat > "$FAKE" <<'EOS'
+        #!/bin/bash
+        echo "WARNING | [config] Warning: Port 64742 is already in use."
+        echo -n "Enter port [56617] [Y/n/number]: "
+        read -r answer || { echo; echo "EOFError: EOF when reading a line"; exit 1; }
+        EOS
+        chmod +x "$FAKE"
+        : > "$LOGFILE"
+
+        # An stdin that is readable but never EOFs -- the thing an inherited
+        # terminal behaves like, and the only kind that reproduces the hang.
+        FIFO="$PWD/stdin.fifo"
+        mkfifo "$FIFO"
+        sleep 30 > "$FIFO" &
+        HOLDER=$!
+
+        # Redirect at PARENT level, not inside a ( ... ) subshell: `set -m` is
+        # per-shell and a subshell starts without job control, so bash would
+        # reapply the implicit /dev/null there and the control would not hang.
+        exec < "$FIFO"
+
+        # Control: the same launch WITHOUT the redirect, inheriting the FIFO.
+        # If this does not hang, the test proves nothing about the redirect.
+        nohup "$FAKE" serve > "$LOGFILE.ctl" 2>&1 &
+        CTL=$!
+        sleep 2
+        if kill -0 "$CTL" 2>/dev/null; then
+          echo "control=alive"; kill "$CTL" 2>/dev/null || true
+        else
+          echo "control=exited"
+        fi
+
+        # The engine's own line, also inheriting the FIFO.
+        %(fake_launch)s
+        PROXY_PID=$!
+        sleep 2
+        if kill -0 "$PROXY_PID" 2>/dev/null; then
+          echo "state=alive"
+          kill "$PROXY_PID" 2>/dev/null || true
+        else
+          echo "state=exited"
+        fi
+        kill $HOLDER 2>/dev/null || true
+        echo "--- LOG ---"
+        cat "$LOGFILE"
+        """
+    ) % {"fake_launch": fake_launch}
+
+    path = tmp_path / "nohup.sh"
+    path.write_text(script)
+    out = subprocess.run(
+        ["bash", str(path)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    results = dict(
+        line.split("=", 1) for line in out.stdout.splitlines() if "=" in line
+    )
+    assert results.get("control") == "alive", (
+        f"the control did not hang (got {results}); without a blocking stdin "
+        "this test cannot detect a dropped redirect -- fix the harness"
+    )
+    assert results.get("state") == "exited", (
+        f"nohup launch did not take EOF promptly (got {results}); the "
+        "`< /dev/null` redirect may have been dropped"
+    )
+    assert "EOFError" in out.stdout, (
+        f"expected the EOF death in the log; stdout:\n{out.stdout}"
+    )
+
+
 @pytest.mark.skipif(shutil.which("screen") is None, reason="screen not installed")
 def test_screen_capture_surfaces_the_prompt_text() -> None:
     """End-to-end: a hung session's prompt reaches stderr via the helper.
