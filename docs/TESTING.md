@@ -1,17 +1,51 @@
-# argo-anywhere.sh — live verification guide
+# Live verification guide (the bash engine)
 
-Audience: maintainers / contributors who have made a non-trivial change to
-`argo-anywhere.sh` and want to confirm the end-to-end `client` flow still works
+Audience: maintainers / contributors who have made a non-trivial change to the
+**bash engine** and want to confirm the end-to-end `client` flow still works
 before tagging a release or asking someone else to update.
+
+Commands below are written as `bash argo-anywhere.sh <verb>`, which is how you
+run a checkout of the engine directly. Under a package install the equivalent
+is `argo-anywhere <verb>`; to get the engine out of an installed package, run
+`argo-anywhere --print-script > argo-anywhere.sh`.
 
 This is the **live** smoke test (real SSH, real Duo prompt, real argo-proxy
 on a compute node). For the cheaper local-only checks see
 [Smoke tests](#smoke-tests-no-ssh-required) at the bottom of this file.
 
-Reading time: ~5 min. Run time: ~5–10 min including one Duo prompt.
+Run time: ~5–10 min for the core `client` path (Steps 0–5) including one Duo
+prompt. The later suites are independent — run only the ones your change
+touches.
 
-> **Adjacent docs**: [`UPGRADING.md`](UPGRADING.md) covers what changes
-> for v1.x users at v2.0. [`SECURITY.md`](SECURITY.md) covers the threat
+## Contents
+
+- [Step 0 — pre-flight sanity](#step-0--pre-flight-sanity-30-s) → [Step 5](#step-5--end-to-end-opencode-connectivity):
+  the core live path. Run these before tagging a release.
+- [Recovery — if anything goes sideways](#recovery--if-anything-goes-sideways)
+- [Smoke tests (no SSH required)](#smoke-tests-no-ssh-required) — cheap local
+  checks; no ANL infra.
+- [On-node paths](#on-node-paths-phase-2-additions) — running from a compute
+  node rather than a laptop.
+- [Multi-tool tests](#multi-tool-tests-v20) — per-tool selection, scope, and
+  config-writer behaviour.
+- [v3.1.0 launcher / `--cwd`](#v310--launcher-cwd--dual-embedded-terminals----cwd-flag-d-031)
+
+> **Capability probing.** `python scripts/probe_capabilities.py` measures
+> per-model extended-thinking support on both API paths against a live
+> channel (see [`LIMITATIONS.md`](LIMITATIONS.md) "Extended thinking"). It
+> spends gateway quota, so it is not part of the release gate — run it when
+> ANL adds models or when the upstream shim moves.
+
+> **Coverage gaps, stated honestly.** These suites cover the engine through
+> v3.1.0. Nothing here exercises **aider** (shipped Phase 5a), the D-032
+> ssh-config routing, the D-034 shared-node identity work, or the D-035
+> per-user port — those are live-tested in their own notes under
+> [`notes/`](../notes/) and have not been folded back in. The Python layer is
+> covered by `pytest`, which needs no ANL infra: run `pytest -q`.
+
+> **Adjacent docs**: [`UPGRADING.md`](UPGRADING.md) routes you through an
+> upgrade; the v1.x → v2.0 detail is archived in
+> [`UPGRADING_HISTORY.md`](UPGRADING_HISTORY.md). [`SECURITY.md`](SECURITY.md) covers the threat
 > model + privacy posture. [`LIMITATIONS.md`](LIMITATIONS.md) covers
 > known limitations including the single-instance constraint that
 > several tests below exercise. [`AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md)
@@ -44,7 +78,7 @@ bash argo-anywhere.sh -h >/dev/null 2>&1 && echo "usage OK"
 
 # What's the resolved port for this checkout? (so you know what to look for
 # in lsof / curl output below)
-bash argo-anywhere.sh status 2>&1 | grep -E 'Configured port' || true
+cat ~/.config/argo_anywhere/port 2>/dev/null || echo "(no port cached yet)"
 ```
 
 **Pass:** `syntax OK` and `usage OK` both print. If you have an existing
@@ -95,10 +129,14 @@ running OpenCode windows first**, otherwise OpenCode may print errors as the
 tunnel dies.
 
 ```sh
-# What port will the script use? (read from your OpenCode config; falls back
-# to the built-in default 64742)
-PORT="$(bash argo-anywhere.sh status 2>&1 \
-        | awk -F': *' '/Configured port/{print $2; exit}')"
+# What port will the script use? Source of truth is the port cache (D-020);
+# on a cold start it's a per-user value derived from your username -- NOT a
+# fixed 64742, which is only the bottom of the range.
+# The port cache is the source of truth (D-020); fall back to parsing the
+# status card only if the cache hasn't been written yet.
+PORT="$(cat ~/.config/argo_anywhere/port 2>/dev/null \
+        || bash argo-anywhere.sh status 2>&1 \
+           | awk -F'[:|]' '/^\| Port  /{gsub(/ /,"",$3); print $3; exit}')"
 echo "PORT=$PORT"
 
 # Confirm what (if anything) is bound there
@@ -133,8 +171,8 @@ You should see, in order:
 ### 3a — username + port resolution
 
 ```
-[argo_anywhere] Using ANL username: <user>
-[argo_anywhere] Using port: <port>  (source: opencode config baseURL)
+[argo-anywhere] Using ANL username: <user>
+[argo-anywhere] Using port: <port>  (source: opencode config baseURL)
 ```
 
 **Pass:** username matches what you cached, port matches your config, source
@@ -160,12 +198,12 @@ The cached node from your last run is the default. To exercise the picker:
 
 **Pick whatever node you intend to test against.**
 
-**Pass:** `[argo_anywhere] Selected node: <node>`.
+**Pass:** `[argo-anywhere] Selected node: <node>`.
 
 ### 3c — first SSH to the node + Duo
 
 ```
-[argo_anywhere] Opening multiplexed SSH master to <user>@<node> (Duo prompt expected once)...
+[argo-anywhere] Opening multiplexed SSH master to <user>@<node> (Duo prompt expected once)...
 (<user>@logins.cels.anl.gov) Duo two-factor login for <user>
 ...
 Passcode or option (1-1): 1
@@ -198,7 +236,9 @@ If your existing config differs from what the script would write, you'll see:
     [k] keep existing (no changes)
     [b] backup existing to .bak.<timestamp>, then overwrite
     [d] show diff (existing -> proposed), then ask again
-    [m] merge: only update keys this script manages (requires jq for JSON)
+    [m] merge: only update keys this script manages (JSON via jq)
+#   NOTE: [m] is offered only for JSON *and* only when jq is on PATH.
+#   Without jq the menu is [k/b/d/a]. YAML never gets [m].
     [a] abort
   Your choice [k/b/d/m/a]:
 ```
@@ -214,9 +254,9 @@ your local OS account name.
 ### 3e — bootstrap on the compute node
 
 ```
-[argo_anywhere] Copying script to <user>@<node>:~/.argo-anywhere.sh...
-[argo_anywhere] Running server bootstrap on <node>...
-[argo_anywhere] [server] starting bootstrap on <node>... for user=<user> port=<port>
+[argo-anywhere] Copying script to <user>@<node>:~/.argo-anywhere.sh...
+[argo-anywhere] Running server bootstrap on <node>...
+[argo-anywhere] [server] starting bootstrap on <node> for user=<user> port=<port>
 [ ok ] system python3 3.x OK
 [ ok ] venv python 3.x OK (/home/<user>/argovenv)
 [ ok ] argo-proxy: argo-proxy <version>
@@ -249,13 +289,13 @@ differs prompt similar to Step 3d but for `~/.config/argoproxy/config.yaml`:
 If you took the BEFORE snapshot at Step 1, **type `d`** here. Sanity-check
 that the proposed file keeps your existing keys (`argo_url`,
 `argo_embedding_url`, `concurrent_downloads`, etc.) and only changes the four
-the script owns: `config_version`, `host`, `port`, `user`.
+the script owns: `config_version`, `host`, `port`, `user`, and `verbose`.
 
 After the diff, re-prompt fires. **Type `b`** to back up + overwrite.
 
 ```
 [ ok ] Backed up to ...config.yaml.bak.<ts> and overwrote argo-proxy config.
-[argo_anywhere] Starting argo-proxy in screen session 'argovproxy'...
+[argo-anywhere] Starting argo-proxy in screen session 'argovproxy'...
 [ ok ] argo-proxy is listening on 127.0.0.1:<port>.
 [ ok ] Server is up on <node>:<port>.
 ```
@@ -276,17 +316,17 @@ After the diff, re-prompt fires. **Type `b`** to back up + overwrite.
 ### 3f — tunnel up + summary
 
 ```
-[argo_anywhere] Opening tunnel: localhost:<port> -> <node>:<port> via logins.cels.anl.gov
-[ ok ] Tunnel is live. argo-proxy responding at http://localhost:<port>
+[argo-anywhere] Opening tunnel: localhost:<port> -> <node>:<port> via logins.cels.anl.gov
+[ ok ] Tunnel is live. argo-proxy reachable at http://localhost:<port>/v1
 ```
 
 Then the ALL GREEN summary box, with non-zero model counts.
 
 ```
-[argo_anywhere] Foregrounding (mux-owned tunnel; Ctrl-C to disconnect health monitor).
-[argo_anywhere]   Note: the SSH multiplex master keeps the forward alive even if you
-[argo_anywhere]   kill this script. Use 'bash argo-anywhere.sh stop' (or 'clean') to
-[argo_anywhere]   fully tear down the tunnel.
+[argo-anywhere] Foregrounding (mux-owned tunnel; Ctrl-C to disconnect health monitor).
+[argo-anywhere]   Note: the SSH multiplex master keeps the forward alive even if you
+[argo-anywhere]   kill this script. Use 'bash argo-anywhere.sh stop' (or 'clean') to
+[argo-anywhere]   fully tear down the tunnel.
 ```
 
 The script is now blocking. **Leave this terminal alone** — Ctrl-C will tear
@@ -299,8 +339,11 @@ the exact commands for each scope you might want to also tear down.
 ## Step 4 — verify the tunnel from a SECOND terminal
 
 ```sh
-PORT="$(bash argo-anywhere.sh status 2>&1 \
-        | awk -F': *' '/Configured port/{print $2; exit}')"
+# The port cache is the source of truth (D-020); fall back to parsing the
+# status card only if the cache hasn't been written yet.
+PORT="$(cat ~/.config/argo_anywhere/port 2>/dev/null \
+        || bash argo-anywhere.sh status 2>&1 \
+           | awk -F'[:|]' '/^\| Port  /{gsub(/ /,"",$3); print $3; exit}')"
 
 # Identify the tunnel process
 ps -ax -o pid,ppid,user,etime,command | grep -E "[s]sh.*-N -L ${PORT}"
@@ -333,9 +376,11 @@ ssh -J <user>@logins.cels.anl.gov <user>@<node> \
 diff -u /tmp/argoproxy_config_BEFORE.yaml /tmp/argoproxy_config_AFTER.yaml
 ```
 
-**Pass:** the diff shows ONLY changes to the four owned keys
-(`config_version`, `host`, `port`, `user`) and possibly additions of
-`verbose` / `argo_base_url` if those were missing. Every other previously-
+**Pass:** the diff shows ONLY changes to the owned keys
+(`config_version`, `host`, `port`, `user`, `verbose`) and possibly an
+addition of `argo_base_url` if it was missing. `verbose` is written
+unconditionally, so upgrading from a `verbose: true` config WILL show it
+flipping to `false` — that is the P2 privacy fix, not an unexpected diff. Every other previously-
 present key must appear in both BEFORE and AFTER, identical.
 
 If you took the (A) reuse path at Step 3e the file wasn't rewritten and the
@@ -367,7 +412,7 @@ lsof -nPi ":${PORT}" -sTCP:LISTEN
 
 ```sh
 # Kill stale local listener, if any
-PORT="$(bash argo-anywhere.sh status 2>&1 | awk -F': *' '/Configured port/{print $2; exit}')"
+PORT="$(cat ~/.config/argo_anywhere/port 2>/dev/null)"
 lsof -nPi ":${PORT}" -sTCP:LISTEN -t | xargs -r kill 2>/dev/null
 
 # Kill stale remote session + argo-proxy on the node
@@ -380,8 +425,7 @@ ssh -J <user>@logins.cels.anl.gov <user>@<node> '
 '
 ```
 
-Then re-run `bash argo-anywhere.sh client` (or, in a pinch, the legacy
-`start_argo_tunnel.sh` if you kept it around).
+Then re-run `bash argo-anywhere.sh client`.
 
 ### You accidentally Ctrl-C'd the foregrounded client
 
@@ -469,8 +513,8 @@ bash argo-anywhere.sh client
 
 **Pass criteria:**
 
-- `[argo_anywhere] Detected ANL compute node (compute-XXX-Y...); defaulting to --no-jump.` — auto-detection fired.
-- `[argo_anywhere] Selected node is this host (compute-XXX-Y...); skipping SSH tunnel.` — short-circuit fired.
+- `[argo-anywhere] Detected ANL compute node (compute-XXX-Y...); defaulting to --no-jump.` — auto-detection fired.
+- `[argo-anywhere] Selected node is this host (compute-XXX-Y...); skipping SSH tunnel.` — short-circuit fired.
 - `~/.argo-anywhere.sh` mtime: **unchanged** (no scp happened).
 - argo-proxy: same pid as before (existing instance reused, not restarted).
 - The shell returns to the prompt (no foreground tunnel).
@@ -491,7 +535,7 @@ bash argo-anywhere.sh tunnel
 
 - Same on-node short-circuit lines as test 1.
 - No `[ ok ] OpenCode already installed` or `OpenCode config already
-  up to date` lines (because tunnel doesn't run setup_opencode_client).
+  up to date` lines (because tunnel doesn't run setup_opencode_cli_tool).
 - `~/.config/opencode/config.json` mtime: **unchanged**.
 
 ### On-node test 3: `server` standalone
@@ -504,7 +548,7 @@ bash argo-anywhere.sh server
 
 **Pass criteria:**
 
-- `[argo_anywhere] Standalone 'server' invocation. Resolved identity from local config + cache ...`
+- `[argo-anywhere] Standalone 'server' invocation. Resolved identity from local config + cache ...`
 - `Proceed? [Y/n]:` — type `Y` or hit Enter.
 - The prompt fires **exactly once** (the tee re-exec subprocess inherits
   the resolved values via env, so its standalone-detection sees them as
@@ -630,16 +674,24 @@ bash argo-anywhere.sh --user no-such-user client
 bash argo-anywhere.sh --user no-such-user client
 bash argo-anywhere.sh --user no-such-user client
 
-# By the third attempt within the same session, the tracker should fire
-# and refuse further SSH attempts. But each script invocation is a fresh
-# process, so the counter resets each time. To exercise the in-session
-# threshold, you'd need a single invocation that does multiple SSH calls
-# and fails each (e.g. --probe-nodes with no ANL_NODES reachable).
+# By the third attempt the tracker fires and refuses further SSH attempts.
+# The counter does NOT reset between invocations: the count and the lock
+# live on disk (~/.config/argo_anywhere/ssh-fail-lock{,-count}), precisely
+# so that "see error, Ctrl-C, re-run immediately" cannot launder real auth
+# failures past CSPO's rate limiter (audit C4/C5).
+#
+# So this test WILL leave you locked out. Clear it when done:
+rm -f ~/.config/argo_anywhere/ssh-fail-lock ~/.config/argo_anywhere/ssh-fail-lock-count
 ```
 
-The tracker is mostly a defense against the script's reconnect loops
-hammering on a flapping network — verifying it in normal use is
-inherently awkward.
+**Pass:** the third invocation prints the lock message (`SSH has failed 3
+consecutive times`) with a TTL, and a fourth is refused without attempting
+SSH at all. Note the TTL doubles on each subsequent lock event, so if you
+run this test repeatedly the wait grows — delete both files rather than
+waiting it out.
+
+The tracker also defends against the script's own reconnect loops hammering
+a flapping network, which is the case that motivated it.
 
 ---
 
@@ -672,7 +724,7 @@ setup functions (`setup_<name>_cli_tool`).
 > canonical filename (`argo-anywhere.sh`); per-tool selection is
 > always via the `--cli-tool <name>` flag, the interactive picker,
 > or the `setup` subcommand (which forces the picker). See
-> [`docs/UPGRADING.md`](UPGRADING.md) "Update your shell aliases"
+> [`docs/UPGRADING_HISTORY.md`](UPGRADING_HISTORY.md#2-update-your-shell-aliases-optional-but-recommended)
 > for the recommended shell-alias pattern.
 
 ### Multi-tool test 1: explicit `--cli-tool` selection
@@ -681,7 +733,7 @@ setup functions (`setup_<name>_cli_tool`).
 bash argo-anywhere.sh --cli-tool opencode -h >/dev/null && echo "opencode OK"
 bash argo-anywhere.sh --cli-tool claudecode -h >/dev/null && echo "claudecode OK"
 bash argo-anywhere.sh --cli-tool bogus -h 2>&1 | head -3
-# Should die with: --cli-tool: unknown tool 'bogus'. Known tools: opencode, claudecode.
+# Should die with: --cli-tool: unknown tool 'bogus'. Known tools: opencode, claudecode, aider.
 ```
 
 **Pass:** the two valid tool names parse cleanly; an unknown tool name
@@ -690,12 +742,15 @@ dies with the registry list.
 ### Multi-tool test 2: interactive picker (no `--cli-tool`)
 
 ```sh
-printf '\n' | bash argo-anywhere.sh 2>&1 | head -10
+printf '\n' | bash argo-anywhere.sh 2>&1 | head -12
 # Expect:
-#   Supported AI clients:
-#     1) OpenCode ...
-#     2) Claude Code ...
-#   Pick a client [1-2, ...]:
+#   Supported AI CLI tools:
+#     1) OpenCode (sst/opencode-style)
+#     2) Claude Code (Anthropic CLI; uses ANTHROPIC_BASE_URL env)
+#     3) aider (OpenAI-compatible; ~/.aider.conf.yml + openai-api-base)
+#     (future phases will add more)
+#   [warn] non-interactive (stdin is not a TTY) and no default for prompt
+#   [warn]   'Pick a tool [1-3, or hit Enter to abort]:'; returning empty ...
 #   [err ] No CLI tool picked; aborting. Pass --cli-tool <name> or pick from the menu.
 ```
 
@@ -721,12 +776,15 @@ printf '\n' | bash argo-anywhere.sh --cli-tool opencode setup 2>&1 | head -8
 
 Pre-conditions: a successful tunnel up to a compute node.
 
-> **v2.0 change**: default scope is now PROJECT (was global on fresh
-> installs pre-v2.0). The H6 fix (audit Phase 2b Batch 4) closes a
-> silent-correctness regression where `claude auth login`'s OAuth
-> token would override our config in global scope.
+> **The default is HYBRID** (D-017), not project. With `~/.claude.json`
+> present it resolves to project — preserving a personal subscription;
+> with no OAuth state it resolves to **global**, because a fresh install
+> has nothing to protect and global is the convenient choice. The v2.0
+> H6 fix made project the default unconditionally; D-017 (v2.2) refined
+> it to the hybrid, so any guide claiming "default project" predates
+> that.
 
-Test the project-default branch (no `~/.claude.json`, no existing
+Test the **global**-default branch (no `~/.claude.json`, no existing
 global env block — the typical fresh-install case):
 
 ```sh
@@ -737,11 +795,10 @@ global env block — the typical fresh-install case):
 cd /tmp && mkdir -p test-claude-scope-default && cd test-claude-scope-default
 bash <path-to-script>/argo-anywhere.sh --cli-tool claudecode client
 # In the script's log lines, look for:
-#   [argo_anywhere] Claude Code scope: project (auto; default since v2.0).
-#   [argo_anywhere]   Config will land at .claude/settings.local.json and only apply when
-#   [argo_anywhere]   'claude' is run from this directory (/tmp/test-claude-scope-default).
-# Then verify the project file was written:
-cat ./.claude/settings.local.json
+#   [argo-anywhere] Claude Code scope: global (auto (fresh install; no OAuth state)).
+# Then verify the GLOBAL file was written (this is the hybrid default with
+# no ~/.claude.json present -- not a bug):
+cat ~/.claude/settings.json
 # Should contain (as of 2026-07-13; ANTHROPIC_API_KEY is Anthropic's
 # canonical env-var name — see docs/LIMITATIONS.md "Claude Code TUI is
 # misleading" for the story):
@@ -749,8 +806,8 @@ cat ./.claude/settings.local.json
 #     "ANTHROPIC_BASE_URL": "http://localhost:64742",
 #     "ANTHROPIC_API_KEY": "<your-anl-username>"
 #   }
-# And the global file was NOT written:
-[ ! -f ~/.claude/settings.json ] && echo "global untouched (correct)"
+# And no project file was written in this directory:
+[ ! -f ./.claude/settings.local.json ] && echo "project scope untouched (correct)"
 
 # Restore backups:
 [ -f ~/.claude/settings.json.testbak ] && mv ~/.claude/settings.json.testbak ~/.claude/settings.json
@@ -765,8 +822,8 @@ touch ~/.claude.json   # synthetic OAuth state
 cd /tmp/test-claude-scope-default
 bash <path-to-script>/argo-anywhere.sh --cli-tool claudecode client
 # Look for:
-#   [argo_anywhere] Claude Code scope: project (auto; ~/.claude.json detected
-#                                                — personal subscription preserved).
+#   [argo-anywhere] Claude Code scope: project (auto (~/.claude.json detected;
+#                                                preserving personal subscription)).
 rm ~/.claude.json   # cleanup
 ```
 
@@ -775,11 +832,12 @@ rm ~/.claude.json   # cleanup
 ```sh
 cd /tmp/test-claude-scope-default
 bash <path-to-script>/argo-anywhere.sh --cli-tool claudecode --scope global client
-# Look for:  [argo_anywhere] Claude Code scope: global (--scope global).
+# Look for:  [argo-anywhere] Claude Code scope: global (--scope global).
 bash <path-to-script>/argo-anywhere.sh --cli-tool claudecode --scope project client
-# Look for:  [argo_anywhere] Claude Code scope: project (--scope project).
+# Look for:  [argo-anywhere] Claude Code scope: project (--scope project).
 bash <path-to-script>/argo-anywhere.sh --cli-tool claudecode --scope bogus client 2>&1 | head -5
-# Should die with: --scope must be 'project' or 'global' (got 'bogus').
+# Should die with: --scope value 'bogus' is not valid for --cli-tool claudecode.
+#                  Accepted values: project global.
 ```
 
 ### Multi-tool test 6: Claude Code env-block merge preservation
@@ -829,9 +887,9 @@ didn't exist), look for the H7 privacy-warning callout:
 [warn] Privacy note: <path-to-claudecode-config> now contains your ANL username
 [warn]   ('<user>') in env.ANTHROPIC_API_KEY. Don't commit it to a
 [warn]   public dotfile repo or share it widely.
-[argo_anywhere]   (Project scope -- Claude Code's defaults gitignore
-[argo_anywhere]    .claude/settings.local.json automatically; verify your repo's
-[argo_anywhere]    .gitignore covers it.)
+[argo-anywhere]   (Project scope -- Claude Code's defaults gitignore
+[argo-anywhere]    .claude/settings.local.json automatically; verify your repo's
+[argo-anywhere]    .gitignore covers it.)
 ```
 
 The trailing `(Project scope ...)` lines are scope-specific; for
@@ -871,7 +929,7 @@ work are enumerated in [`notes/impl_launcher_cwd.md`](../notes/impl_launcher_cwd
 §7.4 (the design record for D-031). Run them once against a real ANL session
 before tagging v3.1.0.
 
-Highlights not covered by `pytest` (which is 240-tests-green as of the merge):
+Highlights not covered by `pytest` (run `pytest -q` for the current count rather than trusting a number here):
 
 - **Cold Duo through the Channel panel** — first `connect` from a fresh
   session must prompt Duo exactly once in the Channel panel; subsequent
@@ -881,3 +939,16 @@ Highlights not covered by `pytest` (which is 240-tests-green as of the merge):
 - **`--cwd` engine flag against real ANL** — `argo-anywhere --cwd /path/to/proj
   --scope project run --cli-tool opencode` must write `opencode.json` at the
   resolved project root, not in `$HOME` or wherever the shell was.
+
+---
+
+*Revised 2026-08-25 (review pass against v3.4.0). The guide had accumulated
+recipes that no longer ran: the port-extraction one-liner grepped for a string
+(`Configured port`) the status card has never emitted, so `$PORT` came back
+empty and four downstream steps silently became no-ops; every expected-output
+line used the pre-v3 `[argo_anywhere]` log prefix (25 occurrences); the
+Claude Code scope test asserted the opposite of what the hybrid default does
+in the condition its own setup creates; and the CSPO section told testers the
+failure counter resets between invocations, which is exactly the behaviour the
+on-disk lock exists to prevent. Also added a contents list and an explicit
+statement of what the guide does NOT cover (aider, D-032, D-034, D-035).*
