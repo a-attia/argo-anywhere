@@ -12,6 +12,116 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Documentation: the warning that `claude-opus-4-7` is broken is
+  withdrawn.** It was fixed upstream in 2026-06 (`llm-rosetta 0.6.10`
+  rewrites the thinking parameter per model), but `README.md` and
+  `docs/LIMITATIONS.md` kept telling users to avoid the model for
+  roughly two months afterwards, including through the v3.4.0 release.
+  Both now describe the current state. The historical diagnosis is
+  retained in `docs/LIMITATIONS.md` marked RESOLVED, since the failure
+  mode is instructive.
+
+### Added
+
+- **`docs/LIMITATIONS.md` gains an "Extended thinking" section** with a
+  measured per-model, per-API-path support matrix (2026-08-25, live
+  against argo-proxy 3.2.3 / llm-rosetta 0.7.1). The two facts worth
+  knowing: extended thinking is **unavailable in aider and OpenCode**
+  (they use the OpenAI-compatible path, where the reasoning parameter is
+  accepted but returns nothing, and `aider --reasoning-effort` is
+  silently dropped), and the **Claude 5 models accept only the
+  `adaptive` thinking shape** — Claude Code 2.1.241+ sends it
+  automatically, older releases may not. Claude Code needs no
+  configuration from argo-anywhere in either case.
+
+- **`notes/impl_thinking_support.md`** — the investigation behind the
+  above: six findings, the argument against writing per-model thinking
+  defaults into the tool configs, and what would falsify each finding.
+
+- **`scripts/probe_capabilities.py`** (maintainer script) — measures
+  per-model, per-API-path extended-thinking support against a live
+  channel and prints the matrix, so it can be regenerated instead of
+  hand-maintained. It paid for itself on first run: a hand-measured
+  sweep over seven models had concluded that `thinking.type: adaptive`
+  was universally safe, and the full ten-model sweep showed `adaptive`
+  fails silently on `claudeopus41`, `claudeopus45` and `claudesonnet45`.
+  There is no shape that works on every model, and the split does not
+  follow version order. Needs a live channel; spends a little gateway
+  quota; never runs as part of `connect`.
+
+  The script also replaces a set of upstream bug reports we decided not
+  to file: the Argo API's limitation backlog makes that a low-yield
+  channel, so the silent-failure gaps are documented as fixed properties
+  of the stack rather than tracked as pending fixes. If upstream does
+  address any of them, the next probe run shows it.
+
+### Documentation
+
+- **README review pass**, correcting claims that had drifted from the
+  code. The two that could mislead a user in practice: `--auto-port` was
+  documented as **on** by default (v3.3.0 made it so; v3.3.1 reverted it
+  and the README kept the v3.3.0 text), and the per-user derived default
+  port introduced in v3.3.1 was missing from the port-resolution order,
+  which still ended at "built-in default `64742`". Also: `aider` was
+  absent from the `update` registry and from the `clean` risky-file
+  tier in both cases where they were enumerated; the Claude Code section
+  named `ANTHROPIC_AUTH_TOKEN` as an owned key, which the engine stopped
+  writing on 2026-07-13 in favour of `ANTHROPIC_API_KEY`; and the
+  `~/.claude.json` scope rationale described an OAuth-shadowing mechanism
+  the engine's own text contradicts.
+
+- **`docs/UPGRADING.md` split.** It had grown to ~1000 lines, of which the
+  first ~120 were the part anyone still reads. It is now a ~170-line
+  router; the v1.x → v2.x → v3.0.0 per-release archive moved verbatim to
+  **`docs/UPGRADING_HISTORY.md`**.
+
+- **`docs/SECURITY.md` review pass**, correcting claims a
+  security-conscious reader could act on. It stated the Claude Code
+  default scope is project — it is **hybrid**, and on a fresh install
+  with no OAuth state it writes the **global** file containing your ANL
+  username. Its on-node log inventory pointed at the wrong file:
+  argo-proxy's stdout (the `verbose: true` prompt-body exposure, the
+  highest-sensitivity row in the document) goes to `~/argoproxy.out`,
+  not the bootstrap log — whose name was also a v2-era spelling. The
+  laptop-side inventory, advertised as complete, omitted
+  `~/.aider.conf.yml` (which carries the ANL username in cleartext), the
+  install manifest, the port cache, and the web UI's directory MRU — and
+  the claim that the web UI "keeps no data at rest" is withdrawn. The
+  username-resolution order omitted the two ssh-config sources that
+  outrank the cache and described an `id -un` fallback the client path
+  does not have. The threat-model table has been brought up to the v3.3+
+  shared-node defenses, including the `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY`
+  opt-out it did not mention.
+
+- **`docs/TESTING.md` review pass.** Several recipes did not run. The
+  port-extraction one-liner grepped for `Configured port`, a string the
+  status card has never emitted, so `$PORT` came back empty and four
+  downstream steps became silent no-ops; it now reads the port cache.
+  Every expected-output line carried the pre-v3 `[argo_anywhere]` log
+  prefix (25 occurrences). The Claude Code scope test asserted the
+  opposite of what the hybrid default does under the conditions its own
+  setup creates. The CSPO section told testers the SSH-failure counter
+  resets between invocations — the on-disk lock exists precisely to stop
+  that, so the test leaves you locked out and now says so. Also: a
+  contents list, and an explicit statement that the guide does not cover
+  aider, D-032, D-034, or D-035.
+
+- **`docs/UPGRADING.md` review pass.** The guide routed v3 upgraders but
+  stopped describing releases at v3.1.0, so it never mentioned v3.3.0 —
+  the release most people are running, and the one they most need to
+  leave. Its v3.0.x entry point is now a general v3.x one carrying the
+  v3.3.0 regression warning and the shared-node warning. It also told
+  v2.x upgraders to run `argo-anywhere prune`, a verb that was announced
+  but never shipped (`clean` after `connect` does that job); omitted the
+  per-user derived default port from the port-resolution list it
+  documents; described the port-coherence detector as not covering
+  aider, which it has since 2026-08-12; and carried a cross-reference
+  into README that no longer resolved.
+
 ## v3.4.0 — 2026-08-13
 
 **Upgrade immediately if you are on v3.3.0.** That release had three
