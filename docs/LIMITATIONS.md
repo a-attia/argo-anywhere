@@ -20,6 +20,10 @@ roadmap.
   moves nodes to a different domain, the function silently returns
   "no" until updated.
 - **`curl | bash` upstream installers used as-is** (audit L8).
+- **Extended thinking is unavailable in aider + OpenCode**, and on the
+  v5 Claude models only the `adaptive` request shape works. Claude Code
+  handles this itself; see
+  [Extended thinking](#extended-thinking-what-works-where).
 - **No `[m]erge` option for YAML configs in the k/b/d/m/a prompt**;
   only `[b]ackup+overwrite` or `[k]eep` are useful for the on-node
   `argoproxy/config.yaml`.
@@ -343,10 +347,101 @@ than in argo-anywhere. They surface through argo-anywhere because
 that's the layer the user invokes, but the root cause + the fix
 sit upstream.
 
-### Claude Code v2.1.x + `claude-opus-4-7` returns "API returned empty or malformed response (HTTP 200)"
+### Extended thinking: what works where
+
+**Last measured**: 2026-08-25, live against `compute-01.cels.anl.gov`
+(argo-proxy 3.2.3, llm-rosetta 0.7.1). Full method + evidence in
+[`notes/impl_thinking_support.md`](../notes/impl_thinking_support.md).
+
+Two facts govern everything below. The Argo gateway accepts **two
+different thinking vocabularies** depending on which API path you use,
+and it accepts them **per model**, not uniformly.
+
+On the native Anthropic path (`/v1/messages`), the parameter is
+`thinking.type`, and support splits by model generation:
+
+| Model | `thinking.type: enabled` | `thinking.type: adaptive` |
+|:---|:---|:---|
+| `claude-opus-4.1`, `claude-opus-4.5`, `claude-sonnet-4.5` | works | **fails silently** |
+| `claude-haiku-4.5`, `claude-sonnet-4.6`, `claude-opus-4.6`, `claude-opus-4.8` | works | works |
+| `claude-opus-4.7` | answers, but no thinking observed | answers, but no thinking observed |
+| **`claude-sonnet-5`, `claude-opus-5`** | **fails silently** | works |
+
+**There is no single shape that works everywhere.** The older models take
+only `enabled`; the v5 models take only `adaptive`; the middle generation
+takes either. Whichever shape a given model rejects, it rejects the same
+way: HTTP 200 with a zero-byte body when streaming, and a misleading
+parse error when not — see "The v5 failure signature" below.
+
+This is why picking a thinking mode is the client's job and not ours: the
+correct value is per-model, the split does not follow version order, and
+it changes as ANL adds models. Regenerate the table above with
+`python scripts/probe_capabilities.py` rather than trusting it.
+
+**Claude Code v2.1.241 handles this correctly on its own.** It ships a
+per-model table and sends `adaptive` for exactly the models that need
+it; `claude --model claude-opus-5` works today with no configuration
+from us. Older Claude Code releases predate the v5 models and may send
+`enabled` to them — if you see an empty response on a v5 model, upgrade
+Claude Code first.
+
+**On the OpenAI-compatible path (`/v1/chat/completions`), thinking is
+not currently reachable at all.** That path uses a different parameter
+(`reasoning.mode`, accepting only `auto` / `enabled` / `disabled` —
+`adaptive` is rejected outright), and every value returns an empty
+`reasoning_content`. This affects **aider and OpenCode**, which both use
+that path. Neither sends a thinking parameter by default, and
+`aider --reasoning-effort high` is silently dropped before it reaches
+the wire. No configuration on our side or yours changes this; the
+limitation is in the gateway/shim layer.
+
+**Why argo-anywhere writes no thinking configuration**: for Claude Code
+it would duplicate a table the client already gets right, at the risk of
+going stale faster than the client does; for aider and OpenCode it would
+write keys that provably do nothing. See the impl note for the full
+argument.
+
+**Regenerating this table**: `python scripts/probe_capabilities.py`
+(maintainer script; needs a live channel and spends a little gateway
+quota). It measures both API paths per model and flags any model whose
+thinking shape fails silently.
+
+**Treat these as permanent, not as bugs awaiting a fix.** The gap that
+causes the silent failures is in the upstream shim's per-model table,
+and the Argo API has a long backlog; we are not filing reports we do not
+expect to be actioned. If upstream does fix any of it, the probe script
+will show it on the next run.
+
+### The v5 failure signature (why it misleads)
+
+When a v5 model does get `thinking.type: enabled` — from an older client,
+or a direct API call — the failure does **not** announce itself the way
+the opus-4-7 era failure did.
+
+- **Streaming**: HTTP 200, zero bytes. No error event at all.
+- **Non-streaming**: HTTP 502 with
+  `Failed to parse upstream response: ... 'choices[0].message' does not
+  match any variant of ...`
+
+That message reads like a response-parsing defect in the proxy, not a
+rejected request parameter. It sends you looking at the wrong layer. If
+you see it, check the thinking shape before anything else.
+
+### RESOLVED (fixed upstream 2026-06): Claude Code + `claude-opus-4-7` returned "empty or malformed response (HTTP 200)"
+
+> **Status: fixed upstream; no user action needed.** Retained for
+> provenance, because the failure mode is instructive and the diagnosis
+> path is reusable. `llm-rosetta >= 0.6.10` sets
+> `thinking_type: adaptive` for `claudeopus47` (and `claudeopus48`) in
+> the `argo--anthropic` shim's `reasoning.model_overrides`, which is the
+> conversion the ANL gateway requires. Verified still present in
+> `llm-rosetta 0.9.0` (2026-08-21). **Opus 4.7 and 4.8 work; earlier
+> revisions of this document told users to avoid them, which was wrong
+> from roughly 2026-06 onward.** The same shim has **no rows for the v5
+> models** — see "Extended thinking" above for the live gap.
 
 **Surfaced** during the v2.2.0 release-gate live test
-(2026-05-18). The user runs `claude` against the proxy and gets:
+(2026-05-18). The user ran `claude` against the proxy and got:
 
 ```
 API Error: API returned an empty or malformed response (HTTP 200)
@@ -374,20 +469,20 @@ and tracing the request/response cycle:
    `message_stop`) and surfaces "API returned an empty or
    malformed response (HTTP 200)."
 
-**Verified workaround**: run Claude Code with any non-opus-4-7
-model. We tested:
+**Workaround at the time** (no longer needed — opus-4-7 works): run
+Claude Code with any non-opus-4-7 model. As tested on 2026-05-18:
 
 ```sh
-claude --model claude-sonnet-4-6      # works
-claude --model claude-haiku-4-5       # works
-claude --model claude-opus-4-1        # works
-claude --model claude-opus-4-7        # fails reliably
+claude --model claude-sonnet-4-6      # worked
+claude --model claude-haiku-4-5       # worked
+claude --model claude-opus-4-1        # worked
+claude --model claude-opus-4-7        # failed reliably (fixed 2026-06)
 ```
 
 Switching to opus-4-7 mid-session via `/model claude-opus-4-7`
-also reliably reproduces the failure.
+also reproduced the failure.
 
-**Persistent workaround**: add to the `env` block in
+**Persistent workaround at the time**: add to the `env` block in
 `~/.claude/settings.json` (or the project-scope equivalent at
 `./.claude/settings.local.json`):
 
@@ -426,20 +521,23 @@ model selection for every session.
   silent correctness regression (the user asked for thinking;
   giving them a response without it is wrong).
 
-**Auto-default fix queued for v2.3**: pre-populate
-`env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `write_claudecode_config`
-(with a one-line comment marker the user can delete to opt back
-into Claude Code's default). This eliminates the foot-gun for
-every user without requiring them to know about the underlying
-bug. See [`PLAN.md`](../PLAN.md) Section 4 (Milestones) v2.3 row.
+**Auto-default fix formerly queued for v2.3** — pre-populating
+`env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `write_claudecode_config` —
+is **obsolete and will not ship as specified**. It would now pin users
+to a model two generations old to dodge a bug that no longer exists. The
+live successor question (whether to write a *floor* for older Claude
+Code releases against the v5 models) is Option 2 in
+[`notes/impl_thinking_support.md`](../notes/impl_thinking_support.md),
+and is not currently recommended.
 
-**Tracking**: candidate upstream issue at `Oaklight/argo-proxy`
-issue #120 ("Opus 4.7 not working with claude-code"); the root
-cause is upstream of argo-proxy too (Anthropic Vertex model
-validation + Claude Code SSE parsing), so an argo-proxy fix would
-have to be a translation-layer workaround (rewrite
-`thinking.type.enabled` → `thinking.type.adaptive` for opus-4-7
-on the fly).
+**Resolution**: fixed upstream in the translation layer, exactly as
+anticipated below. `llm-rosetta` rewrites
+`thinking.type.enabled` → `adaptive` per model via
+`reasoning.model_overrides`; the `claudeopus47` row landed in v0.6.10
+(2026-06-19) and `claudeopus48` alongside it. Original tracking:
+`Oaklight/argo-proxy` issue #120 ("Opus 4.7 not working with
+claude-code"). The root cause sat upstream of argo-proxy too (Anthropic
+Vertex model validation + Claude Code SSE parsing).
 
 ### Claude Code TUI is misleading: shows subscription-tier text even when routing goes through argo
 
@@ -594,7 +692,9 @@ blocks trigger an API rejection that silently breaks the session.
 
 **Status in argo-anywhere**: **not independently confirmed**. We
 haven't surfaced this pattern in any of our own live tests through
-v2.2.0. If you encounter it, please file an issue at
+v2.2.0, nor in the 2026-08-25 thinking sweep (which was
+single-turn throughout, so it would not have exercised the cached-turn
+replay this describes). If you encounter it, please file an issue at
 <https://github.com/a-attia/argo-anywhere/issues> with the
 session transcript + the argo-proxy verbose log entries; we'll
 escalate to `Oaklight/argo-proxy` with the supporting evidence.
@@ -640,4 +740,9 @@ silent-failure surfaced during the v2.2.0 release-gate live test,
 (b) the already-mitigated Vertex 500 on large non-streaming
 requests (handled by argo-proxy's `anthropic_stream_mode: force`
 default), and (c) the open-but-unconfirmed empty-thinking-blocks
-pattern from the argo-shim comparative audit.*
+pattern from the argo-shim comparative audit. Revised 2026-08-25:
+replaced the opus-4-7 limitation with a measured "Extended thinking"
+support matrix (the opus-4-7 breakage was fixed upstream in 2026-06;
+the section is retained below it, marked RESOLVED, for provenance) and
+recorded the v5 `adaptive`-only gap plus the aider / OpenCode ceiling —
+see [`notes/impl_thinking_support.md`](../notes/impl_thinking_support.md).*

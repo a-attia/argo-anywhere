@@ -79,15 +79,18 @@ CLI-only path.
 
 Two things worth knowing in the first thirty seconds:
 
-1. **Claude Code with `claude-opus-4-7` is currently broken** through the ANL
-   Argo gateway: every request fails with `API returned an empty or malformed
-   response (HTTP 200)`. The bug is upstream — Anthropic's Vertex deployment
-   rejects `thinking.type.enabled` for opus-4-7, and Claude Code 2.1.x
-   mis-parses the resulting SSE error event — not in argo-anywhere or
-   argo-proxy. **Workaround**: run `claude --model claude-sonnet-4-6` (or any
-   non-opus-4-7 model), or set `ANTHROPIC_MODEL=claude-sonnet-4-6` in the `env`
-   block of your `~/.claude/settings.json`. Full diagnosis in
-   [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Upstream stack".
+1. **Extended thinking works in Claude Code, but not in aider or OpenCode.**
+   Claude Code needs nothing from you — it picks the right thinking mode per
+   model on its own, including for the newest Claude 5 models. aider and
+   OpenCode reach the gateway over a different API path where thinking is
+   currently unavailable, and `aider --reasoning-effort` is silently ignored
+   there. If you are on an older Claude Code and a model returns an empty
+   response, upgrade Claude Code — the correct thinking mode differs per
+   model and newer clients get it right. Details + the measured per-model
+   matrix in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)
+   "Extended thinking". *(Measured 2026-08-25; earlier releases of this
+   README warned that `claude-opus-4-7` was broken — that was fixed upstream
+   in 2026-06 and the warning is withdrawn.)*
 
 2. **Install with `pipx` / `pip`.** As of v3.0.0, argo-anywhere is a Python
    package; `pipx install argo-anywhere` is the supported install path. The
@@ -146,8 +149,9 @@ healthy, models available, with connection / models / paths sections.](https://r
 
 *(Scrubbed demo data — no real username or node.)*
 
-If you configured Claude Code, remember the opus-4-7 workaround from
-[Heads up](#heads-up-before-you-start): `claude --model claude-sonnet-4-6`.
+If you configured Claude Code, extended thinking works out of the box on
+every current model — no flag needed. See [Heads up](#heads-up-before-you-start)
+if you are on an older Claude Code and hit an empty response.
 
 Prefer the **split workflow**? The SSH channel is a *shared* local endpoint
 that any number of tools can hit at once, so you can hold it in one window and
@@ -217,7 +221,7 @@ and ships the web UI and native app alongside the CLI. Releases are published
 from CI via PyPI Trusted Publishing on their version tag.
 
 Per-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the design decision
-behind each change (D-001..D-034) lives in [`PLAN.md`](PLAN.md). This section
+behind each change (D-001..D-035) lives in [`PLAN.md`](PLAN.md). This section
 names the current release and points at those two documents rather than
 restating them — it drifted four releases behind by trying to be a changelog
 before one existed.
@@ -384,7 +388,8 @@ Pass one to `--cli-tool` (or pick it interactively):
   **hybrid** per [PLAN.md D-017](PLAN.md) (project when `~/.claude.json` is
   present, for OAuth safety; global otherwise). See
   [Claude Code config scope](#claude-code-config-scope-project-vs-global).
-  ⚠️ Subject to the opus-4-7 issue in [Heads up](#heads-up-before-you-start).
+  The only tool of the three where extended thinking is reachable today
+  (see [Heads up](#heads-up-before-you-start)).
 - **`aider`** — [aider](https://aider.chat/) via its OpenAI-compatible endpoint.
   Writes `~/.aider.conf.yml` plus a sibling `.aider.model.settings.yml` that
   disables `temperature` for reasoning / opus / gpt-5 models (which otherwise
@@ -421,12 +426,20 @@ is the canonical reference with full rationale and roadmap for each.
 
 ### Upstream stack
 
-- **Claude Code + `claude-opus-4-7`** ⚠️ — fails with "API returned an empty or
-  malformed response (HTTP 200)". Root cause is Anthropic Vertex's per-model
-  `thinking.type` validation plus Claude Code 2.1.x's SSE error-event parsing;
-  not actionable at our layer. **Workaround**: `claude --model
-  claude-sonnet-4-6`, or persist via `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in
-  `settings.json`. Auto-default fix queued for a later release.
+- **Extended thinking is unavailable in aider and OpenCode** — both reach the
+  gateway over the OpenAI-compatible path, where the reasoning parameter is
+  accepted but returns nothing. `aider --reasoning-effort` is silently dropped.
+  Not actionable at our layer; no configuration changes it. Claude Code uses a
+  different path and is unaffected.
+- **The right thinking shape is per-model, and no shape works everywhere** —
+  the Claude 5 models accept only `adaptive`; Opus 4.1/4.5 and Sonnet 4.5
+  accept only `enabled`; the generation between takes either. Sending the
+  wrong one gets you HTTP 200 with an empty body — no error. Claude Code
+  2.1.241+ picks correctly on its own, so this only bites older clients and
+  direct API callers. Measured table in
+  [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md); regenerate it with
+  `python scripts/probe_capabilities.py`. *(The former warning about
+  `claude-opus-4-7` here is withdrawn — fixed upstream 2026-06.)*
 - **Vertex HTTP 500 on large non-streaming requests** — already mitigated
   upstream by `argo-proxy` v3.x's `anthropic_stream_mode: force` default. Just
   keep the on-node proxy current: `argo-anywhere update argoproxy`. No action
@@ -476,7 +489,7 @@ and prompts). The package-only verbs (`app`, `web`, `install-launcher`, `info`,
 | `run TOOL` | Configure **one** tool, then launch it (e.g. `run aider`). Brings the channel up if missing (prompts; `--ensure` / `-y` auto-confirm). |
 | `server` | Auto-invoked on the compute node by `client`. Also a standalone workflow ("leave a proxy on this node for any client to reach"). |
 | `status` | Show local tunnel state + probe the proxy (ALL GREEN / DEGRADED / FAIL). Reports cross-client port disagreements (D-021) as warnings without changing the exit code. |
-| `update` | Lossless in-place upgrade of installed components (`argoproxy`, `opencode`, `claudecode`). `--all` updates everything; a positional list restricts it; bare `update` lists the registry. `--check` is report-only; `--yes` auto-confirms install prompts. After `update argoproxy` it auto-POSTs `/refresh` so the proxy pulls fresh models without a restart. *(The package itself is upgraded with `pipx upgrade argo-anywhere`, not this verb — see the note below.)* |
+| `update` | Lossless in-place upgrade of installed components (`argoproxy`, `opencode`, `claudecode`, `aider`). `--all` updates everything; a positional list restricts it; bare `update` lists the registry. `--check` is report-only; `--yes` auto-confirms install prompts. After `update argoproxy` it auto-POSTs `/refresh` so the proxy pulls fresh models without a restart. *(The package itself is upgraded with `pipx upgrade argo-anywhere`, not this verb — see the note below.)* |
 | `update-models` | Refresh a client's in-config model list from the live `/v1/models`. Tool-aware via `--cli-tool` (default `opencode`); only OpenCode enumerates models in config, so the others print a "not applicable" note and point at `list-models`. |
 | `list-models` | Tabulate the models the proxy serves on `/v1/models` (read-only). Columns: `internal_name`, `id`, `provider`, `modalities`, `configured`. `--format tsv|json` and `--output FILE` for scripting. |
 | `stop` | Kill the local SSH tunnel. Does NOT touch the remote argo-proxy (see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) "Single-instance constraint"). |
@@ -488,7 +501,7 @@ and prompts). The package-only verbs (`app`, `web`, `install-launcher`, `info`,
 > itself through `pipx upgrade argo-anywhere` (or `pip`); the engine's own
 > `update argo-anywhere` self-update is dormant and simply points you at pipx
 > (design decision D-030a). The other components (`argoproxy`, `opencode`,
-> `claudecode`) are upgraded by the `update` verb as usual.
+> `claudecode`, `aider`) are upgraded by the `update` verb as usual.
 
 The engine also has `install` / `uninstall` verbs for the canonical `.sh`
 install, but under the package those are handled differently — see
@@ -686,11 +699,16 @@ The single-instance constraint is documented in
 
 To handle this gracefully, the engine:
 
+- **Gives each user a different default port.** The port is derived from your
+  username within a 500-wide range above `64742`, so two people on the same
+  node rarely start from the same number. Every install used to ship the
+  literal `64742`, which made collisions the expected case rather than the
+  exception.
 - **Detects port collisions before bootstrap.** Before SSHing in to start
   argo-proxy, it probes `127.0.0.1:<port>` on the node and identifies the owner.
   If it's you, it reuses the proxy *after positively verifying identity*
   (`cfg_user` must equal `want_user`); if it's someone else, argo-anywhere
-  **moves to the first free port automatically** and tells you it did:
+  offers to move you to a free port:
 
   ```text
   [warn] Port 64742 on compute-01 is held by another user's process
@@ -699,7 +717,8 @@ To handle this gracefully, the engine:
   [ ok ] Moved to free port 64743 (was 64742, held by another user).
   ```
 
-  With `--no-auto-port` you get the interactive prompt instead:
+  With `--auto-port` you get that automatic move; by default you get the
+  interactive prompt instead:
 
   ```text
   [warn] Port 64742 on compute-01 is in use by another user
@@ -714,11 +733,12 @@ To handle this gracefully, the engine:
     Your choice [n/p/r/a, default=n]:
   ```
 
-- **`--no-auto-port`** (or `ARGO_ANYWHERE_AUTO_PORT=0`) restores the prompt
-  above. Auto-pick is the default as of v3.3.0 — it was opt-in while the probe
-  could not see other users' ports, which is exactly when it was least
-  trustworthy. Note the prompt needs a terminal, so `--no-auto-port` does
-  nothing useful under `-y` or from the web UI.
+- **`--auto-port`** (or `ARGO_ANYWHERE_AUTO_PORT=1`) skips the prompt and moves
+  to the first free port automatically. It is **off by default**: a port is
+  transport state that the cache, your tool configs, and the web UI all have to
+  agree on, so migrating it unattended is not yet safe. v3.3.0 briefly made it
+  the default and v3.3.1 reverted that. Note the prompt needs a terminal, so
+  `--auto-port` is the useful choice under `-y` or from the web UI.
 - **Free ports are decided by binding them**, not by `lsof` — an unprivileged
   `lsof` cannot see another user's socket, so on a shared node it reports held
   ports as free. Either way the port-cache-migration prompt then lets you make
@@ -779,9 +799,10 @@ default is **hybrid** (design decision D-017), chosen in this order:
    `[k]eep / [s]witch / [a]bort` if the chosen scope would shadow an existing
    config or OAuth state.
 2. **`~/.claude.json` exists** — Claude Code's auth-state file, meaning you have
-   a personal Anthropic subscription. Writing `ANTHROPIC_AUTH_TOKEN` to the
-   global file would shadow your OAuth token and break non-proxy usage →
-   **project scope automatically** (safety wins).
+   a personal Anthropic subscription. Our `env.ANTHROPIC_API_KEY` overrides that
+   OAuth session's routing at either scope, so project scope keeps our config
+   out of your global tree and leaves other directories on your personal
+   subscription → **project scope automatically** (safety wins).
 3. **`~/.claude/settings.json` already has an `env` block** — clobbering it would
    silently drop those vars → **project scope automatically**.
 4. **None of the above** → **global scope** (convenient for fresh installs; no
@@ -809,7 +830,9 @@ neutralize the proxy config. The conflict-detection prompt warns you about this.
 
 argo-anywhere always preserves non-Argo keys in the target `env` block (and the
 file's other top-level keys: `model`, `permissions`, `hooks`, …). It owns only
-`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. After writing, it prints a
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` (pre-2026-07-13 versions wrote
+`ANTHROPIC_AUTH_TOKEN`; configs carrying the old name converge on the canonical
+one automatically). After writing, it prints a
 privacy reminder that the config now contains your ANL username (used as the
 bearer token) and should be gitignored if `~/.claude/` is in a dotfiles repo.
 See [`docs/SECURITY.md`](docs/SECURITY.md) for the full privacy posture.
@@ -829,7 +852,10 @@ Resolution precedence:
 2. `ARGO_ANYWHERE_PORT` env var (one-shot override)
 3. `~/.config/argo_anywhere/port` cache (the source of truth)
 4. First-run migration from an existing client config's baseURL
-5. Built-in default `64742`
+5. A **per-user derived default** — a stable port picked from your username
+   within a 500-wide range above `64742`, so co-tenants on a shared node do
+   not all start on the same number
+6. `64742` itself, only when the username is unknown
 
 The cache is **write-through**: resolving a port via anything other than the
 cache writes the new value back, so subsequent runs use it.
@@ -944,7 +970,7 @@ argo-anywhere update-models --keep-orphans   # add new; keep stale entries
 argo-anywhere update-models --drop-orphans   # add new; drop stale entries
 
 # Upgrade installed components in place (lossless; preserves configs + venv)
-argo-anywhere update --all                   # argoproxy + opencode + claudecode
+argo-anywhere update --all                   # argoproxy + opencode + claudecode + aider
 argo-anywhere update argoproxy               # just the on-node proxy (+ auto /refresh)
 argo-anywhere update --check --all           # report-only: installed vs latest
 # (the package itself: pipx upgrade argo-anywhere)
@@ -964,10 +990,12 @@ argo-anywhere clean -y --purge               # delete EVERYTHING, including conf
 
 - **safe** (state dir incl. port cache, mux sockets, our SSH tunnel, the remote
   venv) — removed on confirmation.
-- **risky** (`~/.config/opencode/config.json`, `~/.config/argoproxy/config.yaml`,
+- **risky** (`~/.config/opencode/config.json`, `~/.aider.conf.yml`,
+  `~/.aider.model.settings.yml`, the on-node `~/.config/argoproxy/config.yaml`,
   and their `.bak.*` files) — per-file `[k]eep / [r]estore-from-backup /
   [d]elete / [b]ackups-only` prompt, or `--purge` / `--purge-backups` for the
-  non-interactive paths.
+  non-interactive paths. Project-scoped configs inside your own repos are not
+  swept.
 - **never touched** — tool binaries, the engine itself, system tools.
 
 To remove **argo-anywhere the package** (as opposed to a channel's artifacts),
@@ -981,13 +1009,14 @@ run `argo-anywhere help`.
 
 | Doc | When to read |
 |:----|:-------------|
-| [`docs/UPGRADING.md`](docs/UPGRADING.md) | Upgrading from a v1.x/v2.x `.sh` install, or between releases; covers v1 → v2 → the v2 → v3 hard cutover. |
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | Upgrading, whatever you're on now: a short routed path per starting point. |
+| [`docs/UPGRADING_HISTORY.md`](docs/UPGRADING_HISTORY.md) | The archived v1 → v2 → v3.0.0 per-release detail. Only if you're resurrecting an old install. |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model + privacy posture (incl. the local web UI); for security-conscious users and ANL admins. |
-| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Known limitations + rationale before you adopt; includes the "Upstream stack" section (opus-4-7 etc.). |
+| [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Known limitations + rationale before you adopt; includes the "Upstream stack" section (extended-thinking support per model + per tool, etc.). |
 | [`docs/TESTING.md`](docs/TESTING.md) | Maintainers/contributors: live-verify the `client` path before tagging. |
 | [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | The fix trail across v2.0 → v2.2 (43 findings; 42 closed). |
 | [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Comparative audit vs. `argo-shim`, the Phase-C-rejection rationale, slide-ready summary. |
-| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-034 + roadmap. |
+| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-035 + roadmap. |
 | [`AGENTS.md`](AGENTS.md) | AI coding tools working on this codebase: conventions + skill loading. |
 
 ## Upgrading
@@ -1001,7 +1030,7 @@ now `pipx install argo-anywhere`, and the single-`.sh` `curl` route is retired a
 primary (the raw engine is still reachable via `argo-anywhere --print-script`).
 The v2 → v3 hard-cutover steps — uninstall the old `.sh` install, then
 `pipx install` — are in
-[`docs/UPGRADING.md`](docs/UPGRADING.md#v2x--v300-the-python-package-rebuild).
+[`docs/UPGRADING_HISTORY.md`](docs/UPGRADING_HISTORY.md#v2x--v300-the-python-package-rebuild).
 
 Cumulative behavior changes through v2.2 are documented in
 [`docs/UPGRADING.md`](docs/UPGRADING.md): env-var renames (`ARGO_OPENCODE_*` →
@@ -1072,7 +1101,7 @@ Key project files:
 - [`AGENTS.md`](AGENTS.md) — canonical project conventions for AI coding tools.
   [`CLAUDE.md`](CLAUDE.md) is a symlink to it for Claude Code's discovery.
 - [`PLAN.md`](PLAN.md) — plan-of-record (scope, architecture, milestones,
-  design decisions D-001..D-034).
+  design decisions D-001..D-035).
 - [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) — active fresh-eyes
   audit (43 findings; 42 closed). New closures append a STATUS block in place.
 - [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)

@@ -252,16 +252,48 @@ loading set for normal sessions.
   `notes/impl_codex_aider.md`). Phase C local-shim mode REJECTED (would
   break D-001 single-file UX and address problems already handled
   upstream by argo-proxy's `anthropic_stream_mode: force` default).
-- **Known upstream-stack limitation surfaced during v2.2.0
-  release-gate live test**: Claude Code 2.1.x + ANL Argo gateway
-  rejects `thinking.type.enabled` on `claude-opus-4-7` (requires
-  `thinking.type.adaptive`); argo-proxy surfaces the error as a
-  SSE `event: error` with HTTP 200 (correct per SSE spec); Claude
-  Code mis-parses and reports "API returned empty or malformed
-  response (HTTP 200)". Workaround: `claude --model claude-sonnet-4-6`
-  or set `env.ANTHROPIC_MODEL=claude-sonnet-4-6` in `~/.claude/settings.json`.
-  Auto-default fix queued for v2.3 (pre-populate `env.ANTHROPIC_MODEL`
-  in `write_claudecode_config`).
+- **Extended-thinking support (measured live 2026-08-25; full record
+  in [`notes/impl_thinking_support.md`](notes/impl_thinking_support.md))**.
+  Four load-bearing facts:
+  - **We write ZERO thinking configuration.**
+    `grep -cEi 'thinking|reasoning_effort|budget_tokens'` on the engine
+    is `0`. All three writers emit transport + the
+    `use_temperature: false` workaround, nothing else. This is a
+    deliberate position, not an oversight — see the impl note §4.
+  - **Two vocabularies, not one.** `/v1/messages` takes
+    `thinking.type ∈ {enabled, adaptive}`; `/v1/chat/completions` takes
+    `reasoning.mode ∈ {auto, enabled, disabled}` and **rejects
+    `adaptive`**. Do not assume a parameter that works on one path
+    exists on the other.
+  - **No thinking shape works on every model, and the split does not
+    follow version order.** `enabled` fails on `claudeopus5` +
+    `claudesonnet5`; `adaptive` fails on `claudeopus41`, `claudeopus45`
+    + `claudesonnet45`; the middle generation takes either. Whichever
+    shape a model rejects, it rejects as HTTP 200 with zero bytes
+    streaming (misleading `Failed to parse upstream response` 502
+    otherwise) — never a clean error. Cause: the shim's
+    `reasoning.model_overrides` covers four models and is three
+    generations behind, unchanged as of `llm-rosetta 0.9.0`.
+    **Do not hand-write this matrix** — an earlier partial sweep
+    concluded "`adaptive` is universally safe" and was wrong.
+    Regenerate with `python scripts/probe_capabilities.py`.
+    **Maintainer decision 2026-08-25: we are not filing these upstream**
+    (Argo API backlog; low expected yield). Treat the v5 shim gap and
+    the OpenAI-path ceiling as fixed properties of the stack when
+    planning; the probe detects a fix if one ever lands. Do not open
+    this as a question again — see the impl note §10.
+  - **Thinking is unreachable via `/v1/chat/completions`** — every
+    `reasoning.mode` value returns empty `reasoning_content`. So **aider
+    and OpenCode cannot get thinking at all**, and no config we write
+    changes that. Claude Code (native path) ships its own correct
+    per-model table and works unaided, including on v5.
+
+  **Do not "fix" this by writing per-model thinking defaults into the
+  tool configs.** For aider/OpenCode that writes keys that provably do
+  nothing; for Claude Code our table would go stale faster than the
+  client's. The historical opus-4-7 breakage was fixed upstream in
+  2026-06; the `env.ANTHROPIC_MODEL` auto-default once queued for v2.3
+  is obsolete and will not ship as specified.
 - **Plan-of-record**: [`PLAN.md`](PLAN.md) (read after AGENTS.md)
 - **Public API surface**: CLI subcommands (`client`, `setup`, `tunnel`,
   `connect`, `configure`, `run`, `server`, `status`, `stop`, `update`,
@@ -292,7 +324,8 @@ Section 6.4):
 | [`README.md`](README.md) | New + returning humans | Project overview; quick start |
 | [`CHANGELOG.md`](CHANGELOG.md) | Users upgrading; maintainer | **Single source of truth for "what shipped when"** (per-release, since v3.1.0). Re-ground the status claims in `README.md` / `PLAN.md` / this file at tag time; put the narrative here. |
 | [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-034 |
-| [`docs/UPGRADING.md`](docs/UPGRADING.md) | v1.x users upgrading | What changes for them across v2.0 / v2.1 / v2.2 |
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | Anyone upgrading | Routed install/migrate paths per starting point (~170 lines). Current-state only; per-release detail lives in `CHANGELOG.md`. |
+| [`docs/UPGRADING_HISTORY.md`](docs/UPGRADING_HISTORY.md) | Maintainers; users on very old installs | Archived v1.x → v2.x → v3.0.0 per-release behaviour changes, split out of `UPGRADING.md` 2026-08-25. **Version-pinned — do not cite as current state.** |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |
 | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Prospective users + contributors | Known limitations + rationale (includes "Upstream stack" section for argo-proxy / Claude Code limitations as of v2.2.0) |
 | [`docs/TESTING.md`](docs/TESTING.md) | Maintainers + contributors | Live-verification guide (real SSH + Duo + node) |
@@ -307,6 +340,7 @@ Section 6.4):
 | [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
 | [`notes/impl_codex_aider.md`](notes/impl_codex_aider.md) | Maintainer | Design + implementation record for aider (Phase 5a; LIVE-TEST PASSED 2026-07-09) + codex (Phase 5b; gated). Config-format facts, per-tool contract application, live-test findings. |
 | [`notes/impl_lifecycle_commands.md`](notes/impl_lifecycle_commands.md) | Maintainer | Design + implementation record for D-024 (connect/configure/run) + D-025 (install/uninstall + install manifest). Three-level model, locked decisions, live-test amendments. LIVE-TEST PASSED 2026-07-09. |
+| [`notes/impl_thinking_support.md`](notes/impl_thinking_support.md) | Maintainer | **Read before touching thinking / reasoning parameters in any config writer.** Measured per-model + per-API-path support matrix (2026-08-25, live). Records why we write no thinking config, why per-model defaults are the wrong fix for aider/OpenCode, and the v5 `adaptive`-only gap in the upstream shim. |
 | [`notes/impl_python_webui.md`](notes/impl_python_webui.md) | Maintainer | **Single source of truth** for the Model-A Python-package + web-UI rebuild (merged to `main` 2026-07-12; D-026..D-030). Plan/phasing (P0–P5), P1+cold-Duo PASS, P0–P4 code-complete layout, two-lane driver contract, residuals. Consolidates the former `spike/HANDOFF.md` + `spike/RESULTS.md` (now stubs). |
 | [`notes/test_plan_phase*.md`](notes/), [`notes/test_plan_lifecycle.md`](notes/test_plan_lifecycle.md) | Maintainer | Per-phase live-test plans (historical artifact once phase complete). `test_plan_lifecycle.md` covers aider + the lifecycle commands (PASSED 2026-07-09). |
 
