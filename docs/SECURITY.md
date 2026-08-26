@@ -6,7 +6,7 @@ posture of the data flowing through it. It is for security-conscious
 users + ANL admins who want to understand the behavior before
 recommending it (or installing it on shared infrastructure).
 
-As of v3.0.0 argo-anywhere is a Python package that owns the runtime
+Since v3.0.0 argo-anywhere is a Python package that owns the runtime
 and drives the bash **engine** (vendored verbatim). The engine's
 security model — SSH tunnel, identity attribution, CSPO defenses,
 on-disk logging — is unchanged and is the bulk of this document. The
@@ -27,11 +27,18 @@ below.
   is not retained by the Argo gateway. The model vendors (Azure
   OpenAI / Anthropic Enterprise / Google) see prompts under their
   contractual terms with ANL.
-- **Two recent privacy/correctness fixes** users should know about:
-  - `verbose: false` is now the default in the on-node argo-proxy
-    config (closes a prompt-on-disk leak; v2.0 P2 fix).
-  - Claude Code default scope is now project (closes a silent
-    OAuth-token override; v2.0 H6 fix).
+- **Privacy/correctness defaults** users should know about:
+  - `verbose: false` is the default in the on-node argo-proxy config
+    (closes a prompt-on-disk leak; v2.0 P2 fix). With `verbose: true`
+    prompt bodies land in `~/argoproxy.out` on the node.
+  - Claude Code default scope is **hybrid**: project when
+    `~/.claude.json` exists (preserving a personal subscription),
+    global otherwise. A fresh install with no OAuth state writes the
+    **global** `~/.claude/settings.json` — which contains your ANL
+    username. Force either with `--scope`.
+  - On a shared node, argo-anywhere refuses to route through an
+    argo-proxy it cannot attribute to you (v3.3+). Opt out only if you
+    know why: `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1`.
 - **CSPO defenses**: persistent on-disk SSH-failure lock with TTL +
   exponential backoff prevents accidentally racking up failed SSH
   attempts that could trigger ANL's IP-block defense.
@@ -53,16 +60,16 @@ The script's adversary model is light:
 | Network adversary observing your SSH traffic | Yes (implicitly) | SSH itself; the script doesn't add anything below the SSH layer. |
 | Network adversary observing the local tunnel (between your AI client and the SSH tunnel) | Yes | Tunnel binds to `127.0.0.1` only; not exposed on routable interfaces. |
 | Remote adversary reaching the local web UI | Yes | Web server binds `127.0.0.1` only + a DNS-rebinding guard (Host header must name loopback, else 403/1008). Not reachable off-host. See [Local web UI](#local-web-ui-argo-anywhere-web--app). |
-| Local process / browser page POSTing to the local web UI | Partial | The web UI is unauthenticated (no token / same-origin check), so any local process (or a web page in your browser, CSRF-style) that reaches `127.0.0.1:<port>` can trigger engine verbs incl. a Duo push. Mitigated by: argv allowlist (no shell passthrough), loopback bind, and the fact such a peer already shares your shell trust boundary. A loopback token / Origin check is queued as post-3.0 hardening. |
+| Local process / browser page POSTing to the local web UI | Partial | The web UI is unauthenticated (no token / same-origin check), so any local process (or a web page in your browser, CSRF-style) that reaches `127.0.0.1:<port>` can trigger engine verbs incl. a Duo push. Mitigated by: argv allowlist (no shell passthrough), loopback bind, and the fact such a peer already shares your shell trust boundary. A loopback token / Origin check remains queued and is **not yet implemented as of v3.4.0**. |
 | Other users on your laptop | Partial | argo-proxy config files have OS-default permissions (typically 0644 for JSON, 0644 for YAML); your username (used as the Argo bearer token) is therefore readable by other local users. |
-| Other users on the compute node | Yes | Strict identity check on argo-proxy reuse (v2.0 H5 fix); script refuses to attach to a running argo-proxy unless `cfg_user == want_user` is positively verified. |
+| Other users on the compute node | Yes | Three layers: strict identity check on argo-proxy reuse (`cfg_user == want_user` must be positively verified; v2.0 H5); a post-launch check that the process answering `/health` is owned by your OS account (v3.3, `_listener_is_ours`); and a per-user derived default port so co-tenants rarely collide in the first place (v3.3.1). The post-launch gate can be disabled with `ARGO_ANYWHERE_ALLOW_FOREIGN_PROXY=1` — doing so restores the pre-v3.3 failure mode where a stranger's proxy satisfies the health check. |
 | Accidental CSPO IP-block via SSH-failure burst | Yes | Persistent on-disk failure lock with TTL + exponential backoff (v2.0 C4/C5/C7 fixes); see [CSPO defenses](#cspo-defenses). |
 | Adversary controlling the AI model vendor | No | Out of scope; ANL's contracts with the vendors are the relevant trust boundary. |
 | Adversary controlling the ANL Argo gateway | No | Out of scope; you trust ANL or you don't run this. |
 | Adversary on the compute node trying to read your prompts | Yes (for the on-disk-log path) | `verbose: false` is the default (v2.0 P2 fix); without verbose mode, argo-proxy doesn't write prompt bodies to disk. |
 | Malicious upstream `curl \| bash` installer (opencode.ai, claude.ai) | No | Out of scope; the script trusts the upstream installers. Audit finding L8. |
-| Compromised SSH multiplex socket | Partial | Sockets live in `~/.ssh/sockets/` with default permissions. ssh enforces socket file ownership before connecting. |
-| Lost laptop with cached state | Partial | The local state directory contains your username, last-used node, and SSH-failure counters. None are secrets per se but disclose your usage pattern. |
+| Compromised SSH multiplex socket | Partial | Sockets live in `~/.ssh/sockets/`, which the engine creates `chmod 700`. ssh additionally enforces socket file ownership before connecting. |
+| Lost laptop with cached state | Partial | The local state directory holds your username, last-used node, cached port, SSH-failure counters, and an install manifest recording the absolute path of every client config touched. The web UI additionally keeps a most-recently-used list of project directories. None are secrets per se, but together they disclose your usage pattern and directory history. |
 
 The script is designed for the threat model of **a trusted user on a
 trusted laptop, talking to a trusted (but multi-tenant) ANL
@@ -79,27 +86,34 @@ A complete inventory of where prompt and identity data may persist:
 |:---------|:---------|:------------|
 | `~/.config/argo_anywhere/user` | ANL username | low (PII; not a secret) |
 | `~/.config/argo_anywhere/node` | Last-used compute node hostname | low (operational metadata) |
+| `~/.config/argo_anywhere/port` | Cached proxy port (transport state, D-020) | none |
+| `~/.config/argo_anywhere/manifest.json` | Install manifest: the absolute path of every client config argo-anywhere created or modified, and which tool binaries it installed | low (discloses which projects you ran argo in) |
 | `~/.config/argo_anywhere/ssh-fail-lock` | Epoch timestamp of most recent SSH-failure lock event | none (just an integer) |
 | `~/.config/argo_anywhere/ssh-fail-lock-count` | Cumulative count of historical lock events (drives exponential backoff) | none |
-| `~/.config/opencode/config.json` | OpenCode config including `provider.argo.options.baseURL` (proxy URL) and the bearer token (= ANL username) | low (PII) |
-| `~/.claude/settings.json` (global scope) OR `./.claude/settings.local.json` (project scope; default since v2.0) | Claude Code config including `env.ANTHROPIC_API_KEY` (= ANL username; was `ANTHROPIC_AUTH_TOKEN` before 2026-07-13 canonical-name adoption — see docs/LIMITATIONS.md "Claude Code TUI is misleading") | low (PII) |
-| `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master sockets | none (sockets, not data) |
+| `~/.config/opencode/config.json` (global) OR `<git-root>/opencode.json` (project) | OpenCode config including `provider.argo.options.baseURL` (proxy URL) and the bearer token (= ANL username) | low (PII) |
+| `~/.claude/settings.json` (global scope) OR `./.claude/settings.local.json` (project scope) | Claude Code config including `env.ANTHROPIC_API_KEY` (= ANL username; was `ANTHROPIC_AUTH_TOKEN` before the 2026-07-13 canonical-name adoption — see docs/LIMITATIONS.md "Claude Code TUI is misleading") | low (PII) |
+| `~/.aider.conf.yml` (global) OR `<git-root>/.aider.conf.yml` (project) | aider config including `openai-api-base` and **`openai-api-key` = your ANL username in cleartext** | low (PII) |
+| `~/.aider.model.settings.yml` | Per-model `use_temperature: false` table; written entirely by argo-anywhere | none (no PII) |
+| `~/.argo_anywhere/web_state.json` | Web UI state: a most-recently-used list of up to 10 absolute project directories, plus divider position and theme | low (discloses your directory history) |
+| `~/.ssh/sockets/argo-anywhere-<user>-<host>-<port>` | SSH multiplex master sockets (directory is `chmod 700`) | none (sockets, not data) |
 
-No prompt content is logged on the laptop. The web UI keeps no data at
-rest: it holds live PTY sessions in memory only and serves vendored
-static assets; nothing it does writes prompt or identity data beyond
-what the engine already writes above.
+**No prompt content is logged on the laptop.** The web UI holds live PTY
+sessions in memory only and serves vendored static assets; it never writes
+prompt content. It does keep a small amount of state at rest — the
+`web_state.json` row above — which is why "no data at rest" would be the
+wrong claim: the MRU list is not a secret, but it is a record of where you
+have been working.
 
 ### Compute node side
 
 | Location | Contents | Sensitivity |
 |:---------|:---------|:------------|
 | `~/.config/argoproxy/config.yaml` | argo-proxy config: ANL username, port, host, `verbose:` setting, `argo_url`, etc. | low (PII) |
-| `~/.argo_anywhere.server.log` | Output of the script's bootstrap + `mode_server` invocation (which python, which venv, install messages) | low (operational; no prompt content unless `verbose: true`) |
-| argo-proxy stdout (captured into `~/.argo_anywhere.server.log` via `tee` re-exec) | If `verbose: true`: full prompt + response bodies. If `verbose: false` (DEFAULT since v2.0): structured access logs without bodies. | **HIGH (with verbose: true); LOW (with verbose: false)** |
+| `~/.argo-anywhere.server.log` | Output of the script's bootstrap + `mode_server` invocation (which python, which venv, install messages). **Bootstrap output only** — not argo-proxy's. | low (operational; no prompt content) |
+| `~/argoproxy.out` | **argo-proxy's own stdout**, captured by all three launchers (`screen` / `tmux` / `nohup`) via `tee`. If `verbose: true`: full prompt + response bodies. If `verbose: false` (the default): structured access logs without bodies. Truncated at each launch. | **HIGH (with verbose: true); LOW (with verbose: false)** |
 | `~/argovenv/` | Python venv with argo-proxy installed; no user data. | none |
 
-The big one is the third row. Pre-v2.0 the script defaulted to
+The big one is `~/argoproxy.out`. Pre-v2.0 the script defaulted to
 `verbose: true`, meaning every prompt and response was written to
 the on-node log file. The file is owned by the user (typical
 `umask 022` produces 0644), readable by anyone with SSH access to
@@ -185,7 +199,7 @@ script (`ssh -o ConnectTimeout=5 <user>@logins.cels.anl.gov true`).
 
 ## Local web UI (`argo-anywhere web` / `app`)
 
-The v3.0.0 package adds an **optional** loopback-only web UI: a browser
+The package ships an **optional** loopback-only web UI: a browser
 terminal (and a `pywebview` native-window wrapper) that can drive the
 engine — `connect` incl. Duo, the live monitor, `configure`/`run`, and
 read-only info views — without a native terminal. It runs only when you
@@ -205,7 +219,7 @@ subcommand and listens on nothing until you do.
 
 ### Ratified posture (PLAN.md Q11)
 
-The posture is **accepted as-is for v3.0.0**: loopback bind + Host-header
+The posture is **accepted as-is**: loopback bind + Host-header
 guard + argv allowlist are adequate for the project's threat model of a
 **trusted user on a trusted laptop**. The rationale is the same as for
 the on-node tunnel: anyone who can reach `127.0.0.1:<port>` on your
@@ -223,7 +237,8 @@ The loopback bind + Host guard stop *remote* and *DNS-rebinding*
 attacks; they do not stop a same-host attacker.
 
 A **loopback token or `Origin`/same-origin check** on state-changing
-endpoints + the WebSocket is queued as post-3.0 hardening. Until then:
+endpoints + the WebSocket remains queued; it is **not yet implemented as of
+v3.4.0**. Until then:
 don't run the web UI on a laptop you share with an untrusted local user,
 and close it when you're not using it (it listens only while running).
 
@@ -232,15 +247,24 @@ and close it when you're not using it (it listens only while running).
 Every prompt sent through this script is attributed to a single
 ANL username. The username flows as follows:
 
-1. Resolved on the laptop (priority: `--user` flag → `ARGO_ANYWHERE_USER`
-   env → `ARGO_OPENCODE_USER` legacy env → cached value at
-   `~/.config/argo_anywhere/user` → `id -un` fallback).
+1. Resolved on the laptop, in this order:
+   1. `--user` flag / `ARGO_ANYWHERE_USER` env (`ARGO_OPENCODE_USER`
+      is honored as a legacy alias).
+   2. The `User` line your `~/.ssh/config` gives for the target node
+      (D-032). **This outranks the cache**, and values inferred this
+      way are deliberately never written to it.
+   3. The `User` line for the jump host, same rules.
+   4. Cached value at `~/.config/argo_anywhere/user`.
+   5. An interactive prompt. There is **no** silent `id -un` fallback
+      on this path — if argo-anywhere cannot determine your Argonne
+      username it asks rather than guessing.
 2. Embedded in the AI client config:
    - **OpenCode**: `provider.argo.options.apiKey` = `<username>` in
      `~/.config/opencode/config.json`.
    - **Claude Code**: `env.ANTHROPIC_API_KEY` = `<username>` in
      `~/.claude/settings.json` (global) or
-     `./.claude/settings.local.json` (project, default since v2.0).
+     `./.claude/settings.local.json` (project). The default is **hybrid** —
+     see [README "Claude Code config scope"](../README.md#claude-code-config-scope-project-vs-global).
      (The env-var name changed from `ANTHROPIC_AUTH_TOKEN` to
      `ANTHROPIC_API_KEY` on 2026-07-13; both are honored by Claude
      Code and both route requests correctly, but `ANTHROPIC_API_KEY`
@@ -249,13 +273,15 @@ ANL username. The username flows as follows:
      up during the same investigation.)
 3. Sent as the bearer token by argo-proxy to the Argo gateway.
 
-The script does NOT separate the laptop OS user (`id -un`) from the
-Argonne identity (`ARGO_ANYWHERE_USER`). On a system where the local
-account name differs from your Argonne username (the common case for
-laptops where the OS account is your real name), be sure to set
-`ARGO_ANYWHERE_USER` explicitly or use `--user` — otherwise the
-fallback to `id -un` will attribute calls to whatever your laptop
-account is called.
+Your laptop OS account name (`id -un`) and your Argonne identity are
+different things, and the client flow keeps them separate: it will
+prompt rather than assume your local account name is your ANL
+username. Set `ARGO_ANYWHERE_USER` or pass `--user` to skip the
+prompt. Two places do consult `id -un`, both deliberately: standalone
+`server` mode on a node, where the OS account is a reasonable last
+resort, and the post-launch ownership check, which asks "did the
+process we just started come up?" — an OS-level question, not an
+Argo-identity one.
 
 ## Things this script does NOT defend against
 
@@ -347,14 +373,15 @@ maintainer); response times are best-effort, not SLA-backed.
 ## Where to read more
 
 - [`docs/AUDIT_2026-05-12.md`](AUDIT_2026-05-12.md) — full audit
-  trail with all 43 findings (10 critical, 11 high, 10 medium, 10 low,
+  trail with all 43 findings (9 critical, 11 high, 10 medium, 10 low,
   3 info) and their resolutions.
 - [`docs/AUDIT_2026-05_pre-rebuild.md`](AUDIT_2026-05_pre-rebuild.md) —
   archived prior audit (pre-v2.0).
-- [`docs/UPGRADING.md`](UPGRADING.md) — what changes for v1.x users
-  upgrading to v2.0 (covers the P2/H5/H6/H7 privacy + identity fixes).
+- [`docs/UPGRADING.md`](UPGRADING.md) — routed upgrade paths per starting
+  point. The v1.x → v2.0 privacy + identity changes referenced above are
+  archived in [`UPGRADING_HISTORY.md`](UPGRADING_HISTORY.md).
 - [`docs/LIMITATIONS.md`](LIMITATIONS.md) — non-security limitations
-  (single-instance constraint, no automated tests, etc.).
+  (single-instance constraint, extended-thinking support, etc.).
 
 ---
 
@@ -364,4 +391,14 @@ Phase 2c+3 of the v2.0 release. Revised 2026-07-12 for v3.0.0: broadened
 the intro to the Python package; added the ratified "Local web UI"
 threat model (PLAN.md Q11) — loopback bind + Host guard + argv allowlist
 accepted, local-process/CSRF residual documented, loopback-token/Origin
-check queued as hardening.*
+check queued as hardening. Revised 2026-08-25 (review pass against
+v3.4.0): corrected the Claude Code default scope (hybrid, not project —
+a fresh install writes the global file); corrected the on-node log
+inventory (argo-proxy's stdout goes to `~/argoproxy.out`, not the
+bootstrap log, whose name was also a v2-era spelling); added the missing
+laptop-side rows (aider config carrying the ANL username, install
+manifest, port cache, web UI MRU) and withdrew the "web UI keeps no data
+at rest" claim; corrected the username-resolution order (ssh-config
+sources outrank the cache; there is no silent `id -un` fallback on the
+client path); expanded the shared-node threat-model row for the v3.3+
+defenses and their opt-out; fixed the audit critical-findings count.*
