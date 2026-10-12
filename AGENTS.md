@@ -70,7 +70,13 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.4.0 released 2026-08-13** — carries the three v3.3.0
+- **Status**: **v3.5.0 released 2026-10-12** — the **D-036** release:
+  OpenCode 2 reads only `opencode.json(c)`, so the global OpenCode config
+  moves from `config.json` with an automatic migration, a background-service
+  restart offer, and legacy-name reporting in `status` + the web UI. Also
+  carries the 2026-08-25 doc corrections (opus-4-7 warning withdrawn;
+  extended-thinking matrix). Engine `SCRIPT_VERSION` → `2.6.0`.
+  Prior: **v3.4.0 released 2026-08-13** — carries the three v3.3.0
   regression fixes that were prepared as v3.3.1 but never published (that
   tag stayed local while the engine-invariant tests were converted from
   grep-based to behavioural), plus the per-user derived default port,
@@ -309,7 +315,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: **v3.4.0** (2026-08-13). Release
+- **Current release**: **v3.5.0** (2026-10-12). Release
   history: [`CHANGELOG.md`](CHANGELOG.md) — the single source of
   truth for "what shipped when"; do not restate it here.
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
@@ -323,7 +329,7 @@ Section 6.4):
 |:----|:---------|:-------------|
 | [`README.md`](README.md) | New + returning humans | Project overview; quick start |
 | [`CHANGELOG.md`](CHANGELOG.md) | Users upgrading; maintainer | **Single source of truth for "what shipped when"** (per-release, since v3.1.0). Re-ground the status claims in `README.md` / `PLAN.md` / this file at tag time; put the narrative here. |
-| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-034 |
+| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-036 |
 | [`docs/UPGRADING.md`](docs/UPGRADING.md) | Anyone upgrading | Routed install/migrate paths per starting point (~170 lines). Current-state only; per-release detail lives in `CHANGELOG.md`. |
 | [`docs/UPGRADING_HISTORY.md`](docs/UPGRADING_HISTORY.md) | Maintainers; users on very old installs | Archived v1.x → v2.x → v3.0.0 per-release behaviour changes, split out of `UPGRADING.md` 2026-08-25. **Version-pinned — do not cite as current state.** |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |
@@ -340,6 +346,7 @@ Section 6.4):
 | [`notes/agent_feedback.md`](notes/agent_feedback.md) | Maintainer + upstream skills repo | Per-project feedback queued for upstream roll-up |
 | [`notes/impl_codex_aider.md`](notes/impl_codex_aider.md) | Maintainer | Design + implementation record for aider (Phase 5a; LIVE-TEST PASSED 2026-07-09) + codex (Phase 5b; gated). Config-format facts, per-tool contract application, live-test findings. |
 | [`notes/impl_lifecycle_commands.md`](notes/impl_lifecycle_commands.md) | Maintainer | Design + implementation record for D-024 (connect/configure/run) + D-025 (install/uninstall + install manifest). Three-level model, locked decisions, live-test amendments. LIVE-TEST PASSED 2026-07-09. |
+| [`notes/impl_opencode_v2_migration.md`](notes/impl_opencode_v2_migration.md) | Maintainer | **Read before touching OpenCode config paths.** OpenCode 2 config-name break (D-036): measurements, migration case table, manifest re-keying, background-service cache, and the 2026-10-12 client-upgrade audit (Claude Code, aider: no breakage). |
 | [`notes/impl_thinking_support.md`](notes/impl_thinking_support.md) | Maintainer | **Read before touching thinking / reasoning parameters in any config writer.** Measured per-model + per-API-path support matrix (2026-08-25, live). Records why we write no thinking config, why per-model defaults are the wrong fix for aider/OpenCode, and the v5 `adaptive`-only gap in the upstream shim. |
 | [`notes/impl_python_webui.md`](notes/impl_python_webui.md) | Maintainer | **Single source of truth** for the Model-A Python-package + web-UI rebuild (merged to `main` 2026-07-12; D-026..D-030). Plan/phasing (P0–P5), P1+cold-Duo PASS, P0–P4 code-complete layout, two-lane driver contract, residuals. Consolidates the former `spike/HANDOFF.md` + `spike/RESULTS.md` (now stubs). |
 | [`notes/test_plan_phase*.md`](notes/), [`notes/test_plan_lifecycle.md`](notes/test_plan_lifecycle.md) | Maintainer | Per-phase live-test plans (historical artifact once phase complete). `test_plan_lifecycle.md` covers aider + the lifecycle commands (PASSED 2026-07-09). |
@@ -776,6 +783,27 @@ stdout; do not wrap it in `$(...)` (D-005 — the first draft did, and
 
 Applies to any future `write_<tool>_config` that emits an enumerable
 list. Pinned by `tests/test_engine_opencode_models.py`.
+
+### OpenCode config name: `opencode.json`, migrated from `config.json` (D-036)
+
+**OpenCode 2 reads only `opencode.json(c)`.** We wrote
+`~/.config/opencode/config.json` until v3.4.0; OpenCode 2 ignores it
+silently (field report 2026-10-12: zero argo models, no error).
+
+- `OPENCODE_GLOBAL_CONFIG` is the **write** target (new name).
+  `OPENCODE_CONFIG` is the **read** path (falls back to the legacy name).
+  Never write through `OPENCODE_CONFIG` without migrating first.
+- `_migrate_opencode_global_config_name` runs from **mutating verbs
+  only**. Do not call it from `status`, `enumerate_client_ports` or
+  anything in `status.py` — read-only verbs report (D-034 rule).
+- It must never `die`, never drop a model (merge unions dict keys), and
+  never touch `opencode.jsonc` (comments would be lost).
+- Any OpenCode config change needs `_opencode_offer_service_restart`:
+  OpenCode 2's background service caches config per directory.
+- Coupled with `status._TOOL_CONFIGS` / `_LEGACY_BASENAMES`.
+
+Pinned by `tests/test_engine_opencode_v2_migration.py`. Design record:
+[`notes/impl_opencode_v2_migration.md`](notes/impl_opencode_v2_migration.md).
 
 ### Web-UI honesty: never render the cache as a measurement
 

@@ -340,10 +340,17 @@ def discover_channels() -> list[DiscoveredChannel]:
 #: invisible to the dashboard's coherence view, which is exactly how aider went
 #: unnoticed on the engine side until 2026-08-12.
 _TOOL_CONFIGS: tuple[tuple[str, str], ...] = (
-    ("opencode", "~/.config/opencode/config.json"),
+    ("opencode", "~/.config/opencode/opencode.json"),
     ("claudecode", "~/.claude/settings.json"),
     ("aider", "~/.aider.conf.yml"),
 )
+
+#: Pre-rename basenames, read as a fallback when the current name is absent.
+#: Mirrors the engine's OPENCODE_LEGACY_GLOBAL_CONFIG (D-036): argo-anywhere
+#: wrote ``config.json`` until v3.4.0, and OpenCode 2 ignores that name. The
+#: dashboard reports it (``legacy_name``) and never renames it -- this module
+#: does no writes.
+_LEGACY_BASENAMES: dict[str, str] = {"opencode": "config.json"}
 
 _URL_PORT_RE = re.compile(r"https?://[^:/]+:(\d+)")
 
@@ -358,6 +365,9 @@ class ToolConfig:
     #: (never configured) or the endpoint could not be parsed.
     port: int | None
     configured: bool
+    #: True when the config was found only under its pre-rename name, which
+    #: the installed tool may not read (OpenCode 2 and ``config.json``).
+    legacy_name: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -422,11 +432,23 @@ def client_tool_configs() -> list[ToolConfig]:
     out: list[ToolConfig] = []
     for tool, raw in _TOOL_CONFIGS:
         path = Path(os.path.expanduser(raw))
+        legacy_name = False
+        legacy = _LEGACY_BASENAMES.get(tool)
+        if legacy and not path.exists():
+            old = path.with_name(legacy)
+            # Read path mirrors the engine's OPENCODE_CONFIG fallback; the
+            # flag mirrors _opencode_legacy_name_only (no .jsonc beside it --
+            # that case is OpenCode reading a file we do not manage).
+            if old.is_file():
+                path = old
+                legacy_name = not path.with_name(
+                    Path(raw).name).with_suffix(".jsonc").exists()
         if not path.is_file():
             out.append(ToolConfig(tool=tool, path=str(path), port=None,
                                   configured=False))
             continue
         port = _TOOL_READERS[tool](path)
         out.append(ToolConfig(tool=tool, path=str(path), port=port,
-                              configured=port is not None))
+                              configured=port is not None,
+                              legacy_name=legacy_name))
     return out

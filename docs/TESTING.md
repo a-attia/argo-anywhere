@@ -98,7 +98,7 @@ no existing config.
 
 ```sh
 # Snapshot the laptop OpenCode config
-cp -p ~/.config/opencode/config.json /tmp/opencode_config_BEFORE.json
+cp -p ~/.config/opencode/opencode.json /tmp/opencode_config_BEFORE.json
 
 # Snapshot the remote argo-proxy config on the node you'll target
 ssh -J <user>@logins.cels.anl.gov <user>@<node> \
@@ -230,7 +230,7 @@ is required for socket reuse to survive `~/.ssh/config` rewrites.
 If your existing config differs from what the script would write, you'll see:
 
 ```
-[warn] OpenCode config already exists at /Users/<you>/.config/opencode/config.json and differs from the proposed version.
+[warn] OpenCode config already exists at /Users/<you>/.config/opencode/opencode.json and differs from the proposed version.
 
   Choose how to handle ...
     [k] keep existing (no changes)
@@ -400,7 +400,7 @@ Type a quick "hello" prompt. **Pass:** OpenCode connects, returns a response.
 
 If OpenCode fails to connect: confirm config and tunnel agree on the port.
 ```sh
-grep -E '"baseURL"' ~/.config/opencode/config.json
+grep -E '"baseURL"' ~/.config/opencode/opencode.json
 lsof -nPi ":${PORT}" -sTCP:LISTEN
 ```
 
@@ -526,7 +526,7 @@ config.
 
 ```sh
 # Snapshot OpenCode config mtime
-stat -c '%Y %n' ~/.config/opencode/config.json 2>/dev/null
+stat -c '%Y %n' ~/.config/opencode/opencode.json 2>/dev/null
 
 bash argo-anywhere.sh tunnel
 ```
@@ -536,7 +536,7 @@ bash argo-anywhere.sh tunnel
 - Same on-node short-circuit lines as test 1.
 - No `[ ok ] OpenCode already installed` or `OpenCode config already
   up to date` lines (because tunnel doesn't run setup_opencode_cli_tool).
-- `~/.config/opencode/config.json` mtime: **unchanged**.
+- `~/.config/opencode/opencode.json` mtime: **unchanged**.
 
 ### On-node test 3: `server` standalone
 

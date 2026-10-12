@@ -7,7 +7,9 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: **v3.4.0 released** (2026-08-13; carries the three v3.3.0
+**Status**: **v3.5.0 released** (2026-10-12): the **D-036** release —
+OpenCode 2 config-name migration (`config.json` → `opencode.json`). See
+CHANGELOG. Prior: **v3.4.0 released** (2026-08-13; carries the three v3.3.0
 regression fixes prepared as v3.3.1 — which was never published — plus a
 per-user derived default port, per-tool status in the web UI, and an
 actionable `connect`. See CHANGELOG. v3.3.0 should not be run.) Prior:
@@ -2652,6 +2654,53 @@ forward). D-024 (`connect` is channel-only, which is why it reports
 config drift rather than fixing it).
 
 ---
+
+### D-036 — OpenCode global config moves to `opencode.json`; migrate eagerly, report from read-only verbs (2026-10-12)
+
+**Status**: shipped in v3.5.0 (2026-10-12; engine `SCRIPT_VERSION` 2.6.0). Design record:
+[`notes/impl_opencode_v2_migration.md`](notes/impl_opencode_v2_migration.md).
+
+**Trigger.** Field report 2026-10-12: after upgrading to OpenCode 2.0.27,
+no `argo/` models appeared. OpenCode 2 reads only `opencode.json(c)`; we
+had written `~/.config/opencode/config.json` since the beginning, which
+OpenCode 1.x accepted and OpenCode 2 ignores silently. Our provider block
+itself loads fine under OpenCode 2 once the file has the right name
+(measured: 34 models, no warnings), so no format change is needed.
+
+**Decision.**
+
+1. The write target is `opencode.json` for every OpenCode version. Both
+   majors read it, so there is no version gate (a version-dependent path
+   would itself be a drift source).
+2. `_migrate_opencode_global_config_name` runs from every **mutating** verb
+   (`configure`/`run`/`client`/`setup` via `setup_opencode_cli_tool`,
+   `update-models`, `update opencode`). It runs on OpenCode 1.x too, so a
+   user's later OpenCode upgrade is a non-event. It is idempotent and never
+   dies. It leaves `config.json` as a symlink to the new name, and it refuses
+   to touch an `opencode.jsonc` (we cannot rewrite JSONC without losing
+   comments; global scope is refused while one exists).
+3. **Read-only verbs report and never migrate** (`status`, port
+   enumeration, the web UI's `status.py`). They read the legacy name as a
+   fallback and flag it. Same principle as D-034.
+4. The manifest entry is re-keyed with a `legacy_path`, so
+   `uninstall --restore-configs` still finds backups made under the old
+   name and removes the compat symlink.
+5. OpenCode 2's background service caches config per directory. After any
+   config change, the engine offers `opencode service restart` at a TTY
+   (default *later*, since it interrupts open sessions) and otherwise
+   prints the command.
+
+**Coupled surface.** `status._TOOL_CONFIGS` + `_LEGACY_BASENAMES` mirror
+`OPENCODE_GLOBAL_CONFIG` + `OPENCODE_LEGACY_GLOBAL_CONFIG` (client-port
+enumeration rule). The dashboard chip reads "old file name" and offers a
+**Fix…** button that only pre-fills the launcher with `configure opencode
+--scope global`; no write happens from the dashboard.
+
+**Not done, deliberately.** We do not write the v2-native provider shape
+(`providers`, `package: "aisdk:…"`, `settings`), because it would break
+users still on 1.x. Revisit if OpenCode starts warning on v1 syntax.
+
+Pinned by `tests/test_engine_opencode_v2_migration.py`.
 
 ## 8. Code-paper coupling
 

@@ -90,7 +90,7 @@ A complete inventory of where prompt and identity data may persist:
 | `~/.config/argo_anywhere/manifest.json` | Install manifest: the absolute path of every client config argo-anywhere created or modified, and which tool binaries it installed | low (discloses which projects you ran argo in) |
 | `~/.config/argo_anywhere/ssh-fail-lock` | Epoch timestamp of most recent SSH-failure lock event | none (just an integer) |
 | `~/.config/argo_anywhere/ssh-fail-lock-count` | Cumulative count of historical lock events (drives exponential backoff) | none |
-| `~/.config/opencode/config.json` (global) OR `<git-root>/opencode.json` (project) | OpenCode config including `provider.argo.options.baseURL` (proxy URL) and the bearer token (= ANL username) | low (PII) |
+| `~/.config/opencode/opencode.json` (global) OR `<git-root>/opencode.json` (project) | OpenCode config including `provider.argo.options.baseURL` (proxy URL) and the bearer token (= ANL username) | low (PII) |
 | `~/.claude/settings.json` (global scope) OR `./.claude/settings.local.json` (project scope) | Claude Code config including `env.ANTHROPIC_API_KEY` (= ANL username; was `ANTHROPIC_AUTH_TOKEN` before the 2026-07-13 canonical-name adoption — see docs/LIMITATIONS.md "Claude Code TUI is misleading") | low (PII) |
 | `~/.aider.conf.yml` (global) OR `<git-root>/.aider.conf.yml` (project) | aider config including `openai-api-base` and **`openai-api-key` = your ANL username in cleartext** | low (PII) |
 | `~/.aider.model.settings.yml` | Per-model `use_temperature: false` table; written entirely by argo-anywhere | none (no PII) |
@@ -260,7 +260,7 @@ ANL username. The username flows as follows:
       username it asks rather than guessing.
 2. Embedded in the AI client config:
    - **OpenCode**: `provider.argo.options.apiKey` = `<username>` in
-     `~/.config/opencode/config.json`.
+     `~/.config/opencode/opencode.json`.
    - **Claude Code**: `env.ANTHROPIC_API_KEY` = `<username>` in
      `~/.claude/settings.json` (global) or
      `./.claude/settings.local.json` (project). The default is **hybrid** —

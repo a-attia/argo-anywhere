@@ -193,7 +193,7 @@ esac
 #     Write multi-line scripts to temp files via mktemp instead.
 #   * `set -euo pipefail` is on. Be deliberate with ssh/curl/jq exit codes;
 #     wrap with `|| true` where non-zero is expected.
-#   * Port comes from `~/.config/opencode/config.json` baseURL by default.
+#   * Port comes from `~/.config/opencode/opencode.json` baseURL by default.
 #     `--port`/ARGO_ANYWHERE_PORT override but prompt before mutating config.
 #   * MFA mode (default) opens an SSH ControlMaster; subsequent calls reuse
 #     the socket. Sockets at ~/.ssh/sockets/argo-anywhere-*. `clean` closes
@@ -253,7 +253,7 @@ _legacy_CLAUDECODE_SCOPE="${CLAUDECODE_SCOPE:-}"
 # release process). Format: "<major>.<minor>.<patch>" with optional
 # "-rc<N>" / "-dev" suffix for pre-release builds; _extract_version
 # normalizes both forms.
-SCRIPT_VERSION="2.5.0"
+SCRIPT_VERSION="2.6.0"
 
 # Canonical install root for the script itself (managed by the
 # bootstrap helper triggered on first 'client' / 'setup' run, and by
@@ -336,7 +336,7 @@ ANL_JUMP="logins.cels.anl.gov"
 #   1. --port CLI flag            (one-shot override; offers to migrate config)
 #   2. ARGO_ANYWHERE_PORT env var (canonical override)
 #   3. PROXY_PORT env var         (deprecated alias; warns once)
-#   4. baseURL in ~/.config/opencode/config.json   (the source of truth)
+#   4. baseURL in ~/.config/opencode/opencode.json   (the source of truth)
 #   5. the per-user derived default (see _derive_default_port)
 #   6. PROXY_PORT_BASE below      (only if the username is unknown)
 #
@@ -413,14 +413,29 @@ ARGO_MANIFEST="${STATE_DIR}/manifest.json"
 # as an alias for the global path (existing callers; e.g. update-models)
 # so nothing else needs to change for the global-only path.
 #
-# Filename note: the current OpenCode upstream docs reference
-# `opencode.json` as the canonical name; this script has historically
-# written `config.json`. Both are accepted by recent OpenCode versions.
-# Phase 4 keeps `config.json` for backward compatibility with users'
-# existing configs; a future audit (or a real-world report of the
-# rename biting) can flip the global path with a one-shot migration.
-OPENCODE_GLOBAL_CONFIG="${HOME}/.config/opencode/config.json"
-OPENCODE_CONFIG="${OPENCODE_GLOBAL_CONFIG}"  # legacy alias; existing callers
+# Filename (D-036, v3.5.0): the global config is `opencode.json`. This
+# script wrote `config.json` until v3.4.0. OpenCode 1.x reads both names;
+# OpenCode 2.x reads ONLY `opencode.json(c)` and silently ignores
+# `config.json` -- field report 2026-10-12: after upgrading to OpenCode
+# 2.0.27 no argo/ models appeared. _migrate_opencode_global_config_name
+# renames the legacy file on every mutating verb, regardless of the
+# installed OpenCode major, so a later OpenCode upgrade is a non-event.
+#
+# Three names, three jobs:
+#   OPENCODE_GLOBAL_CONFIG         the WRITE target (always the new name)
+#   OPENCODE_LEGACY_GLOBAL_CONFIG  the pre-v3.5.0 name, migrated away from
+#   OPENCODE_CONFIG                the READ path: the new name, or the legacy
+#                                  name when only that exists. Read-only verbs
+#                                  (status, port checks, list-models) must NOT
+#                                  migrate -- they report (same rule as D-034).
+#                                  The migration resets it to the new name.
+OPENCODE_GLOBAL_CONFIG="${HOME}/.config/opencode/opencode.json"
+OPENCODE_LEGACY_GLOBAL_CONFIG="${HOME}/.config/opencode/config.json"
+OPENCODE_JSONC_GLOBAL_CONFIG="${HOME}/.config/opencode/opencode.jsonc"
+OPENCODE_CONFIG="${OPENCODE_GLOBAL_CONFIG}"
+if [ ! -e "$OPENCODE_GLOBAL_CONFIG" ] && [ -f "$OPENCODE_LEGACY_GLOBAL_CONFIG" ]; then
+  OPENCODE_CONFIG="${OPENCODE_LEGACY_GLOBAL_CONFIG}"
+fi
 OPENCODE_PROJECT_CONFIG_BASENAME="opencode.json"
 
 # Claude Code config paths.
@@ -1532,7 +1547,7 @@ enumerate_client_ports() {
   # opencode global
   p="$(read_port_from_opencode_config 2>/dev/null || true)"
   if [ -n "$p" ]; then
-    printf '%s\n' "opencode global $p $OPENCODE_GLOBAL_CONFIG"
+    printf '%s\n' "opencode global $p $OPENCODE_CONFIG"
   fi
 
   # claudecode global
@@ -2069,7 +2084,7 @@ resolve_port() {
 #   $1 new_port     -- the port the script wants to use (chosen / probed)
 #   $2 config_port  -- the port currently in the client config
 #   $3 config_label -- human-readable description of the config source
-#                      (e.g. "OpenCode config" or "~/.config/opencode/config.json")
+#                      (e.g. "OpenCode config" or "~/.config/opencode/opencode.json")
 #
 # Prints (to stdout) one of:
 #   migrate   -- caller writes config to new_port
@@ -3149,6 +3164,35 @@ except Exception:
 PYEOF
 }
 
+# _manifest_rename_config <old_abspath> <new_abspath>: re-key a config's
+# manifest entry after we renamed the file (D-036: OpenCode config.json ->
+# opencode.json). It is the same file, so first-touch-wins keeps the old
+# entry's provenance; `legacy_path` lets restore also find the backups made
+# under the old name (`<old>.bak.*`), which we deliberately do not rename.
+# When both keys exist, the new one is kept. Best-effort; never fails.
+_manifest_rename_config() {
+  _manifest_available || return 0
+  [ -f "$ARGO_MANIFEST" ] || return 0
+  python3 - "$ARGO_MANIFEST" "$1" "$2" <<'PYEOF' 2>/dev/null || true
+import json, os, sys, tempfile
+manifest, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(manifest) as f:
+    data = json.load(f)
+configs = data.get("configs")
+if not isinstance(configs, dict) or (old not in configs and new not in configs):
+    sys.exit(0)
+entry = configs.pop(old, None)
+if new in configs:
+    entry = configs[new]
+configs[new] = entry
+entry["legacy_path"] = old
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(manifest), prefix=".manifest.", suffix=".tmp")
+with os.fdopen(fd, "w") as f:
+    json.dump(data, f, indent=2); f.write("\n")
+os.replace(tmp, manifest)
+PYEOF
+}
+
 # manifest_record_binary <tool> <path> <method>: record that THIS script
 # installed a tool binary (so uninstall --remove-binaries can remove only
 # our installs). First-touch-wins per tool. Best-effort.
@@ -3202,7 +3246,7 @@ PYEOF
 # ============================================================================
 # SECTION: 11. CONFIG FILE HANDLING (handle_config_file, k/b/d/m/a prompt)
 # ============================================================================
-# Used for both ~/.config/opencode/config.json and the argo-proxy YAML.
+# Used for both ~/.config/opencode/opencode.json and the argo-proxy YAML.
 # Args: <path-to-existing-or-not> <description> <writer-fn>
 # writer-fn must accept a single arg (destination path) and write a fresh file.
 handle_config_file() {
@@ -3558,7 +3602,7 @@ EOF
 # ============================================================================
 # SECTION: 12. OPENCODE CONFIG WRITER + INSTALLER (laptop side)
 # ============================================================================
-# Mirrors the maintainer's ~/.config/opencode/config.json, with the username
+# Mirrors the maintainer's ~/.config/opencode/opencode.json, with the username
 # substituted. Uses localhost (not 0.0.0.0) for clarity.
 #
 # The username is taken from the canonical env var ARGO_ANYWHERE_USER, with
@@ -3916,9 +3960,200 @@ opencode_shadowing_env_vars() {
 }
 
 # opencode_scope_values: D-018 per-tool scope vocabulary. OpenCode
-# supports both global (~/.config/opencode/config.json) and project
+# supports both global (~/.config/opencode/opencode.json) and project
 # (<git-root>/opencode.json, falling back to <cwd>/opencode.json if
 # not in a git repo) scopes since Phase 4 B1b.
+# ----------------------------------------------------------------------------
+# OpenCode 2 config-name migration (D-036, v3.5.0)
+# ----------------------------------------------------------------------------
+# _migrate_opencode_global_config_name: move the pre-v3.5.0 global config
+# (`config.json`) to the name OpenCode 2 reads (`opencode.json`). Idempotent;
+# best-effort; NEVER dies -- it runs ahead of the user's real work, and a
+# failed migration must leave them no worse off than before.
+#
+# Call from MUTATING verbs only (configure/run/client/setup via
+# setup_opencode_cli_tool, update-models, update opencode). Read-only verbs
+# read OPENCODE_CONFIG (which falls back to the legacy name) and report.
+#
+# Cases (impl_opencode_v2_migration.md §4.2):
+#   legacy absent, or a symlink        -> no-op
+#   opencode.jsonc present             -> touch nothing; warn (we cannot
+#                                         rewrite JSONC without losing
+#                                         comments). opencode_pick_scope
+#                                         refuses global scope.
+#   legacy file, new absent            -> mv; compat symlink; manifest rename
+#   legacy file w/o provider.argo, new -> leave both (legacy is not ours)
+#   legacy file w/ provider.argo, new  -> deep-merge legacy UNDER new (new
+#                                         wins on scalars; dict keys union,
+#                                         so no model is dropped -- the
+#                                         NO-SILENT-MODEL-DELETION INVARIANT),
+#                                         back up new, park legacy at
+#                                         config.json.migrated.<ts>, symlink
+#
+# Sets _OPENCODE_MIGRATED=1 when it changed what OpenCode will read, so the
+# caller can offer the background-service restart OpenCode 2 needs.
+_OPENCODE_MIGRATED=0
+_OPENCODE_CONFIG_CHANGED=0   # set by setup_opencode_cli_tool when the write changed the file
+_migrate_opencode_global_config_name() {
+  local legacy="$OPENCODE_LEGACY_GLOBAL_CONFIG" new="$OPENCODE_GLOBAL_CONFIG"
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+
+  if [ -e "$OPENCODE_JSONC_GLOBAL_CONFIG" ]; then
+    if [ -f "$legacy" ] && [ ! -L "$legacy" ]; then
+      warn "OpenCode config: found both ${legacy} and ${OPENCODE_JSONC_GLOBAL_CONFIG}."
+      warn "  OpenCode 2 reads only the .jsonc file. argo-anywhere will not rewrite"
+      warn "  a JSONC file (its comments would be lost). Copy the 'argo' entry from"
+      warn "  'provider' in ${legacy} into the .jsonc by hand, or use --scope project."
+    fi
+    return 0
+  fi
+
+  [ -f "$legacy" ] || return 0
+  [ -L "$legacy" ] && return 0
+
+  if [ ! -e "$new" ]; then
+    if ! mv -- "$legacy" "$new" 2>/dev/null; then
+      warn "Could not rename ${legacy} -> ${new}; OpenCode 2 will not see the argo models."
+      return 0
+    fi
+    ln -s "$(basename "$new")" "$legacy" 2>/dev/null || true
+    _manifest_rename_config "$legacy" "$new"
+    OPENCODE_CONFIG="$new"
+    _OPENCODE_MIGRATED=1
+    ok "OpenCode config moved to ${new}"
+    log "  (OpenCode 2 reads only opencode.json; ${legacy} is now a symlink to it.)"
+    return 0
+  fi
+
+  command -v python3 >/dev/null 2>&1 || {
+    warn "OpenCode config: both ${legacy} and ${new} exist; python3 is needed to merge them."
+    return 0
+  }
+  local _rc=0 _dropped=""
+  _dropped="$(python3 - "$legacy" "$new" "$ts" <<'PYEOF'
+import json, os, shutil, sys, tempfile
+legacy, new, ts = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(legacy) as f: old = json.load(f)
+    with open(new) as f: cur = json.load(f)
+except Exception:
+    sys.exit(3)                       # unparseable -> leave both untouched
+if not (isinstance(old, dict) and isinstance(cur, dict)):
+    sys.exit(3)
+argo = (old.get("provider") or {}).get("argo") if isinstance(old.get("provider"), dict) else None
+if not isinstance(argo, dict):
+    sys.exit(4)                       # legacy is not ours -> leave both
+dropped = []
+def merge(dst, src, path):
+    for k, v in src.items():
+        if k not in dst:
+            dst[k] = v
+        elif isinstance(dst[k], dict) and isinstance(v, dict):
+            merge(dst[k], v, path + [k])
+        elif dst[k] != v:
+            dropped.append(".".join(path + [k]))
+merge(cur, old, [])
+shutil.copy2(new, new + ".bak." + ts)
+d = os.path.dirname(new)
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".opencode.", suffix=".tmp")
+with os.fdopen(fd, "w") as f:
+    json.dump(cur, f, indent=2); f.write("\n")
+os.replace(tmp, new)
+os.replace(legacy, legacy + ".migrated." + ts)
+print(" ".join(dropped))
+PYEOF
+)" || _rc=$?
+  case "$_rc" in
+    0)
+      ln -s "$(basename "$new")" "$legacy" 2>/dev/null || true
+      _manifest_rename_config "$legacy" "$new"
+      OPENCODE_CONFIG="$new"
+      _OPENCODE_MIGRATED=1
+      ok "OpenCode config: merged ${legacy} into ${new}"
+      log "  (previous ${new} backed up to ${new}.bak.${ts};"
+      log "   old file kept at ${legacy}.migrated.${ts})"
+      if [ -n "$_dropped" ]; then
+        warn "  These keys differed and kept the ${new} value: ${_dropped}"
+      fi
+      ;;
+    4)
+      log "OpenCode config: ${legacy} exists but has no argo provider; leaving it alone."
+      ;;
+    *)
+      warn "OpenCode config: could not merge ${legacy} into ${new} (unparseable JSON?)."
+      warn "  OpenCode 2 reads only ${new}; copy the 'argo' entry from 'provider' across by hand."
+      ;;
+  esac
+  return 0
+}
+
+# _opencode_legacy_name_only: true when the only global config is the
+# pre-v3.5.0 name -- i.e. OpenCode 2 cannot see it. Read-only.
+_opencode_legacy_name_only() {
+  [ ! -e "$OPENCODE_GLOBAL_CONFIG" ] && [ ! -e "$OPENCODE_JSONC_GLOBAL_CONFIG" ] \
+    && [ -f "$OPENCODE_LEGACY_GLOBAL_CONFIG" ] && [ ! -L "$OPENCODE_LEGACY_GLOBAL_CONFIG" ]
+}
+
+# _user_cmd_name: the command the user typed to reach us -- `argo-anywhere`
+# under the package (D-030a), the script's own name in fork mode. Same rule
+# as the inline PACKAGED checks in the port-disagreement hints.
+_user_cmd_name() {
+  if [ "${ARGO_ANYWHERE_PACKAGED:-0}" = 1 ]; then
+    printf 'argo-anywhere'
+  else
+    basename "$0"
+  fi
+}
+
+# _opencode_major_version: print the installed OpenCode major version, or
+# 0 when OpenCode is absent / its version is unparseable. Used ONLY to word
+# messages -- never to pick a path (D-036 writes the same name for 1.x + 2.x).
+_opencode_major_version() {
+  local v=""
+  if command -v opencode >/dev/null 2>&1; then
+    v="$( { opencode --version 2>/dev/null | head -n1; } || true )"
+  fi
+  v="$(printf '%s' "$v" | sed -nE 's/^[^0-9]*([0-9]+)\..*/\1/p')"
+  printf '%s' "${v:-0}"
+}
+
+# _file_fingerprint <path>: content fingerprint, or "absent". Lets callers
+# tell "we wrote the file" from "the file changed" -- handle_config_file runs
+# on every configure/run even when the result is byte-identical or the user
+# chose [k]eep.
+_file_fingerprint() {
+  if [ -f "$1" ]; then
+    { cksum < "$1" 2>/dev/null; } || printf 'unreadable'
+  else
+    printf 'absent'
+  fi
+}
+
+# _opencode_offer_service_restart: OpenCode 2 runs a background service that
+# caches config per directory (measured 2026-10-12 on 2.0.27: a config added
+# after the service first saw a directory stays invisible). So any config
+# change is invisible until the service restarts. Restarting interrupts open
+# OpenCode sessions, so: TTY -> ask, default [l]ater; otherwise print the
+# command. OpenCode 1.x has no `service` subcommand -> silent no-op.
+_opencode_offer_service_restart() {
+  command -v opencode >/dev/null 2>&1 || return 0
+  opencode service status >/dev/null 2>&1 || return 0
+  if [ -t 0 ] && [ "${UPDATE_ASSUME_YES:-0}" != 1 ]; then
+    local reply
+    reply="$(ask "OpenCode's background service caches config. Restart it now (interrupts open OpenCode sessions)? [r]estart / [L]ater:" "l")"
+    case "$reply" in
+      r|R|restart)
+        if opencode service restart >/dev/null 2>&1; then
+          ok "OpenCode background service restarted."
+          return 0
+        fi
+        warn "'opencode service restart' failed." ;;
+    esac
+  fi
+  log "To load the new config, restart OpenCode's background service:"
+  log "  opencode service restart"
+}
+
 opencode_scope_values() {
   printf 'global project'
 }
@@ -3964,6 +4199,12 @@ opencode_pick_scope() {
   # Resolve the path + label from the intended scope.
   case "$_intended_scope" in
     global)
+      # D-036: OpenCode reads opencode.jsonc too, and we cannot rewrite JSONC
+      # without destroying its comments; writing opencode.json beside it
+      # leaves the merge order to undocumented upstream behaviour. Refuse.
+      if [ -e "$OPENCODE_JSONC_GLOBAL_CONFIG" ]; then
+        die "OpenCode global config is ${OPENCODE_JSONC_GLOBAL_CONFIG} (JSONC). argo-anywhere will not rewrite it (comments would be lost). Either add the argo provider to it by hand, or re-run with --scope project."
+      fi
       _OPENCODE_SCOPE_PATH="$OPENCODE_GLOBAL_CONFIG"
       _OPENCODE_SCOPE_NAME="global (${OPENCODE_GLOBAL_CONFIG})"
       ;;
@@ -4067,6 +4308,7 @@ _opencode_check_conflicts() {
 # setup functions (setup_claudecode_cli_tool, setup_aider_cli_tool, ...) can sit
 # next to it as peers and the orchestrator can call any combination.
 setup_opencode_cli_tool() {
+  _migrate_opencode_global_config_name
   opencode_pick_scope
   ensure_opencode_installed
   if [ "${SKIP_OPENCODE_CONFIG_WRITE:-0}" = 1 ]; then
@@ -4074,7 +4316,11 @@ setup_opencode_cli_tool() {
     log "  ${_OPENCODE_SCOPE_PATH} baseURL is unchanged at port ${PORT_FROM_CONFIG};"
     log "  this run's tunnel is on port ${PROXY_PORT}."
   else
+    local _fp_before; _fp_before="$(_file_fingerprint "${_OPENCODE_SCOPE_PATH}")"
     handle_config_file "${_OPENCODE_SCOPE_PATH}" "OpenCode config (${_OPENCODE_SCOPE_NAME})" write_opencode_config
+    if [ "$(_file_fingerprint "${_OPENCODE_SCOPE_PATH}")" != "$_fp_before" ]; then
+      _OPENCODE_CONFIG_CHANGED=1
+    fi
   fi
 }
 
@@ -7050,6 +7296,11 @@ do_post_tunnel_for_cli_tool() {
       setup_opencode_cli_tool
       _post_tunnel_summary
       log "OpenCode is installed and configured for this proxy.  Run: opencode"
+      # Only when OpenCode would see something new: `run opencode` passes
+      # through here every launch, and an unchanged config needs no restart.
+      if [ "$_OPENCODE_CONFIG_CHANGED" = 1 ] || [ "$_OPENCODE_MIGRATED" = 1 ]; then
+        _opencode_offer_service_restart
+      fi
       log "Other OpenAI-compatible clients can target http://localhost:${PROXY_PORT}/v1"
       log "  with Authorization: Bearer ${ANL_USERNAME}"
       _check_env_shadow_and_warn opencode
@@ -7255,7 +7506,7 @@ _client_common_setup() {
   if [ "$with_opencode_setup" = 1 ] \
      && [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
     local _ppc_choice
-    _ppc_choice="$(prompt_port_choice "$PROXY_PORT" "$PORT_FROM_CONFIG" "OpenCode config (~/.config/opencode/config.json baseURL)")"
+    _ppc_choice="$(prompt_port_choice "$PROXY_PORT" "$PORT_FROM_CONFIG" "OpenCode config (~/.config/opencode/opencode.json baseURL)")"
     case "$_ppc_choice" in
       abort)
         # Sentinel, not die: prompt_port_choice runs inside $() where
@@ -8833,7 +9084,7 @@ extract_available_internal_names() {
   fi
 }
 
-# extract_configured_internal_names: reads ~/.config/opencode/config.json and
+# extract_configured_internal_names: reads ~/.config/opencode/opencode.json and
 # prints the keys under provider.argo.models, one per line.
 extract_configured_internal_names() {
   local cfg="${OPENCODE_CONFIG}"
@@ -8977,7 +9228,7 @@ gather_summary() {
     fi
   fi
 
-  # Configured models from ~/.config/opencode/config.json
+  # Configured models from ~/.config/opencode/opencode.json
   local cfg_names avail_names
   cfg_names="$(extract_configured_internal_names || true)"
   if [ -n "$cfg_names" ]; then
@@ -9195,6 +9446,15 @@ render_summary() {
   local _shown_cfg=0
   if [ -f "$OPENCODE_CONFIG" ]; then
     lines+=("OpenCode config  : ${OPENCODE_CONFIG}"); _shown_cfg=1
+    # D-036: report, never fix, from a read-only verb.
+    if _opencode_legacy_name_only; then
+      if [ "$(_opencode_major_version)" -ge 2 ] 2>/dev/null; then
+        lines+=("  !! OpenCode 2 does NOT read this file -- no argo models will show.")
+      else
+        lines+=("  !! Old name: OpenCode 2 will not read it once you upgrade.")
+      fi
+      lines+=("     Fix: $(_user_cmd_name) configure --cli-tool opencode")
+    fi
   fi
   if [ -f "$CLAUDECODE_GLOBAL_CONFIG" ]; then
     lines+=("Claude Code cfg  : ${CLAUDECODE_GLOBAL_CONFIG}"); _shown_cfg=1
@@ -9249,6 +9509,11 @@ render_summary() {
     if [ ! -f "${OPENCODE_CONFIG}" ]; then
       lines+=("OpenCode config not yet written. Run  '$(basename "$0") client'")
       lines+=("  to install OpenCode and write its config, then 'opencode' to use it.")
+    elif _opencode_legacy_name_only; then
+      # D-036: the config exists under the pre-v3.5.0 name; "run opencode"
+      # would be wrong advice on OpenCode 2, which cannot see it.
+      lines+=("Run  '$(_user_cmd_name) configure --cli-tool opencode'  to move the")
+      lines+=("  OpenCode config to opencode.json (OpenCode 2 reads only that name).")
     elif [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ] || [ "$missing" -gt 0 ]; then
       local hint=""
       if [ "$missing" -gt 0 ] && [ "$SUM_CFG_ORPHAN_COUNT" -gt 0 ]; then
@@ -9492,7 +9757,7 @@ EOF
 # ============================================================================
 # SECTION: 22. UPDATE-MODELS + LIST-MODELS (mode_update_models, mode_list_models)
 # ============================================================================
-# Refreshes provider.argo.models in ~/.config/opencode/config.json from the
+# Refreshes provider.argo.models in ~/.config/opencode/opencode.json from the
 # live /v1/models endpoint, preserving everything else in the config.
 mode_update_models() {
   # Tool-aware (was OpenCode-only). `update-models` refreshes a client's
@@ -9530,6 +9795,7 @@ mode_update_models() {
       die "update-models: unknown --cli-tool '${_umt}'. Known: $(cli_tool_known_names). Only 'opencode' supports update-models today." ;;
   esac
 
+  _migrate_opencode_global_config_name
   local cfg="${OPENCODE_CONFIG}"
 
   # Hard requirement: jq. Anything less is brittle for in-place JSON surgery.
@@ -9723,12 +9989,18 @@ EOF
        '.provider.argo.models = $new' "$ARGO_SOURCE_CFG" > "$1"
   }
 
+  local _fp_before; _fp_before="$(_file_fingerprint "$cfg")"
   handle_config_file "$cfg" "OpenCode config (models block)" _writer_models_update
 
   unset -f _writer_models_update
   unset ARGO_NEW_MODELS_BLOCK ARGO_SOURCE_CFG
 
-  ok "Done. Restart OpenCode to pick up the new model list."
+  if [ "$(_file_fingerprint "$cfg")" != "$_fp_before" ] || [ "$_OPENCODE_MIGRATED" = 1 ]; then
+    ok "Done. Restart OpenCode to pick up the new model list."
+    _opencode_offer_service_restart
+  else
+    ok "Done. OpenCode config unchanged."
+  fi
 }
 
 # ----------------------------------------------------------------------------
@@ -9759,7 +10031,7 @@ EOF
 #     Pass --include-embeddings to include them.
 #
 # Cross-reference column ("Configured?"):
-#   * present when ~/.config/opencode/config.json exists.
+#   * present when ~/.config/opencode/opencode.json exists.
 #   * three states: 'yes' (present + served), 'no' (served but not in cfg),
 #     'orphan' (in cfg but NOT served -- this would be DROPPED by a
 #     default update-models run).
@@ -10662,6 +10934,7 @@ update_opencode_cli_tool() {
         log "Brew-managed install detected; running 'brew upgrade sst/tap/opencode'..."
         if brew upgrade sst/tap/opencode; then
           ok "OpenCode upgraded: $(_extract_version "$(opencode --version 2>/dev/null)")."
+          _opencode_after_upgrade
           return 0
         fi
         err "brew upgrade failed."
@@ -10675,10 +10948,21 @@ update_opencode_cli_tool() {
   if curl -fsSL https://opencode.ai/install | bash; then
     local _v; _v="$(_extract_version "$(opencode --version 2>/dev/null || true)")"
     ok "OpenCode upgraded: ${_v:-unknown}."
+    _opencode_after_upgrade
     return 0
   fi
   err "OpenCode upgrade failed (upstream installer returned non-zero)."
   return 1
+}
+
+# _opencode_after_upgrade: an upgrade can cross the 1.x -> 2.x boundary,
+# after which the pre-v3.5.0 config name is invisible (D-036). Migrate, and
+# offer the background-service restart OpenCode 2 needs to see any change.
+_opencode_after_upgrade() {
+  _migrate_opencode_global_config_name
+  if [ "$_OPENCODE_MIGRATED" = 1 ]; then
+    _opencode_offer_service_restart
+  fi
 }
 
 # ----------------------------------------------------------------------------
@@ -11107,15 +11391,22 @@ try:
 except Exception:
     sys.exit(0)
 for path, meta in (data.get("configs") or {}).items():
+    # D-036: a config we renamed (OpenCode config.json -> opencode.json)
+    # carries legacy_path. Its pre-rename backups live under the old name,
+    # and the old name is now our compat symlink, which restore removes.
+    legacy = meta.get("legacy_path") or ""
     if meta.get("created_by_us"):
         print(f"delete\t{path}\t")
     else:
         # pre-existing: restore the newest backup if any exist.
-        baks = sorted(glob.glob(path + ".bak.*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+        cands = glob.glob(path + ".bak.*") + (glob.glob(legacy + ".bak.*") if legacy else [])
+        baks = sorted(cands, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
         if baks:
             print(f"restore\t{path}\t{baks[0]}")
         else:
             print(f"none\t{path}\t")
+    if legacy and os.path.islink(legacy) and os.path.realpath(legacy) == os.path.realpath(path):
+        print(f"delete\t{legacy}\t")
 PYEOF
 }
 
@@ -11353,7 +11644,10 @@ mode_clean() {
   listener_pid="$( { lsof -nPi ":${PROXY_PORT}" -sTCP:LISTEN -t 2>/dev/null || true; } | head -n1)"
 
   # Local backups we left behind
-  local oc_backups=""; oc_backups="$(ls -1 "${OPENCODE_CONFIG}.bak."* 2>/dev/null || true)"
+  # D-036: both names -- the current opencode.json and the pre-v3.5.0
+  # config.json (whose backups were never renamed).
+  local oc_backups=""; oc_backups="$(ls -1 "${OPENCODE_GLOBAL_CONFIG}.bak."* 2>/dev/null || true)"
+  local oc_legacy_backups=""; oc_legacy_backups="$(ls -1 "${OPENCODE_LEGACY_GLOBAL_CONFIG}.bak."* 2>/dev/null || true)"
 
   # ---- Build and print the plan -----------------------------------------
   # Risky-policy label must mirror _clean_risky_file's decision tree:
@@ -11404,8 +11698,10 @@ LOCAL  -  safe (fully owned by this script)
   SSH multiplex sockets in ${SSH_MUX_DIR}/  $( [ "$mux_count" -gt 0 ] && echo "(${mux_count} present)" || echo "(none)" )
 
 LOCAL  -  risky (created/edited by us, but path is owned by another tool)
-  ~/.config/opencode/config.json               $( [ -f "${OPENCODE_CONFIG}" ] && echo "(present, ${risky_file_action})" || echo "(absent)" )
-  ~/.config/opencode/config.json.bak.*         $( [ -n "$oc_backups" ] && printf '(%d backup file(s), %s)' "$(printf '%s\n' "$oc_backups" | wc -l | tr -d ' ')" "${risky_bak_action}" || echo "(none)" )
+  ~/.config/opencode/opencode.json             $( [ -f "${OPENCODE_GLOBAL_CONFIG}" ] && echo "(present, ${risky_file_action})" || echo "(absent)" )
+  ~/.config/opencode/opencode.json.bak.*       $( [ -n "$oc_backups" ] && printf '(%d backup file(s), %s)' "$(printf '%s\n' "$oc_backups" | wc -l | tr -d ' ')" "${risky_bak_action}" || echo "(none)" )
+  ~/.config/opencode/config.json (pre-v3.5.0)  $( if [ -L "${OPENCODE_LEGACY_GLOBAL_CONFIG}" ]; then echo "(compat symlink, removed with opencode.json)"; elif [ -f "${OPENCODE_LEGACY_GLOBAL_CONFIG}" ]; then echo "(present, ${risky_file_action})"; else echo "(absent)"; fi )
+  ~/.config/opencode/config.json.bak.*         $( [ -n "$oc_legacy_backups" ] && printf '(%d backup file(s), %s)' "$(printf '%s\n' "$oc_legacy_backups" | wc -l | tr -d ' ')" "${risky_bak_action}" || echo "(none)" )
 
 EOF
 
@@ -11496,9 +11792,21 @@ EOF
 
   # Local: risky configs
   log "Reviewing risky local files..."
-  _clean_risky_file "${OPENCODE_CONFIG}" \
+  _clean_risky_file "${OPENCODE_GLOBAL_CONFIG}" \
     "OpenCode config" \
     "We wrote/edited the 'argo' provider block. The rest of the file may be your own (other providers, OpenCode preferences). Recommended: [r]estore from backup if you have one, otherwise [k]eep."
+  # Pre-v3.5.0 name (D-036). A real file means the migration has not run;
+  # its backups outlive the rename either way. The compat symlink goes only
+  # once it dangles -- i.e. when opencode.json was just removed.
+  if { [ -f "${OPENCODE_LEGACY_GLOBAL_CONFIG}" ] && [ ! -L "${OPENCODE_LEGACY_GLOBAL_CONFIG}" ]; } \
+     || [ -n "$oc_legacy_backups" ]; then
+    _clean_risky_file "${OPENCODE_LEGACY_GLOBAL_CONFIG}" \
+      "OpenCode config (pre-v3.5.0 name)" \
+      "Older argo-anywhere wrote this name; OpenCode 2 ignores it. Recommended: [k]eep, then run 'configure --cli-tool opencode' to migrate it."
+  fi
+  if [ -L "${OPENCODE_LEGACY_GLOBAL_CONFIG}" ] && [ ! -e "${OPENCODE_LEGACY_GLOBAL_CONFIG}" ]; then
+    _clean_rm "${OPENCODE_LEGACY_GLOBAL_CONFIG}"
+  fi
 
   # aider global config + its sibling model-settings file (Phase 5a).
   # Only the global scope is swept here; project-scoped aider configs live
@@ -11788,7 +12096,7 @@ Subcommands:
                   Does NOT touch the remote argo-proxy session.
   clean           Remove every artifact this script created (local + remote).
                   Prints an enumerated plan, requires typing 'yes' to proceed.
-                  Risky files (~/.config/opencode/config.json,
+                  Risky files (~/.config/opencode/opencode.json,
                   ~/.config/argoproxy/config.yaml) are asked about per file.
                   Use --dry-run to preview, --local-only to skip the remote,
                   -y / --yes for non-interactive runs (keeps risky files by
@@ -11835,7 +12143,7 @@ Options:
                        the cached node. Canonical env: ARGO_ANYWHERE_NODE.
                        Warns if HOST is not in the script's ANL_NODES list.
   --port N             Port override for THIS run only. If it disagrees with
-                       ~/.config/opencode/config.json, you'll be asked whether
+                       ~/.config/opencode/opencode.json, you'll be asked whether
                        to migrate the config or use the config's port instead.
                        Canonical env: ARGO_ANYWHERE_PORT.
   --no-jump            Skip the jump host (${ANL_JUMP}); SSH directly
@@ -11901,7 +12209,7 @@ Options:
                          opencode + project   -> <git-root>/opencode.json
                                     (per-repo; cwd-anchored; falls back to cwd
                                     when not in a git repo).
-                         opencode + global    -> ~/.config/opencode/config.json
+                         opencode + global    -> ~/.config/opencode/opencode.json
                                     (all directories).
                        Default policy (per PLAN.md D-017, Phase 4 v2.2.0):
                          * claudecode is HYBRID: explicit --scope wins; else
@@ -12049,7 +12357,7 @@ WHERE THINGS LIVE
 Laptop:
   ${HOME}/.config/argo_anywhere/user      cached ANL username
   ${HOME}/.config/argo_anywhere/node      last-used compute node
-  ${HOME}/.config/opencode/config.json    OpenCode config (this script writes it)
+  ${HOME}/.config/opencode/opencode.json    OpenCode config (this script writes it)
 
 ANL compute node (after first run):
   \$HOME/${REMOTE_SELF}                    pushed copy of this script
@@ -12063,7 +12371,7 @@ Network path while running:
 
 CONFIG: WHAT IF SOMETHING ALREADY EXISTS
 ----------------------------------------
-For both ~/.config/opencode/config.json (laptop) and
+For both ~/.config/opencode/opencode.json (laptop) and
 ~/.config/argoproxy/config.yaml (compute node), the script asks before changing
 anything. Choices presented:
   [k] keep existing  (default)
@@ -12171,7 +12479,7 @@ install + config. It just brings up the tunnel (or local proxy on a
 compute node) and blocks. Useful when you:
 
   * manage your own client configs and don't want the script touching
-    ~/.config/opencode/config.json;
+    ~/.config/opencode/opencode.json;
   * want a tunnel running while configuring multiple clients in
     other terminals;
   * are prototyping with a custom HTTP client that needs the /v1
@@ -12184,7 +12492,7 @@ PORT POLICY
 The port is resolved at startup from these sources, in order:
   1. --port N                        (CLI flag, this run only)
   2. ARGO_ANYWHERE_PORT env var
-  3. baseURL in ~/.config/opencode/config.json   (the source of truth)
+  3. baseURL in ~/.config/opencode/opencode.json   (the source of truth)
   4. PROXY_PORT_DEFAULT (=${PROXY_PORT_DEFAULT})        (built-in fallback)
 
 If --port or the env var disagree with config.json, 'client' will ask whether
@@ -12278,7 +12586,7 @@ Refresh the model list in your OpenCode config from the live proxy:
   bash ${script_name} update-models
   # Replaces provider.argo.models with everything /v1/models advertises
   # (excluding embeddings). Asks before overwriting; preserves the rest of
-  # ~/.config/opencode/config.json. Requires jq.
+  # ~/.config/opencode/opencode.json. Requires jq.
 
 Tear down only the local tunnel:
   bash ${script_name} stop
@@ -12353,7 +12661,7 @@ TROUBLESHOOTING
       bash ${script_name} stop
     Or pick a different port for this run:
       bash ${script_name} --port <new_port> client
-    (You'll be asked whether to also migrate ~/.config/opencode/config.json.)
+    (You'll be asked whether to also migrate ~/.config/opencode/opencode.json.)
 
 "Port N on <node> is held by pid X owned by '<other>', not '<you>'"
     Another user's argo-proxy is on the same port on the same compute node.
@@ -12377,10 +12685,10 @@ TROUBLESHOOTING
     node. Check 'status' first; if local tunnel is fine but the proxy is gone,
     just re-run 'client' -- the server mode is idempotent.
 
-config.json was clobbered or merged badly
-    Each write creates ~/.config/opencode/config.json.bak.<timestamp> when
+opencode.json was clobbered or merged badly
+    Each write creates ~/.config/opencode/opencode.json.bak.<timestamp> when
     you choose [b]ackup. Restore with:
-      cp ${HOME}/.config/opencode/config.json.bak.<ts> ${HOME}/.config/opencode/config.json
+      cp ${HOME}/.config/opencode/opencode.json.bak.<ts> ${HOME}/.config/opencode/opencode.json
 
 REFERENCES
 ----------
@@ -12661,7 +12969,7 @@ main() {
     *)
       if [ -n "$PORT_FROM_CONFIG" ] && [ "$PROXY_PORT" != "$PORT_FROM_CONFIG" ]; then
         warn "Port override (${PROXY_PORT}, source: ${PORT_SOURCE}) differs from"
-        warn "  ~/.config/opencode/config.json baseURL (${PORT_FROM_CONFIG})."
+        warn "  ~/.config/opencode/opencode.json baseURL (${PORT_FROM_CONFIG})."
         warn "  This run uses ${PROXY_PORT}. To reconcile, run 'client' (offers migration)."
       fi
       ;;

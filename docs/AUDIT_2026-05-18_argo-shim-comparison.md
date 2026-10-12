@@ -570,7 +570,7 @@ My scrutiny commentary appears in Section 3.
 > |:---|:---|
 > | In-memory-only SSH failure tracker | Resets on restart; circumventable. argo-anywhere D-012 is the correct design. |
 > | Uses `%C` ControlPath token | Fragile on jump-host name rewriting. argo-anywhere switched to `%r-%h-%p`. |
-> | `OPENCODE_CONFIG` hardcoded to `~/.config/opencode/opencode.json` | OpenCode's actual config file is `~/.config/opencode/config.json`. The file will not be found for most users. |
+> | `OPENCODE_CONFIG` hardcoded to `~/.config/opencode/opencode.json` | OpenCode's actual config file is `~/.config/opencode/config.json`. The file will not be found for most users. *(Withdrawn 2026-10-12: backwards. `opencode.json` is canonical and the only name OpenCode 2 reads; see AS-03 and PLAN.md D-036.)* |
 > | No server-side persistence | Proxy dies when the UAN session ends; user must restart manually. No screen/tmux equivalent. |
 > | `--no-auth` workaround for project-scope conflict | Disabling auth at the shim level is a blunt instrument; argo-anywhere's scope framework + conflict detection is the right architectural fix. |
 > | No multi-tool support | OpenCode path (`--opencode`) is bolted on top of the Claude Code proxy. No pluggable per-tool API contract. |
@@ -866,7 +866,7 @@ back if we ever publish or cross-link the comparative audit:
 |:--|:--|:--|
 | AS-01 | **Persistent on-disk SSH-failure lock with TTL + exponential backoff** (mirror our D-012) | argo-shim's in-memory tracker is genuinely circumventable; this is a real security regression. |
 | AS-02 | **`%r-%h-%p` `ControlPath` tokens** (avoid `%C` fragility with `ssh_config` rewrites) | Direct port; trivial fix. |
-| AS-03 | **`OPENCODE_CONFIG` hardcoded path is wrong** — `~/.config/opencode/opencode.json` doesn't exist; the real path is `~/.config/opencode/config.json`. | File upstream issue / PR. |
+| AS-03 | **`OPENCODE_CONFIG` hardcoded path is wrong** — `~/.config/opencode/opencode.json` doesn't exist; the real path is `~/.config/opencode/config.json`. **WITHDRAWN 2026-10-12:** this finding was backwards. `opencode.json` is OpenCode's canonical name, and OpenCode 2 reads *only* that name. argo-shim was right; argo-anywhere was the one writing a deprecated name. See PLAN.md D-036. | ~~File upstream issue / PR.~~ None. |
 
 These are useful credibility-builders if we ever cross-publish, but
 no action required from `argo-anywhere`. Listed here for completeness

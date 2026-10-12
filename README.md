@@ -77,7 +77,7 @@ CLI-only path.
 
 ## Heads up before you start
 
-Two things worth knowing in the first thirty seconds:
+Three things worth knowing in the first thirty seconds:
 
 1. **Extended thinking works in Claude Code, but not in aider or OpenCode.**
    Claude Code needs nothing from you — it picks the right thinking mode per
@@ -97,6 +97,14 @@ Two things worth knowing in the first thirty seconds:
    old "`curl` one `.sh` and `bash` it" route is retired as the primary route
    — though you can still inspect or fork the raw engine (see
    [Running the raw engine](#running-the-raw-engine-fork-mode)).
+
+3. **On OpenCode 2, use argo-anywhere v3.5.0 or later.** OpenCode 2 reads only
+   `~/.config/opencode/opencode.json`; earlier argo-anywhere releases wrote
+   `config.json`, which OpenCode 2 ignores, so no argo models appear. Run
+   `argo-anywhere configure --cli-tool opencode` once to migrate. OpenCode 2
+   also caches config in a background service: after a config change, accept
+   the restart prompt or run `opencode service restart`. Details in
+   [`docs/UPGRADING.md`](docs/UPGRADING.md).
 
 ## Install
 
@@ -214,14 +222,14 @@ Section 4 for the rationale.
 
 ## Status
 
-**v3.4.0 is the current release** — `pipx install argo-anywhere` installs it.
+**v3.5.0 is the current release** — `pipx install argo-anywhere` installs it.
 The installable unit is the Python package (Model A; design decisions
 D-026..D-030): the package owns the runtime, vendors the bash engine verbatim,
 and ships the web UI and native app alongside the CLI. Releases are published
 from CI via PyPI Trusted Publishing on their version tag.
 
 Per-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the design decision
-behind each change (D-001..D-035) lives in [`PLAN.md`](PLAN.md). This section
+behind each change (D-001..D-036) lives in [`PLAN.md`](PLAN.md). This section
 names the current release and points at those two documents rather than
 restating them — it drifted four releases behind by trying to be a changelog
 before one existed.
@@ -231,8 +239,8 @@ before one existed.
 > **another user's** argo-proxy — it answers the health check identically, so
 > the tool reported success while your requests went out under their Argo
 > identity. You would see an Argo authentication error, or nothing at all.
-> v3.4.0 refuses to route through a proxy it cannot attribute to you, and
-> offers to move you to a free port. **Skip v3.3.0** — it shipped three
+> v3.4.0 and later refuse to route through a proxy they cannot attribute to
+> you, and offer to move you to a free port. **Skip v3.3.0** — it shipped three
 > regressions and was never superseded on PyPI until now, so it is the
 > version most people are running. Details in
 > [`CHANGELOG.md`](CHANGELOG.md); the full analysis is **D-034** in
@@ -382,7 +390,7 @@ Pass one to `--cli-tool` (or pick it interactively):
 - **`opencode`** — [OpenCode](https://opencode.ai/), an OpenAI-compatible
   client. Supports `--scope project|global` (default `global`). Project scope
   writes `<git-root>/opencode.json` (or `<cwd>/opencode.json` outside a git
-  repo); global writes `~/.config/opencode/config.json`.
+  repo); global writes `~/.config/opencode/opencode.json`.
 - **`claudecode`** — [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
   (uses `ANTHROPIC_BASE_URL`). Supports `--scope project|global`; default is
   **hybrid** per [PLAN.md D-017](PLAN.md) (project when `~/.claude.json` is
@@ -530,7 +538,7 @@ the tables and [Running the raw engine](#running-the-raw-engine-fork-mode).
 | `~/.config/argo_anywhere/port` | Cached proxy port (transport-layer state per D-020) |
 | `~/.config/argo_anywhere/manifest.json` | **Install manifest** (D-025): records, at first touch, whether each client config pre-existed (so `uninstall` can restore originals) and which tool binaries argo-anywhere installed (so it only removes its own) |
 | `~/.config/argo_anywhere/ssh-fail-lock`, `…-count` | SSH-failure-tracker state (created only after a lock fires); see [SSH failure protection](#ssh-failure-protection-cspo-defense) |
-| `~/.config/opencode/config.json` | OpenCode global config (global scope) |
+| `~/.config/opencode/opencode.json` | OpenCode global config (global scope) |
 | `<git-root>/opencode.json` or `<cwd>/opencode.json` | OpenCode project-scope config |
 | `~/.claude/settings.json` *or* `./.claude/settings.local.json` | Claude Code config; see [Claude Code config scope](#claude-code-config-scope-project-vs-global) |
 | `~/.aider.conf.yml` (+ `.aider.model.settings.yml`) *or* `<git-root>/.aider.conf.yml` | aider config; the sibling settings file disables `temperature` for reasoning/opus/gpt-5 models |
@@ -990,7 +998,7 @@ argo-anywhere clean -y --purge               # delete EVERYTHING, including conf
 
 - **safe** (state dir incl. port cache, mux sockets, our SSH tunnel, the remote
   venv) — removed on confirmation.
-- **risky** (`~/.config/opencode/config.json`, `~/.aider.conf.yml`,
+- **risky** (`~/.config/opencode/opencode.json`, `~/.aider.conf.yml`,
   `~/.aider.model.settings.yml`, the on-node `~/.config/argoproxy/config.yaml`,
   and their `.bak.*` files) — per-file `[k]eep / [r]estore-from-backup /
   [d]elete / [b]ackups-only` prompt, or `--purge` / `--purge-backups` for the
@@ -1016,7 +1024,7 @@ run `argo-anywhere help`.
 | [`docs/TESTING.md`](docs/TESTING.md) | Maintainers/contributors: live-verify the `client` path before tagging. |
 | [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | The fix trail across v2.0 → v2.2 (43 findings; 42 closed). |
 | [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Comparative audit vs. `argo-shim`, the Phase-C-rejection rationale, slide-ready summary. |
-| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-035 + roadmap. |
+| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-036 + roadmap. |
 | [`AGENTS.md`](AGENTS.md) | AI coding tools working on this codebase: conventions + skill loading. |
 
 ## Upgrading
@@ -1101,7 +1109,7 @@ Key project files:
 - [`AGENTS.md`](AGENTS.md) — canonical project conventions for AI coding tools.
   [`CLAUDE.md`](CLAUDE.md) is a symlink to it for Claude Code's discovery.
 - [`PLAN.md`](PLAN.md) — plan-of-record (scope, architecture, milestones,
-  design decisions D-001..D-035).
+  design decisions D-001..D-036).
 - [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) — active fresh-eyes
   audit (43 findings; 42 closed). New closures append a STATUS block in place.
 - [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)

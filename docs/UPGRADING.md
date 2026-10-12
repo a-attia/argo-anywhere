@@ -25,8 +25,30 @@ this section is reference detail you only need if something surprises you.
 
 ### Coming from any v3.x on the PyPI package
 
-`pipx upgrade argo-anywhere` is the whole procedure — no state migration in any
-v3 → v3 step.
+`pipx upgrade argo-anywhere` is the whole procedure. The one state migration
+in any v3 → v3 step (v3.5.0, the OpenCode config file rename below) runs by
+itself the next time you configure OpenCode.
+
+> **Upgraded OpenCode to 2.x and the argo models disappeared?** OpenCode 2
+> reads only `~/.config/opencode/opencode.json`; argo-anywhere up to v3.4.0
+> wrote `config.json`, which OpenCode 2 ignores without any error. On v3.5.0+
+> run once:
+>
+> ```bash
+> argo-anywhere configure --cli-tool opencode
+> ```
+>
+> It renames the file (leaving `config.json` as a symlink to the new name) and
+> offers to restart OpenCode's background service, which caches config and
+> will not see the change until it restarts. Still on v3.4.0 or earlier? This
+> does the same by hand:
+>
+> ```bash
+> ln -s config.json ~/.config/opencode/opencode.json && opencode service restart
+> ```
+>
+> Nothing to do if you are still on OpenCode 1.x: v3.5.0 migrates the file
+> anyway, so a later OpenCode upgrade does not break anything.
 
 > **If you are on v3.3.0, upgrade now.** It shipped three regressions: `[a]
 > abort` at a prompt did not abort, a failed run could leave a wrong port

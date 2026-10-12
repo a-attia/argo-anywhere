@@ -1322,9 +1322,14 @@
         note.setAttribute('hidden', ''); return;
       }
       const stale = [];
+      const legacy = [];
       box.innerHTML = tools.map((t) => {
         let cls, label;
-        if (!t.configured)              { cls = 'unset'; label = 'not set up'; }
+        // D-036: a config found only under its pre-v3.5.0 name. Checked first
+        // because a matching port would otherwise render "ready" for a file
+        // OpenCode 2 never reads -- the exact field report.
+        if (t.legacy_name)              { cls = 'stale'; label = 'old file name'; legacy.push(t.tool); }
+        else if (!t.configured)         { cls = 'unset'; label = 'not set up'; }
         else if (port && t.port === port) { cls = 'ready'; label = 'ready'; }
         else if (port)                  { cls = 'stale'; label = ':' + t.port; stale.push(t.tool); }
         else                            { cls = 'unset'; label = ':' + t.port; }
@@ -1332,7 +1337,16 @@
                `<span class="cstate">${_escHtml(label)}</span></span>`;
       }).join('');
       // Only name a fix when there is one to name.
-      if (stale.length) {
+      if (legacy.length) {
+        // The Fix button only pre-fills the launcher; the user still presses
+        // Launch, so no write happens from the dashboard (status stays
+        // read-only; D-034 / D-036).
+        note.innerHTML = `${_escHtml(legacy[0])} config uses the old file name ` +
+          `(<code>config.json</code>), which OpenCode 2 does not read. ` +
+          `<button type="button" class="stop-btn" id="legacyFixBtn">Fix…</button>`;
+        el('legacyFixBtn').addEventListener('click', () => openConfigureFix(legacy[0]));
+        note.removeAttribute('hidden');
+      } else if (stale.length) {
         note.textContent = stale.length === 1
           ? `${stale[0]} points at a different port — run: argo-anywhere configure ${stale[0]}`
           : `${stale.join(', ')} point at a different port — run: ` +
@@ -1362,7 +1376,7 @@
         if (m.is_orphan) {
           badges.push(`<span class="m-badge oc-orph" title="Listed in your OpenCode config, but the upstream doesn't serve it (probably renamed/retired)">orphan in opencode config</span>`);
         } else if (m.in_opencode_config) {
-          badges.push(`<span class="m-badge oc-yes" title="Listed in ~/.config/opencode/config.json's models array (OpenCode's picker will show it)">in opencode config</span>`);
+          badges.push(`<span class="m-badge oc-yes" title="Listed in your OpenCode config's models (~/.config/opencode/opencode.json; OpenCode's picker will show it)">in opencode config</span>`);
         }
         // Absent means "not in the OpenCode picker" -- deliberately NOT
         // shown as a red/negative badge; not-in-OpenCode's-list is the
@@ -1577,6 +1591,18 @@
     // identity so the user only has to change what differs. Differentiates the
     // two connect paths the user asked about: quick (bare `connect`) vs.
     // advanced (choose node / username / jump host first).
+    // D-036: "Fix…" for a legacy-named tool config. Pre-fills `configure
+    // <tool> --scope global` (the migration runs inside configure) and leaves
+    // the Launch click to the user.
+    function openConfigureFix(tool) {
+      openLaunch();
+      el('lVerb').value = 'configure';
+      el('lVerb').dispatchEvent(new Event('change'));
+      el('lTool').value = tool;
+      el('lScope').value = 'global';
+      updateOverridesHint();
+    }
+
     function openConnectWithOptions() {
       // Run the standard open first (cwd default, hint refresh, show sheet).
       openLaunch();

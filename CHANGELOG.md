@@ -12,9 +12,43 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
-## Unreleased
+## v3.5.0 — 2026-10-12
+
+**Upgrade if you use OpenCode 2.** OpenCode 2 ignores the config file name
+every earlier argo-anywhere release wrote, so after an OpenCode upgrade the
+argo models silently disappear. This release writes the right name and
+migrates the old one for you; run `argo-anywhere configure --cli-tool
+opencode` once. Engine `SCRIPT_VERSION` → `2.6.0`.
 
 ### Fixed
+
+- **OpenCode 2 showed no argo models.** OpenCode 2 reads its global config
+  only from `~/.config/opencode/opencode.json`; argo-anywhere wrote
+  `config.json`, which OpenCode 1.x accepted and OpenCode 2 ignores without
+  any error. The config is now written as `opencode.json`, and an existing
+  `config.json` is migrated the next time you `configure`, `run`,
+  `update-models` or `update opencode` (D-036). **To fix it now, run once:**
+  `argo-anywhere configure --cli-tool opencode`.
+  - The migration runs whatever OpenCode version you have, so users still on
+    OpenCode 1.x are covered before they upgrade.
+  - It never deletes anything. `config.json` becomes a symlink to the new
+    file; if both files existed, they are merged without dropping a model
+    and the old one is kept as `config.json.migrated.<timestamp>`.
+  - It will not touch an `opencode.jsonc` (rewriting it would strip your
+    comments). It tells you what to copy by hand instead.
+  - OpenCode 2 caches config in a background service, so argo-anywhere now
+    offers `opencode service restart` when it has actually changed the config
+    (default: later, since it interrupts open sessions). An unchanged config
+    gets no prompt, so `run opencode` does not ask on every launch.
+  - `status` and the web dashboard flag a config still under the old name
+    and say how to fix it; they do not rename anything themselves. The
+    dashboard's **Fix…** button pre-fills the launcher.
+  - `uninstall --restore-configs` and `clean` know both names, so backups
+    made before the rename are still found.
+
+  Claude Code (2.1.296) and aider (0.86.2, the latest release) were checked
+  for the same kind of breakage; none found. Claude Code 2.1.265–2.1.267 are
+  reported to fail against custom endpoints; see `docs/LIMITATIONS.md`.
 
 - **Documentation: the warning that `claude-opus-4-7` is broken is
   withdrawn.** It was fixed upstream in 2026-06 (`llm-rosetta 0.6.10`

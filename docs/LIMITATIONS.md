@@ -255,7 +255,7 @@ is more auditable.
 
 The `handle_config_file` k/b/d/m/a prompt offers `[m]erge: only
 update keys this script manages (requires jq for JSON)`. For
-`~/.config/opencode/config.json` the merge actually works (jq +
+`~/.config/opencode/opencode.json` the merge actually works (jq +
 preserve other top-level keys). For
 `~/.config/argoproxy/config.yaml` the merge prints "YAML merge not
 supported here" and the user must pick `[b]` or `[k]`.
@@ -346,6 +346,29 @@ gateway, `Oaklight/argo-proxy`, the AI CLI tools themselves) rather
 than in argo-anywhere. They surface through argo-anywhere because
 that's the layer the user invokes, but the root cause + the fix
 sit upstream.
+
+### OpenCode 2 caches config in a background service
+
+OpenCode 2 runs a background service (`opencode service status`) that caches
+config per directory. Measured 2026-10-12 on OpenCode 2.0.27: a config file
+created after the service first saw a directory stayed invisible to it
+(`opencode models` showed 0 argo models) until the service restarted. A fresh
+directory with the same file showed all 34.
+
+So any change argo-anywhere makes to an OpenCode config (`configure`,
+`update-models`, the v3.5.0 `config.json` → `opencode.json` rename) is
+invisible to a running OpenCode 2 until `opencode service restart`.
+argo-anywhere offers that restart at a terminal prompt, defaulting to *later*
+because a restart interrupts open OpenCode sessions; elsewhere it prints the
+command. OpenCode 1.x has no service and needs nothing.
+
+### Claude Code 2.1.265–2.1.267 failed against custom endpoints
+
+Third-party changelog aggregators report that these three Claude Code
+releases failed every turn against a third-party `ANTHROPIC_BASE_URL`, which
+is how argo-anywhere routes Claude Code. Fixed in 2.1.268/2.1.269. If argo
+"stopped working" in Claude Code and `claude --version` is in that range,
+upgrade Claude Code. Not reproduced by us directly.
 
 ### Extended thinking: what works where
 
