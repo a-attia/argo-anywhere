@@ -3,7 +3,8 @@
 **Status**: shipped in v3.5.0 (2026-10-12); live-verified by the maintainer
 on OpenCode 2.0.27 the same day (`configure` migrated the real config; all
 argo models visible after the service restart). Open questions resolved per
-the recommendations ([§8](#8-open-questions)); only Q6 remains open.
+the recommendations ([§8](#8-open-questions)). Q6 resolved 2026-10-12
+without a live test (see §8); on `main` after v3.5.0.
 **Owner**: Ahmed Attia. **Last updated**: 2026-10-12.
 **Target release**: v3.5.0 (engine `SCRIPT_VERSION` 2.5.0 → 2.6.0).
 **Earns**: D-036 (recorded in `PLAN.md`).
@@ -267,8 +268,17 @@ legacy-name row before `configure` and clears after. Claude Code smoke on
 ## 8. Open questions
 
 **Resolved 2026-10-12**: the maintainer accepted every recommendation below.
-Q1–Q5 are implemented as recommended. Q6 stays open until the v3.5.0 live
-pass, which needs a channel.
+Q1–Q5 are implemented as recommended.
+
+**Q6 resolved 2026-10-12, reframed.** The official environment-variable
+reference ([code.claude.com/docs/en/env-vars](https://code.claude.com/docs/en/env-vars))
+does not document `CLAUDE_CODE_USE_GATEWAY` at all; only a community gist
+mentions it, and marks itself unverified. It stays off the list. The real gap
+was elsewhere: the documented provider switches had grown from
+`CLAUDE_CODE_USE_BEDROCK` + `_VERTEX` (both already listed) to five.
+`_FOUNDRY`, `_ANTHROPIC_AWS` and `_MANTLE` were added to
+`claudecode_shadowing_env_vars`, by the same reasoning that listed Bedrock
+and Vertex. No live channel was needed.
 
 Implementation notes that differ from the plan text above:
 

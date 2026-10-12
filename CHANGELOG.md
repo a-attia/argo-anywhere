@@ -12,6 +12,21 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Claude Code: warn about every provider switch in your shell, not just
+  two.** Claude Code sends requests to another cloud provider instead of
+  argo when a `CLAUDE_CODE_USE_<provider>` variable is set. argo-anywhere
+  warned only for `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX`;
+  Claude Code now documents five. `CLAUDE_CODE_USE_FOUNDRY`,
+  `CLAUDE_CODE_USE_ANTHROPIC_AWS` and `CLAUDE_CODE_USE_MANTLE` are added, so
+  `configure` and `run` print the `unset` command for them too. The
+  undocumented `CLAUDE_CODE_USE_GATEWAY` is deliberately not on the list.
+
+---
+
 ## v3.5.0 — 2026-10-12
 
 **Upgrade if you use OpenCode 2.** OpenCode 2 ignores the config file name

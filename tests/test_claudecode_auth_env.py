@@ -457,3 +457,16 @@ def test_migrator_atomic_write_leaves_no_tempfile(tmp_path: Path) -> None:
     # Only the target exists; no sibling tempfile left behind.
     residue = [p.name for p in tmp_path.iterdir() if p != target]
     assert residue == [], f"stale tempfiles left: {residue}"
+
+
+def test_claudecode_shadowing_vars_cover_every_documented_provider_switch() -> None:
+    """Each CLAUDE_CODE_USE_<provider> routes Claude Code to that provider
+    instead of argo. Documented set as of 2026-10-12
+    (code.claude.com/docs/en/env-vars); only BEDROCK + VERTEX were listed
+    before, so a user with CLAUDE_CODE_USE_FOUNDRY=1 exported got no warning.
+    """
+    vars_ = set(_extract_shadowing_vars_for("claudecode"))
+    for switch in ("BEDROCK", "VERTEX", "FOUNDRY", "ANTHROPIC_AWS", "MANTLE"):
+        assert f"CLAUDE_CODE_USE_{switch}" in vars_, f"missing CLAUDE_CODE_USE_{switch}"
+    # Undocumented; deliberately not listed until Anthropic documents it.
+    assert "CLAUDE_CODE_USE_GATEWAY" not in vars_

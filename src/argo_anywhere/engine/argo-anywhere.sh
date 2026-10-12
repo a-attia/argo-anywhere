@@ -4436,8 +4436,16 @@ ensure_claudecode_installed() {
 # in the user's shell replaces whatever settings.json says. Kept in
 # sync with the writer above -- add/remove here whenever we start/stop
 # owning a new env key.
+#
+# The CLAUDE_CODE_USE_* entries are Claude Code's provider switches: any one
+# of them routes requests to that cloud provider instead of
+# ANTHROPIC_BASE_URL. 2026-10-12: the documented set
+# (code.claude.com/docs/en/env-vars) had grown from BEDROCK + VERTEX to
+# five; FOUNDRY, ANTHROPIC_AWS and MANTLE were added here. The undocumented
+# CLAUDE_CODE_USE_GATEWAY (seen only in third-party changelog summaries) is
+# deliberately absent until Anthropic documents what it does.
 claudecode_shadowing_env_vars() {
-  printf 'ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX'
+  printf 'ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_MANTLE'
 }
 
 # claudecode_scope_values: declare the legal values for --scope when
