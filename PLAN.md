@@ -7,9 +7,12 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: **v3.5.0 released** (2026-10-12): the **D-036** release —
-OpenCode 2 config-name migration (`config.json` → `opencode.json`). See
-CHANGELOG. Prior: **v3.4.0 released** (2026-08-13; carries the three v3.3.0
+**Status**: **v3.6.0 released** (2026-10-26): models that `argo-proxy`
+lists but refuses to route (stale routing table on a long-running proxy) are
+repaired by mutating verbs via `POST /refresh` and flagged by `status` /
+`list-models`. See CHANGELOG. Prior: **v3.5.0 released** (2026-10-12): the
+**D-036** release — OpenCode 2 config-name migration (`config.json` →
+`opencode.json`). Prior: **v3.4.0 released** (2026-08-13; carries the three v3.3.0
 regression fixes prepared as v3.3.1 — which was never published — plus a
 per-user derived default port, per-tool status in the web UI, and an
 actionable `connect`. See CHANGELOG. v3.3.0 should not be run.) Prior:

@@ -12,7 +12,7 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
-## Unreleased
+## v3.6.0 — 2026-10-26
 
 ### Fixed
 

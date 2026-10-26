@@ -222,7 +222,7 @@ Section 4 for the rationale.
 
 ## Status
 
-**v3.5.0 is the current release** — `pipx install argo-anywhere` installs it.
+**v3.6.0 is the current release** — `pipx install argo-anywhere` installs it.
 The installable unit is the Python package (Model A; design decisions
 D-026..D-030): the package owns the runtime, vendors the bash engine verbatim,
 and ships the web UI and native app alongside the CLI. Releases are published

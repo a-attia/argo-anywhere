@@ -70,7 +70,12 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.5.0 released 2026-10-12** — the **D-036** release:
+- **Status**: **v3.6.0 released 2026-10-26** — routing-table freshness:
+  mutating verbs `POST /refresh` so models `argo-proxy` lists are also
+  routable; `status` / `list-models` detect and flag listed-but-unroutable
+  models (see "Routing-table freshness invariant"). Engine
+  `SCRIPT_VERSION` → `2.7.0`.
+  Prior: **v3.5.0 released 2026-10-12** — the **D-036** release:
   OpenCode 2 reads only `opencode.json(c)`, so the global OpenCode config
   moves from `config.json` with an automatic migration, a background-service
   restart offer, and legacy-name reporting in `status` + the web UI. Also
@@ -315,7 +320,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: **v3.5.0** (2026-10-12). Release
+- **Current release**: **v3.6.0** (2026-10-26). Release
   history: [`CHANGELOG.md`](CHANGELOG.md) — the single source of
   truth for "what shipped when"; do not restate it here.
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
