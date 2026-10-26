@@ -823,11 +823,34 @@ opportunistically from four sites: `mode_tunnel`,
 - **Do not report "N new models" from the response.** `/refresh`
   reports *registry* counts — the table that was already right. The
   repair that fixed four 404ing models returned `57 → 57`.
-- Detecting the split-brain from `/v1/models` is impossible; the only
-  cheap oracle is a bogus-model request whose 404 names `Configured
-  models:`. That honesty detector is deferred, not rejected.
-
 Pinned by `tests/test_engine_routing_refresh.py`.
+
+**Detection (read-only verbs).** `/v1/models` cannot reveal the
+split-brain, so `_probe_proxy_routing` (next to `fetch_proxy_models`)
+requests a model that cannot exist. The 404 it gets back lists the
+routing table (`Configured models: ...`), and the probe diffs that
+against `/v1/models`. `gather_summary` calls it, so
+`status` downgrades to `CHECK`, counts *routable* rather than *listed*,
+and names the repair. `list-models` warns on stderr; its tsv/json
+schema is unchanged. Rules:
+
+- **Probe via `/v1/messages`, NEVER `/v1/chat/completions`.** The
+  OpenAI path fuzzy-matches unknown ids: the bogus probe ran a billed
+  `gpt-5.4-nano` completion (measured 2026-10-26). The Anthropic path
+  404s without contacting upstream. `max_tokens:1` is a backstop.
+- **Fail toward `unverified`, never toward routable.** The 404 text is
+  an undocumented f-string (`argoproxy/app.py`). A reworded message,
+  an empty list, a 200, or no jq all → `unverified`, and the card
+  says so.
+- A model is unroutable only if **none** of its aliases routes.
+- **Read-only verbs never `/refresh`** (D-034). They name the fix;
+  mutating verbs apply it.
+- The `status` exit code is unchanged (it is a health check; the proxy
+  *is* healthy).
+- Each probe leaves one `WARNING ... passing through as-is` line in
+  `~/argoproxy.out`. That is expected.
+
+Pinned by `tests/test_engine_routing_probe.py`.
 
 ### OpenCode config name: `opencode.json`, migrated from `config.json` (D-036)
 

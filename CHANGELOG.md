@@ -30,6 +30,18 @@ decisions D-001 through D-030) and the tag messages on the repo.
   ~0.1s over the existing forward; if it fails for any reason the run
   continues unchanged.
 
+- **`status` no longer counts models the proxy will reject as
+  reachable.** `status` and `list-models` now check what the proxy will
+  actually route, not just what it lists. They send one request for a
+  model that cannot exist and read the routing table out of the refusal.
+  If any listed models are unroutable, `status` shows `CHECK` instead of
+  `ALL GREEN`, names those models, counts OpenCode models as "routable"
+  rather than "reachable", and tells you how to repair it. `list-models`
+  prints the same warning on stderr; its table/tsv/json output is
+  unchanged. If the proxy doesn't disclose its routing table, both
+  commands say "unverified" rather than guessing. Neither command repairs
+  anything itself: `status` and `list-models` only report.
+
 - **Claude Code: warn about every provider switch in your shell, not just
   two.** Claude Code sends requests to another cloud provider instead of
   argo when a `CLAUDE_CODE_USE_<provider>` variable is set. argo-anywhere

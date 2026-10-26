@@ -9150,6 +9150,112 @@ fetch_proxy_models() {
   curl -fsS --max-time 5 "http://localhost:${PROXY_PORT}/v1/models" 2>/dev/null || true
 }
 
+# ----------------------------------------------------------------------------
+# ROUTING-HONESTY PROBE (companion to ROUTING-TABLE FRESHNESS INVARIANT)
+#
+# _probe_proxy_routing <v1_models_body>: compare what the proxy ADVERTISES
+# (/v1/models, the ModelRegistry) against what it will actually ROUTE
+# (GatewayConfig.models). Sets globals; never prints, never dies:
+#
+#   SUM_ROUTING_STATE        verified | unverified
+#   SUM_ROUTING_REASON       why unverified (empty when verified)
+#   SUM_UNROUTABLE_COUNT     advertised models (unique internal_name) with
+#                            NO routable id
+#   SUM_UNROUTABLE_CHAT_COUNT  the same, excluding embedding models
+#   SUM_UNROUTABLE_LIST      their first ids, ", "-joined, for display
+#   SUM_UNROUTABLE_INTERNAL  their internal_names, one per line
+#
+# Why: /v1/models cannot reveal the split-brain -- it is served by the table
+# that IS fresh. argo-proxy exposes the routing table nowhere except the 404
+# it returns for an unknown model ("Unknown model: 'x'. Configured models:
+# a, b, c"; argoproxy/app.py, measured on 3.3.3). So we ask for a model that
+# cannot exist and read the list out of the refusal.
+#
+# THE PROBE MUST GO THROUGH /v1/messages, NEVER /v1/chat/completions.
+# Measured 2026-10-26: on the OpenAI path argo-proxy fuzzy-matches an unknown
+# id to a real model -- "zz-bogus-probe" resolved to gpt-5.4-nano and ran a
+# billed upstream completion, with no 404 and so no list. The Anthropic path
+# resolves as-is and 404s without contacting upstream. max_tokens=1 bounds
+# the damage should a future proxy change that.
+#
+# FAIL TOWARD "unverified", NEVER TOWARD "routable". The message format is an
+# undocumented f-string; if upstream rewords it, or the proxy predates it, or
+# jq is missing, this reports `unverified` and the caller says so. Only a
+# parsed, non-empty "Configured models:" list may produce `verified`.
+#
+# Read-only by contract (D-034): this observes. It must not call /refresh --
+# repairing is the job of the mutating verbs (_refresh_proxy_model_routing).
+_ROUTING_PROBE_MODEL="argo-anywhere-routing-probe-nonexistent"
+
+_probe_proxy_routing() {
+  local body="${1:-}"
+  SUM_ROUTING_STATE="unverified"; SUM_ROUTING_REASON=""
+  SUM_UNROUTABLE_COUNT=0; SUM_UNROUTABLE_CHAT_COUNT=0
+  SUM_UNROUTABLE_LIST=""; SUM_UNROUTABLE_INTERNAL=""
+
+  if ! command -v jq >/dev/null 2>&1; then
+    SUM_ROUTING_REASON="jq not installed"
+    return 0
+  fi
+  if [ -z "$body" ]; then
+    SUM_ROUTING_REASON="no /v1/models response"
+    return 0
+  fi
+
+  local resp
+  resp="$( { curl -sS --max-time 5 -X POST \
+      "http://localhost:${PROXY_PORT}/v1/messages" \
+      -H 'Content-Type: application/json' \
+      -H 'anthropic-version: 2023-06-01' \
+      -d "{\"model\":\"${_ROUTING_PROBE_MODEL}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\".\"}]}" \
+      2>/dev/null; } || true )"
+  local msg
+  msg="$( { printf '%s' "$resp" | jq -r '.error.message // empty' 2>/dev/null; } || true )"
+  case "$msg" in
+    *"Configured models: "*) ;;
+    *)
+      SUM_ROUTING_REASON="proxy did not disclose its routing table"
+      return 0
+      ;;
+  esac
+
+  local routed
+  routed="$(printf '%s' "${msg#*Configured models: }" | tr ',' '\n' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | sort -u)"
+  if [ -z "$routed" ]; then
+    SUM_ROUTING_REASON="routing table came back empty"
+    return 0
+  fi
+
+  # A model is unroutable when NONE of its advertised ids (aliases share an
+  # internal_name) is in the routing table.
+  local unr
+  unr="$( { printf '%s' "$body" | jq -r --arg r "$routed" '
+      ($r | split("\n") | map({(.): true}) | add // {}) as $set
+      | [ .data[] | select(.internal_name != null) ]
+      | group_by(.internal_name)
+      | map(select(all(.[]; $set[.id] | not)))
+      | .[] | "\(.[0].internal_name)\t\(.[0].id)"
+    ' 2>/dev/null; } || printf 'JQFAIL' )"
+  if [ "$unr" = "JQFAIL" ]; then
+    SUM_ROUTING_REASON="could not parse /v1/models"
+    return 0
+  fi
+
+  SUM_ROUTING_STATE="verified"
+  if [ -n "$unr" ]; then
+    SUM_UNROUTABLE_COUNT="$(printf '%s\n' "$unr" | wc -l | tr -d ' ')"
+    # Same filter as SUM_MODEL_UNIQ_COUNT (ids containing "embedding" are not
+    # chat models), so gather_summary can subtract like from like.
+    SUM_UNROUTABLE_CHAT_COUNT="$( { printf '%s\n' "$unr" | cut -f2 \
+      | grep -vc 'embedding'; } || true )"
+    SUM_UNROUTABLE_INTERNAL="$(printf '%s\n' "$unr" | cut -f1)"
+    SUM_UNROUTABLE_LIST="$(printf '%s\n' "$unr" | cut -f2 | tr '\n' ',' \
+      | sed 's/,$//; s/,/, /g')"
+  fi
+  return 0
+}
+
 # extract_available_internal_names <body>: prints one internal_name per line.
 extract_available_internal_names() {
   local body="$1"
@@ -9202,6 +9308,11 @@ extract_configured_internal_names() {
 #   SUM_HEALTH_OK
 #   SUM_MODELS_OK SUM_MODEL_COUNT SUM_MODEL_UNIQ_COUNT SUM_MODEL_SAMPLE
 #   SUM_CFG_COUNT SUM_CFG_AVAIL_COUNT SUM_CFG_ORPHAN_COUNT SUM_CFG_ORPHAN_LIST
+#   SUM_CFG_UNROUTABLE_COUNT SUM_MODEL_ROUTABLE_UNIQ_COUNT
+#   SUM_ROUTING_STATE SUM_ROUTING_REASON SUM_UNROUTABLE_* (_probe_proxy_routing)
+#
+# SUM_CFG_AVAIL_COUNT counts configured models that are ROUTABLE, not merely
+# listed at /v1/models -- the two differ on a long-running argo-proxy.
 #
 # Note: SUM_MODEL_COUNT is the raw /v1/models count (includes aliases and
 # embeddings). SUM_MODEL_UNIQ_COUNT applies the same filter `update-models`
@@ -9211,7 +9322,7 @@ gather_summary() {
   SUM_LISTENER_OK=0; SUM_LISTENER_PID=""; SUM_LISTENER_BIND=""
   SUM_HEALTH_OK=0
   SUM_MODELS_OK=0; SUM_MODEL_COUNT=0; SUM_MODEL_UNIQ_COUNT=0; SUM_MODEL_SAMPLE=""
-  SUM_CFG_COUNT=0; SUM_CFG_AVAIL_COUNT=0
+  SUM_CFG_COUNT=0; SUM_CFG_AVAIL_COUNT=0; SUM_CFG_UNROUTABLE_COUNT=0
   SUM_CFG_ORPHAN_COUNT=0; SUM_CFG_ORPHAN_LIST=""
   SUM_TUNNEL_DEST=""; SUM_DEST_MATCHES_CACHE=""
 
@@ -9306,6 +9417,17 @@ gather_summary() {
     fi
   fi
 
+  # Advertised != routable on a long-running argo-proxy (see ROUTING-HONESTY
+  # PROBE). Measure it rather than restate /v1/models.
+  SUM_ROUTING_STATE="unverified"; SUM_ROUTING_REASON="proxy unreachable"
+  SUM_UNROUTABLE_COUNT=0; SUM_UNROUTABLE_CHAT_COUNT=0
+  SUM_UNROUTABLE_LIST=""; SUM_UNROUTABLE_INTERNAL=""
+  if [ "$SUM_MODELS_OK" -eq 1 ]; then
+    _probe_proxy_routing "$body"
+  fi
+  SUM_MODEL_ROUTABLE_UNIQ_COUNT=$((SUM_MODEL_UNIQ_COUNT - SUM_UNROUTABLE_CHAT_COUNT))
+  if [ "$SUM_MODEL_ROUTABLE_UNIQ_COUNT" -lt 0 ]; then SUM_MODEL_ROUTABLE_UNIQ_COUNT=0; fi
+
   # Configured models from ~/.config/opencode/opencode.json
   local cfg_names avail_names
   cfg_names="$(extract_configured_internal_names || true)"
@@ -9317,10 +9439,22 @@ gather_summary() {
   if [ "$SUM_MODELS_OK" -eq 1 ] && [ "$SUM_CFG_COUNT" -gt 0 ]; then
     avail_names="$(extract_available_internal_names "$body" | sort -u)"
     local cfg_sorted; cfg_sorted="$(printf '%s\n' "$cfg_names" | sed '/^$/d' | sort -u)"
-    # available ∩ configured
+    # "Reachable" means ROUTABLE, not merely advertised: subtract models the
+    # routing probe proved the proxy will 404 on. (When the probe could not
+    # verify, nothing is subtracted and render_summary says "unverified".)
+    local routable_names="$avail_names"
+    if [ -n "$SUM_UNROUTABLE_INTERNAL" ]; then
+      routable_names="$(comm -23 \
+        <(printf '%s\n' "$avail_names") \
+        <(printf '%s\n' "$SUM_UNROUTABLE_INTERNAL" | sort -u))"
+      SUM_CFG_UNROUTABLE_COUNT="$(comm -12 \
+        <(printf '%s\n' "$cfg_sorted") \
+        <(printf '%s\n' "$SUM_UNROUTABLE_INTERNAL" | sort -u) | sed '/^$/d' | wc -l | tr -d ' ')"
+    fi
+    # routable ∩ configured
     SUM_CFG_AVAIL_COUNT="$(comm -12 \
       <(printf '%s\n' "$cfg_sorted") \
-      <(printf '%s\n' "$avail_names") | wc -l | tr -d ' ')"
+      <(printf '%s\n' "$routable_names") | sed '/^$/d' | wc -l | tr -d ' ')"
     # configured \ available  (orphans)
     local orphans
     orphans="$(comm -23 \
@@ -9359,6 +9493,11 @@ render_summary() {
     # never render as unqualified green, because the Configuration section
     # below prints the CACHED node and the two would contradict each other.
     verdict="CHECK      -  endpoint healthy, but tunnel goes to ${SUM_TUNNEL_DEST}"
+    vcolor="$C_YLW"
+  elif [ "${SUM_UNROUTABLE_COUNT:-0}" -gt 0 ] && [ "$SUM_HEALTH_OK" -eq 1 ]; then
+    # The proxy advertises models it will 404 on (ROUTING-HONESTY PROBE).
+    # Never green: a tool picking one of them fails mid-session.
+    verdict="CHECK      -  endpoint healthy, but ${SUM_UNROUTABLE_COUNT} listed model(s) are NOT routable"
     vcolor="$C_YLW"
   elif [ "$SUM_LISTENER_OK" -eq 1 ] && [ "$SUM_HEALTH_OK" -eq 1 ] && [ "$SUM_MODELS_OK" -eq 1 ]; then
     verdict="ALL GREEN  -  endpoint healthy, ${SUM_MODEL_COUNT} model(s)"
@@ -9442,6 +9581,18 @@ render_summary() {
       avail_str="${avail_str}  (e.g. ${SUM_MODEL_SAMPLE}, ...)"
     fi
     lines+=("Available        : ${avail_str}")
+    # Listed is not routable on a long-running argo-proxy; say which we know.
+    if [ "${SUM_ROUTING_STATE:-unverified}" = "verified" ]; then
+      if [ "${SUM_UNROUTABLE_COUNT:-0}" -gt 0 ]; then
+        lines+=("NOT routable     : ${SUM_UNROUTABLE_COUNT} listed model(s) the proxy will reject (HTTP 404)")
+        lines+=("                   list: ${SUM_UNROUTABLE_LIST}")
+        lines+=("                   (stale proxy routing table -- see Next step)")
+      else
+        lines+=("Routable         : all listed models (verified against the routing table)")
+      fi
+    else
+      lines+=("Routable         : unverified (${SUM_ROUTING_REASON:-unknown})")
+    fi
   else
     lines+=("Available        : (unknown -- proxy unreachable)")
   fi
@@ -9460,7 +9611,14 @@ render_summary() {
   # "OpenCode" so the box doesn't imply this is a global/all-tools fact.
   if [ "$SUM_CFG_COUNT" -gt 0 ]; then
     if [ "$SUM_MODELS_OK" -eq 1 ]; then
-      lines+=("OpenCode models  : ${SUM_CFG_COUNT} configured (${SUM_CFG_AVAIL_COUNT} reachable)${cfg_qual}")
+      if [ "${SUM_ROUTING_STATE:-unverified}" = "verified" ]; then
+        lines+=("OpenCode models  : ${SUM_CFG_COUNT} configured (${SUM_CFG_AVAIL_COUNT} routable)${cfg_qual}")
+        if [ "${SUM_CFG_UNROUTABLE_COUNT:-0}" -gt 0 ]; then
+          lines+=("                   ${SUM_CFG_UNROUTABLE_COUNT} of them listed but NOT routable right now")
+        fi
+      else
+        lines+=("OpenCode models  : ${SUM_CFG_COUNT} configured (${SUM_CFG_AVAIL_COUNT} listed; routing unverified)${cfg_qual}")
+      fi
     else
       lines+=("OpenCode models  : ${SUM_CFG_COUNT} configured (reachability unknown)${cfg_qual}")
     fi
@@ -9473,7 +9631,7 @@ render_summary() {
     # embeddings) the user has not added to opencode yet. The math here mirrors
     # what `update-models` would actually do, so the count is honest.
     if [ "$SUM_MODELS_OK" -eq 1 ]; then
-      local missing=$((SUM_MODEL_UNIQ_COUNT - SUM_CFG_AVAIL_COUNT))
+      local missing=$((${SUM_MODEL_ROUTABLE_UNIQ_COUNT:-$SUM_MODEL_UNIQ_COUNT} - SUM_CFG_AVAIL_COUNT))
       if [ "$missing" -gt 0 ]; then
         lines+=("Unconfigured     : ${missing} reachable chat model(s) not in OpenCode config")
         lines+=("                   (run '$(basename "$0") update-models' to add them)")
@@ -9573,7 +9731,7 @@ render_summary() {
     #   * neither          : in sync; just go run opencode
     local missing=0
     if [ "$SUM_MODEL_UNIQ_COUNT" -gt 0 ]; then
-      missing=$((SUM_MODEL_UNIQ_COUNT - SUM_CFG_AVAIL_COUNT))
+      missing=$((${SUM_MODEL_ROUTABLE_UNIQ_COUNT:-$SUM_MODEL_UNIQ_COUNT} - SUM_CFG_AVAIL_COUNT))
       [ "$missing" -lt 0 ] && missing=0
     fi
     # Three sub-cases here, branching on whether the user has an OpenCode
@@ -9584,7 +9742,15 @@ render_summary() {
     #   * Config exists, has drift (orphans or new available) -> suggest
     #     'update-models' to reconcile.
     #   * Config exists and is in sync -> just run 'opencode'.
-    if [ ! -f "${OPENCODE_CONFIG}" ]; then
+    if [ "${SUM_UNROUTABLE_COUNT:-0}" -gt 0 ]; then
+      # The repair is a /refresh. `status` is read-only (D-034) so it names
+      # the fix rather than applying it. `configure` runs the refresh on the
+      # live channel without opening anything new; the curl is the direct
+      # form for users who do not want to re-run a configure.
+      lines+=("Repair the proxy's stale routing table (no restart, no Duo):")
+      lines+=("  $(_user_cmd_name) configure <tool>     (refreshes as a side effect)")
+      lines+=("  or:  curl -X POST http://localhost:${PROXY_PORT}/refresh")
+    elif [ ! -f "${OPENCODE_CONFIG}" ]; then
       lines+=("OpenCode config not yet written. Run  '$(basename "$0") client'")
       lines+=("  to install OpenCode and write its config, then 'opencode' to use it.")
     elif _opencode_legacy_name_only; then
@@ -10164,6 +10330,17 @@ mode_list_models() {
   local body; body="$(fetch_proxy_models)"
   [ -n "$body" ] || die "Empty response from /v1/models."
 
+  # Listed is not routable on a long-running argo-proxy (ROUTING-HONESTY
+  # PROBE). Report on stderr so tsv/json output stays schema-stable for
+  # scripts; read-only, so name the repair instead of applying it (D-034).
+  _probe_proxy_routing "$body"
+  if [ "$SUM_UNROUTABLE_COUNT" -gt 0 ]; then
+    warn "${SUM_UNROUTABLE_COUNT} listed model(s) are NOT routable (the proxy will return HTTP 404):"
+    warn "  ${SUM_UNROUTABLE_LIST}"
+    warn "  The proxy's routing table is stale. Repair (no restart, no Duo):"
+    warn "    curl -X POST http://localhost:${PROXY_PORT}/refresh"
+  fi
+
   # Build the filtered+annotated array. We do the filtering + dedup + provider
   # inference + modalities inference in one jq pipeline so the same array is
   # the single source of truth for all three output formats.
@@ -10301,6 +10478,15 @@ mode_list_models() {
         footer="$(printf '\n%s\n' "Total: ${total_count} rows  (served: ${served_count}; orphaned-in-config: ${orphan_count})")"
       else
         footer="$(printf '\n%s\n' "Total: ${total_count} models  (no OpenCode config found at ${cfg}; 'configured' column omitted)")"
+      fi
+      if [ "$SUM_ROUTING_STATE" = "verified" ]; then
+        if [ "$SUM_UNROUTABLE_COUNT" -gt 0 ]; then
+          footer="${footer}"$'\n'"Routing: ${SUM_UNROUTABLE_COUNT} listed model(s) NOT routable -- see warning above."
+        else
+          footer="${footer}"$'\n'"Routing: every listed model is routable (verified)."
+        fi
+      else
+        footer="${footer}"$'\n'"Routing: unverified (${SUM_ROUTING_REASON})."
       fi
       rendered="${rendered}${footer}"
       ;;
