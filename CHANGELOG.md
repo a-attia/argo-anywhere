@@ -16,6 +16,20 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ### Fixed
 
+- **Models the proxy lists but refuses to serve.** A long-running
+  `argo-proxy` advertises models it then answers with HTTP 404: it keeps two
+  model tables, and the background refresh updates only the one behind
+  `GET /v1/models`. The table that decides routing is rebuilt solely by the
+  manual `/refresh` endpoint, so it stays frozen at whatever Argo offered
+  when the proxy started. Measured 2026-10-26 on `argo-proxy 3.3.3` /
+  `llm-rosetta 0.13.0`, where the four Claude 5.5 models were listed,
+  counted as reachable by `status`, and 404'd on use. argo-anywhere now
+  POSTs `/refresh` opportunistically before it reads the model list —
+  on `tunnel`, on `configure` (both the channel-reuse and `--ensure`
+  paths), and on `update-models`. The call is silent, idempotent and
+  ~0.1s over the existing forward; if it fails for any reason the run
+  continues unchanged.
+
 - **Claude Code: warn about every provider switch in your shell, not just
   two.** Claude Code sends requests to another cloud provider instead of
   argo when a `CLAUDE_CODE_USE_<provider>` variable is set. argo-anywhere

@@ -784,6 +784,51 @@ stdout; do not wrap it in `$(...)` (D-005 — the first draft did, and
 Applies to any future `write_<tool>_config` that emits an enumerable
 list. Pinned by `tests/test_engine_opencode_models.py`.
 
+### Routing-table freshness invariant (`/v1/models` lies on a long-running proxy)
+
+**`GET /v1/models` is not evidence that a model can be served.** Search
+the engine for `ROUTING-TABLE FRESHNESS INVARIANT`.
+
+`argo-proxy` keeps two model tables and its background refresh updates
+only one:
+
+| Table | Serves | Refreshed |
+|:------|:-------|:----------|
+| `ModelRegistry` | `GET /v1/models` | every 24h, automatically |
+| `GatewayConfig.models` | request **routing** | only by `POST /refresh` |
+
+`rebuild_gateway_models()` (`argoproxy/bridge.py`) has exactly one
+caller — the manual `/refresh` endpoint; `ModelRegistry._periodic_refresh()`
+calls `refresh_availability()` alone. So a proxy that has been up since
+before Argo added a model advertises it and then 404s on it. Measured
+2026-10-26 on `argo-proxy 3.3.3` / `llm-rosetta 0.13.0`: four Claude 5.5
+models listed, counted "reachable" by `status`, HTTP 404 on use.
+
+This is our problem because **every** model surface in the engine reads
+the lying table — `gather_summary`'s `SUM_CFG_AVAIL_COUNT`,
+`list-models`, `update-models`, `_opencode_models_block` — and restates
+it with our confidence (the D-034 overclaim, one layer up), or writes
+unroutable ids into a user's config.
+
+`_refresh_proxy_model_routing` (next to `channel_is_up`) repairs it
+opportunistically from four sites: `mode_tunnel`,
+`_configure_ensure_channel_or_die` (**both** branches — reuse and
+`--ensure`), and `mode_update_models`. Rules:
+
+- **Best-effort; never `die`.** No curl, no channel, endpoint absent,
+  timeout → silent no-op, `return 0`. Model housekeeping is never a
+  reason to fail a connect.
+- **Silent on success.** Its loud sibling `_update_argoproxy_post_refresh`
+  fires only after an `update argoproxy` upgrade; keep the two distinct.
+- **Do not report "N new models" from the response.** `/refresh`
+  reports *registry* counts — the table that was already right. The
+  repair that fixed four 404ing models returned `57 → 57`.
+- Detecting the split-brain from `/v1/models` is impossible; the only
+  cheap oracle is a bogus-model request whose 404 names `Configured
+  models:`. That honesty detector is deferred, not rejected.
+
+Pinned by `tests/test_engine_routing_refresh.py`.
+
 ### OpenCode config name: `opencode.json`, migrated from `config.json` (D-036)
 
 **OpenCode 2 reads only `opencode.json(c)`.** We wrote

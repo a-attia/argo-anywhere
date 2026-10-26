@@ -7705,6 +7705,63 @@ channel_is_up() {
   curl -fsS --max-time 3 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1
 }
 
+# ----------------------------------------------------------------------------
+# ROUTING-TABLE FRESHNESS INVARIANT
+#
+# _refresh_proxy_model_routing: POST /refresh to the channel so the running
+# argo-proxy rebuilds its GATEWAY ROUTING TABLE from its model registry.
+#
+# WHY THIS EXISTS (measured 2026-10-26, argo-proxy 3.3.3 / llm-rosetta 0.13.0):
+# argo-proxy keeps TWO model tables and its periodic refresh updates only one.
+#
+#   ModelRegistry        -> serves GET /v1/models      -> refreshed every 24h
+#   GatewayConfig.models -> decides REQUEST ROUTING    -> NEVER auto-refreshed
+#
+# `rebuild_gateway_models()` (argoproxy/bridge.py) has exactly one caller:
+# the manual /refresh endpoint. The background task in
+# ModelRegistry._periodic_refresh() calls refresh_availability() alone. So a
+# long-running proxy ADVERTISES models that it then 404s on -- the routing
+# table is frozen at the value it had when the process started.
+#
+# This is not cosmetic for us: every model surface in this engine reads
+# /v1/models (gather_summary's SUM_CFG_AVAIL_COUNT, list-models,
+# update-models, _opencode_models_block). Under the split-brain the engine
+# inherits the proxy's optimistic list and restates it with our own
+# confidence -- `status` printed "ALL GREEN ... 37 configured (37 reachable)"
+# while four Claude 5.5 models returned HTTP 404. That is precisely the
+# overclaim D-034 ("evidence, not reachability") exists to prevent, and
+# _opencode_models_block will happily WRITE the unroutable ids into a user's
+# config. We cannot detect it from /v1/models (the lying surface), so we
+# repair it opportunistically instead.
+#
+# CONTRACT -- this function is best-effort and MUST NEVER die:
+#   * No channel / no curl / endpoint absent (pre-/refresh argo-proxy) /
+#     timeout  -> silent no-op, return 0. Callers are mid-flow and a model
+#     housekeeping call is never a reason to fail a connect or a configure.
+#   * Idempotent and cheap: measured 0.11s over an open tunnel; it is a
+#     local call through the existing forward (no SSH, no Duo, no restart).
+#   * Deliberately SILENT on success. It fires on every connect/configure
+#     and a line per run would be noise; there is also nothing honest to
+#     report (see below).
+#
+# DO NOT try to report "N new models" from the response body. /refresh
+# returns before/after counts for the REGISTRY only -- the table that was
+# already correct. The 2026-10-26 repair that fixed four 404ing models
+# returned an unchanged 57 -> 57, because the real change landed in the
+# unreported gateway table. The body cannot distinguish "no-op" from "fixed
+# your routing".
+#
+# Sibling: _update_argoproxy_post_refresh, which does the same POST but is
+# LOUD and runs only after an `update argoproxy` upgrade. Keep that one
+# chatty (the user asked for an upgrade and wants to know what happened);
+# keep this one quiet (the user asked for a channel).
+_refresh_proxy_model_routing() {
+  command -v curl >/dev/null 2>&1 || return 0
+  curl -fsS --max-time 10 -X POST \
+    "http://localhost:${PROXY_PORT}/refresh" >/dev/null 2>&1 || true
+  return 0
+}
+
 mode_tunnel() {
   # This is a channel-owning mode: it opens the tunnel then blocks in
   # monitor_tunnel_loop holding the channel open. Signal ssh_mux_args to use
@@ -7739,6 +7796,10 @@ mode_tunnel() {
   _persist_port_cache "$PROXY_PORT"
   # Then say which clients disagree with the port that actually won.
   report_client_coherence "$PROXY_PORT"
+  # ROUTING-TABLE FRESHNESS: repair any registry/gateway split-brain BEFORE
+  # gather_summary reads /v1/models, so the status box describes a proxy
+  # that can actually serve what it advertises.
+  _refresh_proxy_model_routing
   gather_summary
   render_summary
   log "Channel is up on http://localhost:${PROXY_PORT} (this is '${_INVOKED_MODE:-tunnel}' mode:"
@@ -7871,6 +7932,11 @@ _configure_ensure_channel_or_die() {
 
   if channel_is_up; then
     ok "Channel is up on http://localhost:${PROXY_PORT} (reusing it)."
+    # ROUTING-TABLE FRESHNESS: this is the branch that matters most. We are
+    # reusing a channel whose proxy may have been running for days, so its
+    # gateway routing table is the most likely to be stale -- and the
+    # writers are about to bake /v1/models into a user's config.
+    _refresh_proxy_model_routing
     return 0
   fi
 
@@ -7901,6 +7967,10 @@ _configure_ensure_channel_or_die() {
   _persist_port_cache "$PROXY_PORT"
   # Then say which clients disagree with the port that actually won.
   report_client_coherence "$PROXY_PORT"
+  # ROUTING-TABLE FRESHNESS: --ensure may have REUSED an existing proxy
+  # (ensure_or_reuse_tunnel's reuse paths) rather than started a fresh one,
+  # so we cannot assume the gateway table was built moments ago.
+  _refresh_proxy_model_routing
   _CONFIGURE_ENSURED_NODE="$node"
   return 0
 }
@@ -9825,6 +9895,11 @@ mode_update_models() {
   if ! curl -fsS --max-time 3 "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
     die "argo-proxy not reachable on http://localhost:${PROXY_PORT}. Start the tunnel first ('$(basename "$0") client')."
   fi
+
+  # ROUTING-TABLE FRESHNESS: this verb WRITES the /v1/models list into the
+  # user's config, so a split-brain proxy would persist unroutable model
+  # ids. Repair before reading.
+  _refresh_proxy_model_routing
 
   log "Fetching /v1/models from the proxy..."
   local body; body="$(fetch_proxy_models)"
