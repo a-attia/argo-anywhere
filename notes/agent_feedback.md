@@ -749,6 +749,52 @@ sandbox blocks.
 
 **Status**: open (queued for upstream roll-up).
 
+## 2026-11-19 — shared-`$HOME` is a defect family; live checks must fail closed and read the live process
+
+**Project context**: v3.6.1 / D-037. argo-proxy's SQLite database and its
+log were shared across compute nodes through an NFS `$HOME`, which caused
+`database is locked` and then corruption. The fix gives each node its own
+files, rotated per launch. It was live-verified on two nodes with a new
+script, `scripts/live_test_data_dir.sh`, which passed in two runs.
+
+**Trigger**: external-failure (field report) + pattern-discovered.
+
+**Skill(s) involved**: `research-software-engineering` (live-verification
+design); `agent-resource-discipline` (never-SSH-without-approval: the
+script rides existing masters only).
+
+**Observation 1 — a shared `$HOME` breaks every per-host file, one file at a
+time.** This is the third instance in this project: the `config.yaml`
+`port:` line (Q10, 2026-08), then `gateway.db`, then `~/argoproxy.out`,
+the last found while testing the fix for the second. Rule worth rolling
+up: **when one file turns out to be shared across hosts, audit every
+runtime file under `$HOME` in the same pass.** Derive the host tag in
+exactly one place (here `_argoproxy_node_tag`).
+
+**Observation 2 — a live check must fail closed on missing evidence.** The
+first version of the log check ran `grep -c` against the per-node log,
+which counts 0, and therefore PASSES, when the file does not exist. That
+is a check that cannot fail in the very case it exists to catch. Fixed
+by asserting the file exists and is non-empty before counting errors.
+The same principle as the engine's identity gate (D-034), applied to
+test code.
+
+**Observation 3 — read the running process, not the files around it.**
+The script verifies `/proc/<pid>/environ` (`DATA_DIR` actually delivered)
+and `/proc/<pid>/fd` (which `gateway.db` is actually open), not merely
+that a directory exists. This mattered: the most likely failure was a
+reused older proxy, and only the process's own state reveals that.
+
+**Observation 4 — automation that drives an interactive engine over ssh
+must give it no stdin.** `--rotate` hung because the remote `server`
+(which re-execs itself and so treats input as interactive) printed a
+`[k/b/d/a]` prompt into the redirected log, then read the answer from the
+inherited terminal. With `</dev/null` it takes its default. Reproducible
+only when the test port differed from the shared config's, so the first
+passing run hid it.
+
+**Status**: open (queued for upstream roll-up).
+
 ---
 
 *Created 2026-05-14 by Ahmed Attia (with substantial AI assistance from

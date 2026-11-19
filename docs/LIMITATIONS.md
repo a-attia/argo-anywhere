@@ -103,7 +103,19 @@ node and **one** SSH tunnel per local port. Concrete pinch points:
   argo-proxy is always started inside the screen / tmux / nohup
   session named `argovproxy` — no per-port suffix.
 - `~/.config/argoproxy/config.yaml` is the single argo-proxy config
-  file on the node. Its `port:` line is mutated on each invocation.
+  file, and on clusters with a shared `$HOME` (CELS) it is one file for
+  **every** node. Its `port:` line is not authoritative: each launch
+  passes `--port`, so answer `[k]eep` when asked about a port mismatch.
+- argo-proxy's other runtime files are **per node** since v3.6.1: its
+  SQLite database (`~/.config/argoproxy/data-<host>/`, rotated each
+  launch with one previous session kept as `.prev`) and its log
+  (`~/argoproxy-<host>.out`). Before v3.6.1 both were shared, which
+  corrupted the database when two nodes ran at once.
+- argo-anywhere's own saved state (`~/.config/argo_anywhere/port` and
+  `node`) holds **one** channel. With two channels open, the last
+  `connect` wins, and a one-off `--port` becomes the default for later
+  connects. See
+  [`notes/impl_multi_channel_state.md`](../notes/impl_multi_channel_state.md).
 - `local_tunnel_status` checks "is something on this port?" — can't
   tell which destination the tunnel targets.
 - `status` / `stop` / `clean` operate on a single `PROXY_PORT`
@@ -346,6 +358,23 @@ gateway, `Oaklight/argo-proxy`, the AI CLI tools themselves) rather
 than in argo-anywhere. They surface through argo-anywhere because
 that's the layer the user invokes, but the root cause + the fix
 sit upstream.
+
+### argo-proxy's dashboard database (argo-proxy ≥ 3.3.0)
+
+Since 3.3.0, argo-proxy keeps an SQLite database for its admin dashboard,
+and there is no setting to turn it off. Its default location, next to the
+config, is shared across nodes on a shared `$HOME`. Two nodes at once then
+produce `database is locked` and `database disk image is malformed`.
+argo-anywhere v3.6.1 moves it to a per-node folder that is rotated each
+launch (see "Single-instance constraint" above). Two limits remain upstream:
+
+- **argo-proxy 3.3.0 and 3.3.1 cannot relocate the database**, because the
+  `--data-dir` / `DATA_DIR` setting arrived in 3.3.2. On those versions
+  argo-anywhere warns at launch. Fix with `argo-anywhere update argoproxy`.
+- **Error dumps are capped only by a hard-coded count** (10,000 stored
+  request bodies), and the file never shrinks. A long session that keeps
+  failing can therefore grow the database to hundreds of MB. Rotation
+  reclaims that space at the next launch, not during the session.
 
 ### OpenCode 2 caches config in a background service
 

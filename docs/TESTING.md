@@ -28,6 +28,7 @@ touches.
   node rather than a laptop.
 - [Multi-tool tests](#multi-tool-tests-v20) — per-tool selection, scope, and
   config-writer behaviour.
+- [v3.6.1 per-node data dir, two nodes at once](#v361--per-node-argo-proxy-data-dir--log-two-nodes-at-once-d-037)
 - [v3.1.0 launcher / `--cwd`](#v310--launcher-cwd--dual-embedded-terminals----cwd-flag-d-031)
 
 > **Capability probing.** `python scripts/probe_capabilities.py` measures
@@ -40,7 +41,8 @@ touches.
 > v3.1.0. Nothing here exercises **aider** (shipped Phase 5a), the D-032
 > ssh-config routing, the D-034 shared-node identity work, or the D-035
 > per-user port — those are live-tested in their own notes under
-> [`notes/`](../notes/) and have not been folded back in. The Python layer is
+> [`notes/`](../notes/) and have not been folded back in. The exception is D-037
+> (v3.6.1), which has its own scripted section below. The Python layer is
 > covered by `pytest`, which needs no ANL infra: run `pytest -q`.
 
 > **Adjacent docs**: [`UPGRADING.md`](UPGRADING.md) routes you through an
@@ -921,6 +923,43 @@ bash argo-anywhere.sh --cli-tool claudecode client    # second run should report
 | 8    | Per-tool setup is idempotent (handle_config_file's cmp branch) |
 
 ---
+
+## v3.6.1 — per-node argo-proxy data dir + log, two nodes at once (D-037)
+
+Run this before tagging any change to `mode_server`'s launch block, the data
+dir, or the argo-proxy log. It needs two nodes, so it runs only against real
+ANL infrastructure.
+
+**Test the checkout, not the installed package.** The repo's `.venv` holds
+an editable install, and every bootstrap copies the *running* engine to the
+node. So `./.venv/bin/argo-anywhere` puts the code under test on the node
+without touching your pipx install. The script's first check confirms that
+each node's `~/.argo-anywhere.sh` matches the checkout byte for byte.
+
+```bash
+# 1. Make sure no older proxy gets reused. `stop` is local-only, so on each node:
+screen -S argovproxy -X quit
+
+# 2. Open one channel per node, each with an EXPLICIT port. The saved port is
+#    single-slot, so omitting --port reuses the last one and collides.
+./.venv/bin/argo-anywhere --node compute-01 --port 64743 connect   # terminal 1
+./.venv/bin/argo-anywhere --node compute-02 --port 64753 connect   # terminal 2
+
+# 3. Run the checks (about 4 minutes with --rotate).
+scripts/live_test_data_dir.sh --rotate compute-01:64743 compute-02:64753
+```
+
+For each node, the script checks the running argo-proxy's actual
+environment and its open database file (via `/proc`), the database's
+integrity and row count, and that the per-node log exists and contains no
+lock or malformed errors. `--rotate` restarts the first node's proxy twice
+and checks that exactly one previous generation is kept. It interrupts
+clients on that port for a few seconds each time. The script uses only the
+SSH masters that `connect` opened (`ControlMaster=no`, `BatchMode=yes`), so it
+cannot trigger Duo. Exit 0 means all checks passed.
+
+Run it from your own terminal, not as a `!` command in Claude Code, which
+times out after 120 seconds.
 
 ## v3.1.0 — launcher cwd + dual embedded terminals + `--cwd` flag (D-031)
 

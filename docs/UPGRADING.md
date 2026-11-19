@@ -50,6 +50,23 @@ itself the next time you configure OpenCode.
 > Nothing to do if you are still on OpenCode 1.x: v3.5.0 migrates the file
 > anyway, so a later OpenCode upgrade does not break anything.
 
+> **Seeing `Failed to flush metrics: database is locked` or `database disk
+> image is malformed` on a compute node?** Upgrade to v3.6.1 or later. Up to
+> v3.6.0, argo-proxy's dashboard database sat in one folder shared by every
+> node, and two nodes at once corrupted it. v3.6.1 gives each node its own
+> folder. After upgrading:
+>
+> ```bash
+> # on any node (stop argo-proxy on every node first):
+> screen -S argovproxy -X quit
+> rm -rf ~/.config/argoproxy/data     # the old shared folder; no longer used
+> ```
+>
+> The node also needs argo-proxy 3.3.2 or later, since 3.3.0 and 3.3.1
+> cannot move the database. argo-anywhere warns at launch if it finds one;
+> `argo-anywhere update argoproxy` fixes it. argo-proxy's log also moved,
+> from `~/argoproxy.out` to `~/argoproxy-<host>.out`.
+
 > **If you are on v3.3.0, upgrade now.** It shipped three regressions: `[a]
 > abort` at a prompt did not abort, a failed run could leave a wrong port
 > cached, and auto-port-by-default could silently migrate a live session.
