@@ -232,10 +232,15 @@ fi
 if [ "$ROTATE" = 1 ]; then
   t="${TARGETS[0]}"; node="${t%%:*}"; port="${t##*:}"
   RESTART_LOG="$(mktemp "${TMPDIR:-/tmp}/live_test_data_dir.XXXXXX")"
+  # stdin from /dev/null: `server` re-execs itself (_ARGO_ANYWHERE_REEXEC=1),
+  # so ask() reads its answer from stdin even without a TTY. Inheriting this
+  # terminal made the config.yaml [k/b/d/a] prompt (shown only in the log)
+  # wait for invisible input whenever the test port differs from the shared
+  # config's. EOF makes it take its default, [k]eep.
   restart() {
     rsh "$node" "screen -S $SESSION -X quit >/dev/null 2>&1; tmux kill-session -t $SESSION >/dev/null 2>&1; sleep 3; \
       ARGO_ANYWHERE_USER='$USER_ARGO' ARGO_ANYWHERE_PORT='$port' bash ~/.argo-anywhere.sh server -y" \
-      >>"$RESTART_LOG" 2>&1 \
+      </dev/null >>"$RESTART_LOG" 2>&1 \
       || { fail "server restart on $node failed (see $RESTART_LOG)"; return 1; }
     wait_health "$port" 30 || { fail "no /health on :$port after restart"; return 1; }
   }

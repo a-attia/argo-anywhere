@@ -2862,6 +2862,12 @@ Release process:
    if the user base ever exceeds the current n=1 and colleagues want
    parallel proxies on different ports per user-node, the touchpoints
    are documented in AGENTS.md "Single-instance constraint" section.
+   **2026-11-19 field evidence:** the v3.6.1 two-node live test hit both
+   usability gaps that follow from the single-slot port/node cache (a
+   one-off `--port` becomes the default; the last connect wins the saved
+   node). Options and a recommendation:
+   [`notes/impl_multi_channel_state.md`](notes/impl_multi_channel_state.md).
+   Decide alongside D-035, which already changes the port cache's shape.
 5. **CSPO threshold characterization**: the SSH attempt tracker assumes
    a CSPO threshold of ~10 attempts/hour as the floor. The actual
    threshold isn't published. If the assumption proves wrong (either

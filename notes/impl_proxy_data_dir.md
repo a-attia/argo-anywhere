@@ -6,8 +6,9 @@ concurrently (argo-proxy 3.3.3). `scripts/live_test_data_dir.sh --rotate`
 reported ALL CHECKS PASSED: each process had its own `DATA_DIR`, each held
 its own `gateway.db` open, integrity `ok` on both, no lock/malformed errors,
 and rotation kept exactly one previous generation. That run covered the
-data-dir change. The per-node log (§4a) came after it: rerun the script
-to cover it (it now checks each node's own log and fails if it is missing).
+data-dir change. A second run the same day, after the per-node log (§4a),
+passed again, including the new checks that each node's
+`~/argoproxy-<host>.out` exists and is free of lock/malformed errors.
 
 **Trigger**: field report 2026-11-19 (`error_report.txt`). On compute-01
 argo-proxy logged `Failed to flush metrics: database is locked`; on
