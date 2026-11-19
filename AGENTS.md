@@ -857,6 +857,32 @@ schema is unchanged. Rules:
 
 Pinned by `tests/test_engine_routing_probe.py`.
 
+### Per-node data-dir invariant (argo-proxy's SQLite on a shared `$HOME`)
+
+**argo-proxy must never open a database directory another node can open.**
+Search the engine for `PER-NODE DATA-DIR INVARIANT`.
+
+argo-proxy ≥ 3.3.0 keeps `gateway.db` (SQLite, WAL) by default in
+`~/.config/argoproxy/data/`. With CELS `$HOME` on NFS, every node shares
+it. WAL cannot work across hosts, and the result is `database is locked`
+plus corruption (field report 2026-11-19). This is Q10's shared-`$HOME`
+assumption again, in a second file.
+
+- `_argoproxy_prepare_data_dir` rotates `data-<host>` → `data-<host>.prev`
+  on **every launch** (the old `.prev` is deleted). Sets the global
+  `_ARGOPROXY_DATA_DIR`; **never `$()`-capture it** (D-005). **Never `die`**:
+  every step degrades to `warn`.
+- Delivered as **env vars** (`_ap_env`: `DATA_DIR` + `REQUEST_LOG_*_MAX`)
+  via `env` on **each** launch line. Do not switch to `--data-dir`, because
+  an older argo-proxy dies on an unknown flag. Do not rely on inherited
+  env, because a pre-existing tmux server supplies its own.
+- Launch **never deletes** the legacy shared `data/` (another node may hold
+  it open → ESTALE). It only reports it. Removal is `clean`'s job.
+- 3.3.0 / 3.3.1 cannot relocate the database: warn, don't auto-upgrade.
+
+Pinned by `tests/test_engine_proxy_data_dir.py`. Design record:
+[`notes/impl_proxy_data_dir.md`](notes/impl_proxy_data_dir.md).
+
 ### OpenCode config name: `opencode.json`, migrated from `config.json` (D-036)
 
 **OpenCode 2 reads only `opencode.json(c)`.** We wrote

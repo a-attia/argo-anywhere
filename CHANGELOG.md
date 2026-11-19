@@ -12,6 +12,31 @@ decisions D-001 through D-030) and the tag messages on the repo.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **`database is locked` / `database disk image is malformed` from
+  argo-proxy.** Since 3.3.0, argo-proxy keeps an SQLite database for its
+  admin dashboard next to its config, in `~/.config/argoproxy/data/`. On
+  clusters where `$HOME` is shared across compute nodes (CELS), two nodes
+  running argo-proxy shared one SQLite file in WAL mode. That cannot work
+  across machines, and it ended in lock errors and a corrupt database (field
+  report 2026-11-19). argo-anywhere now gives each launch a fresh directory
+  of its own node, `~/.config/argoproxy/data-<host>`. The previous session's
+  directory is kept as `data-<host>.prev`, so its error dumps survive the
+  relaunch you make after a failure, and the one before that is deleted.
+  Disk use is therefore bounded to about two sessions, and a corrupt file is
+  never reopened. The request-log caps are lowered to 1000/500 rows, about
+  28 MB down to under 1 MB; set `REQUEST_LOG_SUCCESS_MAX` /
+  `REQUEST_LOG_ERROR_MAX` to override. argo-proxy 3.3.0 and 3.3.1 cannot
+  relocate the database, so on those versions the launch prints a warning
+  recommending `update argoproxy`. `clean` now also removes these
+  directories and the old shared `data/`. Design record:
+  [`notes/impl_proxy_data_dir.md`](notes/impl_proxy_data_dir.md).
+
+---
+
 ## v3.6.0 — 2026-10-26
 
 ### Fixed

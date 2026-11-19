@@ -8538,6 +8538,68 @@ _dump_session_output_tmux() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
+# PER-NODE DATA-DIR INVARIANT (2026-11-19): argo-proxy >= 3.3.0 keeps an
+# SQLite database (gateway.db, WAL mode) for its admin dashboard, by default
+# at ~/.config/argoproxy/data/. On CELS $HOME is ONE NFS mount shared by every
+# compute node, so two nodes running argo-proxy open the SAME SQLite file --
+# and WAL's shared-memory index cannot work across machines. Field report
+# 2026-11-19: "database is locked" on one node, "database disk image is
+# malformed" on the other. Same shared-$HOME assumption as Q10, second file.
+#
+# _argoproxy_prepare_data_dir gives each LAUNCH a fresh directory of its own
+# node's, keeping exactly one previous generation:
+#
+#   ~/.config/argoproxy/data-<host>       current (fresh every launch)
+#   ~/.config/argoproxy/data-<host>.prev  the session before (its error
+#                                         dumps are what you want after a
+#                                         failed session -- hence kept)
+#
+# Rotating every launch bounds disk use to ~two sessions (upstream's error
+# dumps are capped only at a hard-coded 10,000 compressed request bodies and
+# the file never shrinks) and means a corrupt file is never reopened.
+#
+# Contract: sets the global _ARGOPROXY_DATA_DIR (do NOT $()-capture -- D-005)
+# and NEVER fails the launch: every step degrades to a warn. Design record:
+# notes/impl_proxy_data_dir.md.
+_argoproxy_prepare_data_dir() {
+  local _h
+  _h="$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)"
+  _h="${_h%%.*}"
+  _h="$(printf '%s' "$_h" | tr -c 'A-Za-z0-9._-' '_' 2>/dev/null || true)"
+  [ -n "$_h" ] || _h="unknown-host"
+
+  local _base="${HOME}/.config/argoproxy"
+  local _cur="${_base}/data-${_h}"
+  local _prev="${_cur}.prev"
+  _ARGOPROXY_DATA_DIR="$_cur"
+
+  if [ -e "$_prev" ]; then
+    rm -rf -- "$_prev" 2>/dev/null || true
+    if [ -e "$_prev" ]; then
+      # Typically NFS .nfsXXXX files held open by a still-running old proxy.
+      warn "Could not fully remove ${_prev} (files still in use?); continuing."
+    fi
+  fi
+  if [ -e "$_cur" ]; then
+    if ! mv -- "$_cur" "$_prev" 2>/dev/null; then
+      warn "Could not move ${_cur} aside; deleting it instead."
+      rm -rf -- "$_cur" 2>/dev/null || true
+      if [ -e "$_cur" ]; then
+        warn "Could not delete ${_cur} either; argo-proxy will reuse it."
+      fi
+    fi
+  fi
+  mkdir -p -- "$_cur" 2>/dev/null || warn "Could not create ${_cur}; argo-proxy will try itself."
+
+  log "argo-proxy data dir: ${_cur} (previous session kept as ${_prev##*/})"
+  if [ -d "${_base}/data" ]; then
+    log "  Note: ${_base}/data is the old shared location, no longer used by"
+    log "  argo-anywhere. Remove it once no node runs an older argo-anywhere"
+    log "  or argo-proxy < 3.3.2 ('clean' removes it, or: rm -rf ${_base}/data)."
+  fi
+  return 0
+}
+
 mode_server() {
   # Resolve identity (username + port) from one of three sources, in order:
   #   1. env / canonical (set by 'client' over SSH; never missing in that
@@ -9004,6 +9066,36 @@ mode_server() {
   # CURRENT name still exists, treat it as housekeeping (the process
   # inside it died, e.g. from a previous 'stop') and clean up calmly
   # before starting fresh.
+  #
+  # PER-NODE DATA-DIR INVARIANT (see _argoproxy_prepare_data_dir): every
+  # launcher passes _ap_env via `env` ON THE LAUNCH LINE ITSELF. Env vars, not
+  # the --data-dir flag, so an argo-proxy that predates the flag ignores them
+  # instead of dying on an unknown option; and explicit on the line because a
+  # pre-existing tmux server would otherwise supply ITS environment, not ours.
+  _argoproxy_prepare_data_dir
+  local _ap_env
+  _ap_env=(
+    "DATA_DIR=${_ARGOPROXY_DATA_DIR}"
+    "REQUEST_LOG_SUCCESS_MAX=${REQUEST_LOG_SUCCESS_MAX:-1000}"
+    "REQUEST_LOG_ERROR_MAX=${REQUEST_LOG_ERROR_MAX:-500}"
+  )
+  # 3.3.0 / 3.3.1 have the database but no way to relocate it (DATA_DIR and
+  # --data-dir arrived together in 3.3.2). Capture-then-match: `| grep -q`
+  # under pipefail false-negatives when argo-proxy takes SIGPIPE.
+  local _ap_help _ap_ver
+  _ap_help="$("${venv}/bin/argo-proxy" serve --help 2>&1 || true)"
+  case "$_ap_help" in
+    *--data-dir*) ;;
+    *)
+      _ap_ver="$( { _extract_version "$("${venv}/bin/argo-proxy" --version 2>&1 || true)"; } || true )"
+      if [ -n "$_ap_ver" ] && _version_ge "$_ap_ver" "3.3.0"; then
+        warn "argo-proxy ${_ap_ver} keeps its database in the SHARED ~/.config/argoproxy/data"
+        warn "  and cannot be told otherwise (fixed in 3.3.2). Running it on two nodes"
+        warn "  at once corrupts that database ('database is locked' / 'malformed')."
+        warn "  Upgrade: $(basename "$0") update argoproxy"
+      fi
+      ;;
+  esac
   case "$launcher" in
     screen)
       if screen -ls 2>/dev/null | grep -q "\.${SCREEN_SESSION}\b"; then
@@ -9017,7 +9109,7 @@ mode_server() {
       # interpolated into the script string, so a $venv or $HOME containing
       # spaces (e.g. HOME=/home/Alice Smith) can't word-split -- the same
       # hazard the tmux branch below solves with printf %q.
-      screen -dmS "${SCREEN_SESSION}" \
+      screen -dmS "${SCREEN_SESSION}" env "${_ap_env[@]}" \
         sh -c '"$0" serve --port "$2" < /dev/null 2>&1 | tee -a "$1"' \
         "${venv}/bin/argo-proxy" "${_PROXY_LOG}" "${PROXY_PORT}"
       ;;
@@ -9035,12 +9127,12 @@ mode_server() {
       # would word-split. Use printf %q to shell-escape the binary path.
       # stdin from /dev/null + tee to the log: see the two notes above.
       local _tmux_cmd
-      _tmux_cmd="$(printf '%q' "${venv}/bin/argo-proxy") serve --port $(printf '%q' "${PROXY_PORT}") < /dev/null 2>&1 | tee -a $(printf '%q' "${_PROXY_LOG}")"
+      _tmux_cmd="env $(printf '%q ' "${_ap_env[@]}")$(printf '%q' "${venv}/bin/argo-proxy") serve --port $(printf '%q' "${PROXY_PORT}") < /dev/null 2>&1 | tee -a $(printf '%q' "${_PROXY_LOG}")"
       tmux new-session -d -s "${SCREEN_SESSION}" "$_tmux_cmd"
       ;;
     nohup)
       warn "Neither screen nor tmux available; falling back to nohup."
-      nohup "${venv}/bin/argo-proxy" serve --port "${PROXY_PORT}" > "${_PROXY_LOG}" 2>&1 < /dev/null &
+      nohup env "${_ap_env[@]}" "${venv}/bin/argo-proxy" serve --port "${PROXY_PORT}" > "${_PROXY_LOG}" 2>&1 < /dev/null &
       disown || true
       ;;
   esac
@@ -11986,6 +12078,7 @@ REMOTE  -  on ${cached_user}@${cached_node} $(jump_descr)
     ~/${REMOTE_LOG}                            (server bootstrap log)
     \$HOME/argovenv/                           (Python venv we created)
     ~/argoproxy.out                            (argo-proxy stdout/stderr log)
+    ~/.config/argoproxy/data, data-*           (argo-proxy dashboard database, all nodes)
     screen/tmux session named '${SCREEN_SESSION}'   (running argo-proxy)
   risky:
     ~/.config/argoproxy/config.yaml            (our writes vs argo-proxy's own state)
@@ -12178,6 +12271,12 @@ _kill_screen "$LEGACY_SCREEN_SESSION" "(legacy v1.x) "
 [ -f "$HOME/argoproxy.out" ] && _rm "$HOME/argoproxy.out"
 [ -d "$HOME/argovenv"      ] && _rm "$HOME/argovenv"
 [ -d "$HOME/agovenv"       ] && _rm "$HOME/agovenv"   # legacy v1.x venv
+# argo-proxy's SQLite dashboard data: per-node dirs (data-<host>[.prev], see
+# _argoproxy_prepare_data_dir) and the old shared location. $HOME is shared
+# across nodes, so this covers every node -- same as the venv line above.
+for d in "$HOME/.config/argoproxy/data" "$HOME"/.config/argoproxy/data-*; do
+  [ -d "$d" ] && _rm "$d"
+done
 
 # Risky: argo-proxy config
 case "$RC" in

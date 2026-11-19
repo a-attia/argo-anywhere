@@ -244,6 +244,7 @@ def test_devnull_redirect_actually_prevents_the_hang() -> None:
         .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
         .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
         .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+        .replace('"${_ap_env[@]}"', '"ARGO_TEST_ENV=1"')
     )
     assert fake_launch != real_launch, "substitution failed; launch line changed shape"
 
@@ -467,6 +468,7 @@ def test_log_survives_the_session_that_dies_from_the_redirect() -> None:
         .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
         .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
         .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+        .replace('"${_ap_env[@]}"', '"ARGO_TEST_ENV=1"')
     )
     assert "$FAKE" in fake_launch and "$LOGFILE" in fake_launch
 
@@ -559,6 +561,7 @@ def test_tmux_redirect_actually_prevents_the_hang() -> None:
         .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
         .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
         .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+        .replace('"${_ap_env[@]}"', '"ARGO_TEST_ENV=1"')
     )
     assert "$FAKE" in fake_launch and "$LOGFILE" in fake_launch, (
         "substitution failed; tmux launch changed shape"
@@ -640,6 +643,7 @@ def test_tmux_launch_survives_a_venv_path_with_spaces() -> None:
         .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
         .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
         .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+        .replace('"${_ap_env[@]}"', '"ARGO_TEST_ENV=1"')
     )
     harness = textwrap.dedent(
         """
@@ -714,6 +718,7 @@ def test_nohup_redirect_actually_prevents_the_hang(tmp_path: Path) -> None:
         .replace('"${venv}/bin/argo-proxy"', '"$FAKE"')
         .replace('"${_PROXY_LOG}"', '"$LOGFILE"')
         .replace('"${PROXY_PORT}"', '"$TESTPORT"')
+        .replace('"${_ap_env[@]}"', '"ARGO_TEST_ENV=1"')
     )
     script = textwrap.dedent(
         """
