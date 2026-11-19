@@ -7,7 +7,10 @@ Code, future aider/cursor/generic) on their laptop against
 node, regardless of whether the laptop is on the ANL network or not.
 **Audience**: ANL users with valid Argonne domain accounts who want AI
 coding assistance without copy-pasting between a browser and an editor.
-**Status**: **v3.6.0 released** (2026-10-26): models that `argo-proxy`
+**Status**: **v3.6.1 released** (2026-11-19): the **D-037** release —
+argo-proxy's SQLite database and log are per node and rotated per launch,
+fixing `database is locked` / `malformed` on a shared NFS `$HOME`. See
+CHANGELOG. Prior: **v3.6.0 released** (2026-10-26): models that `argo-proxy`
 lists but refuses to route (stale routing table on a long-running proxy) are
 repaired by mutating verbs via `POST /refresh` and flagged by `status` /
 `list-models`. See CHANGELOG. Prior: **v3.5.0 released** (2026-10-12): the
@@ -2704,6 +2707,46 @@ enumeration rule). The dashboard chip reads "old file name" and offers a
 users still on 1.x. Revisit if OpenCode starts warning on v1 syntax.
 
 Pinned by `tests/test_engine_opencode_v2_migration.py`.
+
+### D-037 — argo-proxy's runtime files are per node and rotated per launch (2026-11-19)
+
+**Status**: shipped in v3.6.1 (2026-11-19; engine `SCRIPT_VERSION` 2.7.1).
+Live-verified on two CELS nodes at once. Design record:
+[`notes/impl_proxy_data_dir.md`](notes/impl_proxy_data_dir.md).
+
+**Trigger.** Field report 2026-11-19: argo-proxy logged `database is
+locked` on one compute node and `database disk image is malformed` on
+another. Since 3.3.0 argo-proxy keeps a WAL-mode SQLite database next to
+its config. On CELS `$HOME` is one NFS mount for every node, so two nodes
+shared one SQLite file, which WAL cannot coordinate across hosts.
+`~/argoproxy.out` had the same defect: each launch truncated every other
+node's log.
+
+**Decision.**
+
+1. Each launch rotates `~/.config/argoproxy/data-<host>` to `.prev`,
+   deletes the older `.prev`, and starts argo-proxy on a fresh directory.
+   One previous generation is kept because a relaunch usually follows a
+   failure, and that session's error dumps are the evidence. Disk use is
+   bounded to about two sessions, which matters because upstream caps
+   error dumps only at a hard-coded 10,000 bodies and never shrinks the
+   file. A corrupt file is never reopened.
+2. The directory stays in `$HOME` (user quota), not on node-local disk,
+   which is small and shared by every user.
+3. The setting travels as env vars (`DATA_DIR`, request-log caps lowered
+   to 1000/500) on each launch line, not as `--data-dir`, so an older
+   argo-proxy is unaffected. argo-proxy 3.3.0/3.3.1 cannot relocate the
+   database and get a warning, not an automatic upgrade (D-022).
+4. The log is `~/argoproxy-<host>.out`. The log name and the data dir both
+   come from `_argoproxy_node_tag`.
+5. Launch never deletes the legacy shared `data/`, because another node's
+   older proxy may hold it open. `clean` removes it.
+
+**Not done, deliberately.** No integrity check on launch (rotation makes it
+unnecessary), and no upstream report filed yet.
+
+Pinned by `tests/test_engine_proxy_data_dir.py`; live check
+`scripts/live_test_data_dir.sh`.
 
 ## 8. Code-paper coupling
 

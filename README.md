@@ -222,14 +222,14 @@ Section 4 for the rationale.
 
 ## Status
 
-**v3.6.0 is the current release** — `pipx install argo-anywhere` installs it.
+**v3.6.1 is the current release** — `pipx install argo-anywhere` installs it.
 The installable unit is the Python package (Model A; design decisions
 D-026..D-030): the package owns the runtime, vendors the bash engine verbatim,
 and ships the web UI and native app alongside the CLI. Releases are published
 from CI via PyPI Trusted Publishing on their version tag.
 
 Per-release detail lives in [`CHANGELOG.md`](CHANGELOG.md); the design decision
-behind each change (D-001..D-036) lives in [`PLAN.md`](PLAN.md). This section
+behind each change (D-001..D-037) lives in [`PLAN.md`](PLAN.md). This section
 names the current release and points at those two documents rather than
 restating them — it drifted four releases behind by trying to be a changelog
 before one existed.
@@ -1024,7 +1024,7 @@ run `argo-anywhere help`.
 | [`docs/TESTING.md`](docs/TESTING.md) | Maintainers/contributors: live-verify the `client` path before tagging. |
 | [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) | The fix trail across v2.0 → v2.2 (43 findings; 42 closed). |
 | [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md) | Comparative audit vs. `argo-shim`, the Phase-C-rejection rationale, slide-ready summary. |
-| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-036 + roadmap. |
+| [`PLAN.md`](PLAN.md) | Maintainers/co-authors: plan-of-record + design decisions D-001..D-037 + roadmap. |
 | [`AGENTS.md`](AGENTS.md) | AI coding tools working on this codebase: conventions + skill loading. |
 
 ## Upgrading
@@ -1109,7 +1109,7 @@ Key project files:
 - [`AGENTS.md`](AGENTS.md) — canonical project conventions for AI coding tools.
   [`CLAUDE.md`](CLAUDE.md) is a symlink to it for Claude Code's discovery.
 - [`PLAN.md`](PLAN.md) — plan-of-record (scope, architecture, milestones,
-  design decisions D-001..D-036).
+  design decisions D-001..D-037).
 - [`docs/AUDIT_2026-05-12.md`](docs/AUDIT_2026-05-12.md) — active fresh-eyes
   audit (43 findings; 42 closed). New closures append a STATUS block in place.
 - [`docs/AUDIT_2026-05-18_argo-shim-comparison.md`](docs/AUDIT_2026-05-18_argo-shim-comparison.md)

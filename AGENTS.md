@@ -70,7 +70,12 @@ loading set for normal sessions.
   plus a loopback-only FastAPI web UI + pywebview native app. The
   engine stays a single self-contained `.sh` (D-001, engine-only);
   the *project* is no longer single-file (D-026).
-- **Status**: **v3.6.0 released 2026-10-26** — routing-table freshness:
+- **Status**: **v3.6.1 released 2026-11-19** — the **D-037** release:
+  argo-proxy's SQLite database and its log are per node and rotated per
+  launch, so nodes sharing an NFS `$HOME` no longer lock or corrupt each
+  other's files (see "Per-node data-dir invariant"). Engine
+  `SCRIPT_VERSION` → `2.7.1`.
+  Prior: **v3.6.0 released 2026-10-26** — routing-table freshness:
   mutating verbs `POST /refresh` so models `argo-proxy` lists are also
   routable; `status` / `list-models` detect and flag listed-but-unroutable
   models (see "Routing-table freshness invariant"). Engine
@@ -320,7 +325,7 @@ loading set for normal sessions.
 - **Primary downstream consumers**: ANL users running AI coding CLI
   tools (OpenCode, Claude Code, aider today; codex/cursor planned)
   against the ANL Argo gateway from any laptop on any network
-- **Current release**: **v3.6.0** (2026-10-26). Release
+- **Current release**: **v3.6.1** (2026-11-19). Release
   history: [`CHANGELOG.md`](CHANGELOG.md) — the single source of
   truth for "what shipped when"; do not restate it here.
 - **Repo**: <https://github.com/a-attia/argo-anywhere>
@@ -334,7 +339,7 @@ Section 6.4):
 |:----|:---------|:-------------|
 | [`README.md`](README.md) | New + returning humans | Project overview; quick start |
 | [`CHANGELOG.md`](CHANGELOG.md) | Users upgrading; maintainer | **Single source of truth for "what shipped when"** (per-release, since v3.1.0). Re-ground the status claims in `README.md` / `PLAN.md` / this file at tag time; put the narrative here. |
-| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-036 |
+| [`PLAN.md`](PLAN.md) | Maintainer + co-authors | Plan-of-record; design decisions D-001..D-037 |
 | [`docs/UPGRADING.md`](docs/UPGRADING.md) | Anyone upgrading | Routed install/migrate paths per starting point (~170 lines). Current-state only; per-release detail lives in `CHANGELOG.md`. |
 | [`docs/UPGRADING_HISTORY.md`](docs/UPGRADING_HISTORY.md) | Maintainers; users on very old installs | Archived v1.x → v2.x → v3.0.0 per-release behaviour changes, split out of `UPGRADING.md` 2026-08-25. **Version-pinned — do not cite as current state.** |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Security-conscious users + ANL admins | Threat model, CSPO defenses, privacy posture |

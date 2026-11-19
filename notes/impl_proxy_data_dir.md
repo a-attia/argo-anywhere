@@ -1,11 +1,14 @@
 # argo-proxy's SQLite database on a shared `$HOME`: per-node, per-launch data dir
 
-**Status**: implemented on `main` (2026-11-19), unreleased.
+**Status**: **shipped in v3.6.1** (2026-11-19) as **D-037**.
 **Live-verified 2026-11-19** on `compute-386-01` + `compute-386-02`
 concurrently (argo-proxy 3.3.3). `scripts/live_test_data_dir.sh --rotate`
 reported ALL CHECKS PASSED: each process had its own `DATA_DIR`, each held
 its own `gateway.db` open, integrity `ok` on both, no lock/malformed errors,
-and rotation kept exactly one previous generation. Would earn **D-037**.
+and rotation kept exactly one previous generation. That run covered the
+data-dir change. The per-node log (§4a) came after it: rerun the script
+to cover it (it now checks each node's own log and fails if it is missing).
+
 **Trigger**: field report 2026-11-19 (`error_report.txt`). On compute-01
 argo-proxy logged `Failed to flush metrics: database is locked`; on
 compute-02 it logged `Failed to flush metrics: database disk image is
