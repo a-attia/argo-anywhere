@@ -34,6 +34,11 @@ decisions D-001 through D-030) and the tag messages on the repo.
   recommending `update argoproxy`. `clean` now also removes these
   directories and the old shared `data/`. Design record:
   [`notes/impl_proxy_data_dir.md`](notes/impl_proxy_data_dir.md).
+- **argo-proxy's log is now per node: `~/argoproxy-<host>.out`.** It was
+  `~/argoproxy.out`, one file shared by every node on a shared `$HOME`, so
+  launching on a second node truncated the first node's log, and the
+  surviving log mixed output from both nodes. `clean` removes the old name
+  too.
 
 ---
 

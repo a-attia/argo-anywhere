@@ -30,7 +30,7 @@ below.
 - **Privacy/correctness defaults** users should know about:
   - `verbose: false` is the default in the on-node argo-proxy config
     (closes a prompt-on-disk leak; v2.0 P2 fix). With `verbose: true`
-    prompt bodies land in `~/argoproxy.out` on the node.
+    prompt bodies land in `~/argoproxy-<host>.out` on the node.
   - Claude Code default scope is **hybrid**: project when
     `~/.claude.json` exists (preserving a personal subscription),
     global otherwise. A fresh install with no OAuth state writes the
@@ -110,10 +110,10 @@ have been working.
 |:---------|:---------|:------------|
 | `~/.config/argoproxy/config.yaml` | argo-proxy config: ANL username, port, host, `verbose:` setting, `argo_url`, etc. | low (PII) |
 | `~/.argo-anywhere.server.log` | Output of the script's bootstrap + `mode_server` invocation (which python, which venv, install messages). **Bootstrap output only** — not argo-proxy's. | low (operational; no prompt content) |
-| `~/argoproxy.out` | **argo-proxy's own stdout**, captured by all three launchers (`screen` / `tmux` / `nohup`) via `tee`. If `verbose: true`: full prompt + response bodies. If `verbose: false` (the default): structured access logs without bodies. Truncated at each launch. | **HIGH (with verbose: true); LOW (with verbose: false)** |
+| `~/argoproxy-<host>.out` (one per node; `~/argoproxy.out` before 2026-11-19) | **argo-proxy's own stdout**, captured by all three launchers (`screen` / `tmux` / `nohup`) via `tee`. If `verbose: true`: full prompt + response bodies. If `verbose: false` (the default): structured access logs without bodies. Truncated at each launch. | **HIGH (with verbose: true); LOW (with verbose: false)** |
 | `~/argovenv/` | Python venv with argo-proxy installed; no user data. | none |
 
-The big one is `~/argoproxy.out`. Pre-v2.0 the script defaulted to
+The big one is `~/argoproxy-<host>.out`. Pre-v2.0 the script defaulted to
 `verbose: true`, meaning every prompt and response was written to
 the on-node log file. The file is owned by the user (typical
 `umask 022` produces 0644), readable by anyone with SSH access to
@@ -394,7 +394,7 @@ accepted, local-process/CSRF residual documented, loopback-token/Origin
 check queued as hardening. Revised 2026-08-25 (review pass against
 v3.4.0): corrected the Claude Code default scope (hybrid, not project —
 a fresh install writes the global file); corrected the on-node log
-inventory (argo-proxy's stdout goes to `~/argoproxy.out`, not the
+inventory (argo-proxy's stdout goes to `~/argoproxy-<host>.out`, not the
 bootstrap log, whose name was also a v2-era spelling); added the missing
 laptop-side rows (aider config carrying the ANL username, install
 manifest, port cache, web UI MRU) and withdrew the "web UI keeps no data

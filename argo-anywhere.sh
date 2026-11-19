@@ -8561,12 +8561,23 @@ _dump_session_output_tmux() {
 # Contract: sets the global _ARGOPROXY_DATA_DIR (do NOT $()-capture -- D-005)
 # and NEVER fails the launch: every step degrades to a warn. Design record:
 # notes/impl_proxy_data_dir.md.
-_argoproxy_prepare_data_dir() {
+#
+# _argoproxy_node_tag: print this node's short hostname, sanitized to
+# [A-Za-z0-9._-] ("unknown-host" if none). The one name for every per-node
+# file in the shared $HOME (data dir, argo-proxy log). Pure printer, so
+# $()-capture is fine here.
+_argoproxy_node_tag() {
   local _h
   _h="$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)"
   _h="${_h%%.*}"
   _h="$(printf '%s' "$_h" | tr -c 'A-Za-z0-9._-' '_' 2>/dev/null || true)"
   [ -n "$_h" ] || _h="unknown-host"
+  printf '%s\n' "$_h"
+}
+
+_argoproxy_prepare_data_dir() {
+  local _h
+  _h="$(_argoproxy_node_tag)"
 
   local _base="${HOME}/.config/argoproxy"
   local _cur="${_base}/data-${_h}"
@@ -8580,8 +8591,11 @@ _argoproxy_prepare_data_dir() {
       warn "Could not fully remove ${_prev} (files still in use?); continuing."
     fi
   fi
+  local _rotated=0
   if [ -e "$_cur" ]; then
-    if ! mv -- "$_cur" "$_prev" 2>/dev/null; then
+    if mv -- "$_cur" "$_prev" 2>/dev/null; then
+      _rotated=1
+    else
       warn "Could not move ${_cur} aside; deleting it instead."
       rm -rf -- "$_cur" 2>/dev/null || true
       if [ -e "$_cur" ]; then
@@ -8591,7 +8605,11 @@ _argoproxy_prepare_data_dir() {
   fi
   mkdir -p -- "$_cur" 2>/dev/null || warn "Could not create ${_cur}; argo-proxy will try itself."
 
-  log "argo-proxy data dir: ${_cur} (previous session kept as ${_prev##*/})"
+  if [ "$_rotated" = 1 ]; then
+    log "argo-proxy data dir: ${_cur} (previous session moved to ${_prev##*/})"
+  else
+    log "argo-proxy data dir: ${_cur} (fresh; no previous session to keep)"
+  fi
   if [ -d "${_base}/data" ]; then
     log "  Note: ${_base}/data is the old shared location, no longer used by"
     log "  argo-anywhere. Remove it once no node runs an older argo-anywhere"
@@ -8915,12 +8933,14 @@ mode_server() {
   fi
 
   # Single log path for ALL launchers (see LOG-DURABILITY COROLLARY below).
-  # Historically only the nohup branch wrote a file, at this same path, so
-  # keeping the name means `clean`'s existing removal entry and the docs that
-  # mention it stay correct. Truncated per launch: this is a diagnostic for
-  # THIS start attempt, and an ever-growing append would bury the current
-  # failure under old ones.
-  local _PROXY_LOG="${HOME}/argoproxy.out"
+  # Truncated per launch: this is a diagnostic for THIS start attempt, and an
+  # ever-growing append would bury the current failure under old ones.
+  #
+  # Per NODE (2026-11-19): it was ~/argoproxy.out, but $HOME is shared NFS on
+  # CELS, so every node teed into one file and each launch truncated the other
+  # nodes' logs -- the same shared-$HOME defect as the SQLite database (see
+  # PER-NODE DATA-DIR INVARIANT). The legacy name is still removed by `clean`.
+  local _PROXY_LOG="${HOME}/argoproxy-$(_argoproxy_node_tag).out"
   : > "$_PROXY_LOG" 2>/dev/null || true
 
   # Resolve the venv path for the launch commands below. This USED to be
@@ -12077,7 +12097,7 @@ REMOTE  -  on ${cached_user}@${cached_node} $(jump_descr)
     ~/${REMOTE_SELF}                           (pushed copy of this script)
     ~/${REMOTE_LOG}                            (server bootstrap log)
     \$HOME/argovenv/                           (Python venv we created)
-    ~/argoproxy.out                            (argo-proxy stdout/stderr log)
+    ~/argoproxy-<host>.out                     (argo-proxy stdout/stderr log, per node)
     ~/.config/argoproxy/data, data-*           (argo-proxy dashboard database, all nodes)
     screen/tmux session named '${SCREEN_SESSION}'   (running argo-proxy)
   risky:
@@ -12268,7 +12288,10 @@ _kill_screen "$LEGACY_SCREEN_SESSION" "(legacy v1.x) "
 [ -f "$HOME/$LEGACY_REMOTE_LOG"     ] && _rm "$HOME/$LEGACY_REMOTE_LOG"
 [ -f "$HOME/$LEGACY_REMOTE_SELF_V2" ] && _rm "$HOME/$LEGACY_REMOTE_SELF_V2"
 [ -f "$HOME/$LEGACY_REMOTE_LOG_V2"  ] && _rm "$HOME/$LEGACY_REMOTE_LOG_V2"
-[ -f "$HOME/argoproxy.out" ] && _rm "$HOME/argoproxy.out"
+[ -f "$HOME/argoproxy.out" ] && _rm "$HOME/argoproxy.out"   # pre-2026-11-19 shared name
+for f in "$HOME"/argoproxy-*.out; do                         # per-node logs, all nodes
+  [ -f "$f" ] && _rm "$f"
+done
 [ -d "$HOME/argovenv"      ] && _rm "$HOME/argovenv"
 [ -d "$HOME/agovenv"       ] && _rm "$HOME/agovenv"   # legacy v1.x venv
 # argo-proxy's SQLite dashboard data: per-node dirs (data-<host>[.prev], see

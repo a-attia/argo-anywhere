@@ -667,7 +667,7 @@ Two rules for anyone touching that launch block:
   path into the script string — a `$venv` containing spaces would
   otherwise word-split (the hazard the `tmux` branch solves with
   `printf %q`).
-- **All three launchers also `tee` to `$_PROXY_LOG` (`~/argoproxy.out`),
+- **All three launchers also `tee` to `$_PROXY_LOG` (`~/argoproxy-<host>.out`; per node since 2026-11-19, it was one shared `~/argoproxy.out`),
   and the timeout branch reads that FIRST.** This is the
   `LOG-DURABILITY COROLLARY` and it is load-bearing: the stdin redirect
   makes a prompting argo-proxy die in ~1s, so `screen`/`tmux` reap the
@@ -853,7 +853,7 @@ schema is unchanged. Rules:
 - The `status` exit code is unchanged (it is a health check; the proxy
   *is* healthy).
 - Each probe leaves one `WARNING ... passing through as-is` line in
-  `~/argoproxy.out`. That is expected.
+  `~/argoproxy-<host>.out`. That is expected.
 
 Pinned by `tests/test_engine_routing_probe.py`.
 
@@ -876,6 +876,9 @@ assumption again, in a second file.
   via `env` on **each** launch line. Do not switch to `--data-dir`, because
   an older argo-proxy dies on an unknown flag. Do not rely on inherited
   env, because a pre-existing tmux server supplies its own.
+- The argo-proxy log is per node too (`~/argoproxy-<host>.out`): the shared
+  name made each launch truncate every other node's log. Both names derive
+  from `_argoproxy_node_tag`; never compute the node name a second way.
 - Launch **never deletes** the legacy shared `data/` (another node may hold
   it open → ESTALE). It only reports it. Removal is `clean`'s job.
 - 3.3.0 / 3.3.1 cannot relocate the database: warn, don't auto-upgrade.

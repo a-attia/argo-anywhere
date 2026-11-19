@@ -131,7 +131,16 @@ descriptors follow the inode, so that process writes into `.prev`.
 Deleting a `.prev` still held open leaves NFS `.nfsXXXX` files and `rm`
 fails. That case is reported with a `warn`, and the launch continues.
 
-## 5. Live verification still owed
+## 4a. Follow-up: the argo-proxy log had the same defect
+
+`~/argoproxy.out` was a third shared-`$HOME` file. Every node teed into it,
+and each launch truncated it, so starting node B erased node A's
+diagnostics, and from then on the file mixed both nodes' output. It is now
+`~/argoproxy-<host>.out`. Its name and the data dir both come from one
+helper, `_argoproxy_node_tag`, so the two can never disagree about which
+node they belong to. `clean` removes the legacy name too.
+
+## 5. Live verification
 
 Automated by `scripts/live_test_data_dir.sh NODE_A:PORT_A NODE_B:PORT_B
 [--rotate]`. The script assumes both channels are already up, and it rides
@@ -142,7 +151,7 @@ both proxies up:
 
 1. `ls ~/.config/argoproxy/` shows `data-<nodeA>` and `data-<nodeB>`, each
    with its own `gateway.db`.
-2. `~/argoproxy.out` on both nodes contains no `Failed to flush metrics`
+2. Each node's `~/argoproxy-<host>.out` contains no `Failed to flush metrics`
    after several minutes of traffic.
 3. Relaunching on node A produces `data-<nodeA>.prev`, holding the old
    database, and a fresh `data-<nodeA>`.

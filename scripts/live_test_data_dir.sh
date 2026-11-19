@@ -97,8 +97,9 @@ PY
     echo "${which}_rows=none"
   fi
 done
-n="$(grep -c 'flush metrics\|database is locked\|malformed' "$HOME/argoproxy.out" 2>/dev/null || true)"
+n="$(grep -c 'flush metrics\|database is locked\|malformed' "$HOME/argoproxy-$host.out" 2>/dev/null || true)"
 echo "log_errors=${n:-0}"
+[ -s "$HOME/argoproxy-$host.out" ] && echo "log_exists=1" || echo "log_exists=0"
 echo "remote_sha=$( { sha256sum "$HOME/.argo-anywhere.sh" 2>/dev/null | awk '{print $1}'; } || true )"
 EOS
 
@@ -106,7 +107,7 @@ probe() {  # probe NODE PORT -> sets P_<key> globals
   local out line k v
   out="$(rsh "$1" bash -s -- "$2" <<<"$REMOTE_PROBE" 2>/dev/null)" || true
   for k in host cur pid env_data_dir env_succ_max open_db dirs cur_integrity cur_rows \
-           cur_error prev_integrity prev_rows prev_error log_errors remote_sha; do
+           cur_error prev_integrity prev_rows prev_error log_errors log_exists remote_sha; do
     eval "P_$k=''"
   done
   while IFS= read -r line; do
@@ -172,6 +173,12 @@ check_node() {  # check_node NODE PORT MIN_ROWS
     esac
   done
   [ -z "$bad" ] && pass "no stray data dirs for this node" || fail "unexpected dirs:$bad"
+  [ "$P_log_exists" = 1 ] \
+    && pass "per-node log ~/argoproxy-$P_host.out exists and is non-empty" \
+    || fail "per-node log ~/argoproxy-$P_host.out missing or empty"
+  [ "${P_log_errors:-0}" = 0 ] \
+    && pass "no lock/malformed/flush errors in ~/argoproxy-$P_host.out" \
+    || fail "${P_log_errors} lock/malformed/flush error line(s) in ~/argoproxy-$P_host.out"
 }
 
 # --------------------------------------------------------------------------
@@ -221,9 +228,6 @@ if [ ${#TARGETS[@]} -ge 2 ]; then
   [ "$1" != "$2" ] && pass "nodes resolve to different dirs (data-$1, data-$2)" \
                    || fail "both targets are the same host ($1)"
 fi
-[ "${P_log_errors:-0}" = 0 ] \
-  && pass "no lock/malformed/flush errors in the shared ~/argoproxy.out" \
-  || fail "${P_log_errors} lock/malformed/flush error line(s) in ~/argoproxy.out"
 
 if [ "$ROTATE" = 1 ]; then
   t="${TARGETS[0]}"; node="${t%%:*}"; port="${t##*:}"

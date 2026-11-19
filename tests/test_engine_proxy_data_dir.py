@@ -56,6 +56,8 @@ def _run_prepare(
         f'PATH="{bindir}:$PATH"\n'
         "log()  { printf 'LOG %s\\n' \"$*\"; }\n"
         "warn() { printf 'WARN %s\\n' \"$*\"; }\n"
+        + _function_body(_engine_source(), "_argoproxy_node_tag")
+        + "\n"
         + _function_body(_engine_source(), "_argoproxy_prepare_data_dir")
         + "\n"
         + pre
@@ -225,3 +227,38 @@ def test_tmux_launch_delivers_env_to_the_child(tmp_path: Path) -> None:
 def test_clean_removes_the_data_dirs() -> None:
     src = _engine_source()
     assert 'for d in "$HOME/.config/argoproxy/data" "$HOME"/.config/argoproxy/data-*; do' in src
+
+
+# --------------------------------------------------------------------------
+# Log wording + per-node argo-proxy log (same shared-$HOME defect, third file)
+# --------------------------------------------------------------------------
+
+
+def test_first_launch_does_not_claim_a_previous_session(tmp_path: Path) -> None:
+    first = _run_prepare(tmp_path)
+    assert "no previous session" in first.stdout
+    assert "moved to" not in first.stdout
+    second = _run_prepare(tmp_path)
+    assert "previous session moved to data-compute-01.prev" in second.stdout
+
+
+def test_proxy_log_is_per_node() -> None:
+    """``~/argoproxy.out`` was one file for every node on a shared $HOME, and
+    each launch truncated it, wiping the other nodes' diagnostics."""
+    body = _function_body(_engine_source(), "mode_server")
+    m = re.search(r"^\s*local _PROXY_LOG=(.*)$", body, re.MULTILINE)
+    assert m, "_PROXY_LOG definition not found"
+    assert m.group(1) == '"${HOME}/argoproxy-$(_argoproxy_node_tag).out"'
+
+
+def test_data_dir_and_log_share_one_node_name() -> None:
+    body = _function_body(_engine_source(), "_argoproxy_prepare_data_dir")
+    assert '_h="$(_argoproxy_node_tag)"' in body, (
+        "data dir and log must derive the node name from the same helper"
+    )
+
+
+def test_clean_removes_per_node_and_legacy_logs() -> None:
+    src = _engine_source()
+    assert '[ -f "$HOME/argoproxy.out" ] && _rm "$HOME/argoproxy.out"' in src
+    assert 'for f in "$HOME"/argoproxy-*.out; do' in src
